@@ -5,6 +5,7 @@ use crate::domain::playlist_video::PlaylistVideo;
 use crate::domain::playlist_video::{VideoAddedToPlaylist, VideoRemovedFromPlaylist};
 use crate::domain::services::{
     DesiredState, InternalVideoReconciler, InternalVideoReconcilerApi, MembershipDelta,
+    ShowFileWriter, ShowFileWriterApi,
 };
 use crate::domain::task::Task;
 use crate::domain::video::{Video, VideoId, VideoRecordId, VideoStatus};
@@ -35,6 +36,7 @@ pub struct PlaylistVideoReconciler {
     event_publisher: Arc<dyn EventPublisher>,
     task_repository: Arc<dyn TaskRepository>,
     internal_video_reconciler: Arc<InternalVideoReconciler>,
+    show_file_writer: Arc<ShowFileWriter>,
     clock: Arc<dyn Clock>,
     reconcile_interval_seconds: i64,
 }
@@ -49,6 +51,7 @@ impl PlaylistVideoReconciler {
         event_publisher: Arc<dyn EventPublisher>,
         task_repository: Arc<dyn TaskRepository>,
         internal_video_reconciler: Arc<InternalVideoReconciler>,
+        show_file_writer: Arc<ShowFileWriter>,
         clock: Arc<dyn Clock>,
         reconcile_interval_seconds: i64,
     ) -> Self {
@@ -60,6 +63,7 @@ impl PlaylistVideoReconciler {
             event_publisher,
             task_repository,
             internal_video_reconciler,
+            show_file_writer,
             clock,
             reconcile_interval_seconds,
         }
@@ -140,6 +144,11 @@ impl PlaylistVideoReconciler {
         let _span = info_span!("reconcile_playlist", playlist_id = %playlist.id).entered();
         info!(playlist_id = %playlist.id, kind = %playlist.kind, "reconciling playlist");
 
+        // Best effort: a show file that can't be written must not stop the
+        // source from syncing; the next pass tries again.
+        if let Err(e) = self.show_file_writer.write_playlist_show(playlist) {
+            warn!(playlist_id = %playlist.id, error = %e, "failed to write show files");
+        }
         let delta = self.sync_membership_with_youtube(playlist, on_listing_failure)?;
         let desired = self.desired_state(playlist)?;
         self.internal_video_reconciler.reconcile(&desired, &delta)
@@ -174,22 +183,18 @@ impl PlaylistVideoReconciler {
             })
             .collect();
         let mut delta = MembershipDelta::default();
-        for current in &current_videos {
+        let mut numbering = playlist.clone();
+        for current in Self::in_position_order(&current_videos) {
             match known_videos.get(&current.video_id) {
                 None => {
                     let youtube_id = VideoId::new(&current.video_id)?;
-                    let added = self.add_video(playlist, youtube_id, current, now)?;
+                    let (numbered, added) = self.add_video(numbering, youtube_id, current, now)?;
+                    numbering = numbered;
                     delta.added_ids.push(added.1.id.clone());
                     known_videos.insert(current.video_id.clone(), added);
                 }
                 Some((existing, video)) => {
-                    if let Some(previous_title) =
-                        self.refresh_known_video(existing, video, current, now)?
-                    {
-                        delta
-                            .previous_titles
-                            .insert(video.id.clone(), previous_title);
-                    }
+                    self.refresh_known_video(existing, video, current, now)?
                 }
             }
         }
@@ -256,24 +261,32 @@ impl PlaylistVideoReconciler {
             .collect())
     }
 
-    /// Stores a newly seen video as `PENDING` at its playlist position and
-    /// announces it, which is what triggers its download and thumbnail.
+    /// Stores a newly seen video as `PENDING` at its playlist position, under
+    /// the playlist's next episode number, and announces it, which is what
+    /// triggers its download and thumbnail. Returns the playlist with that
+    /// number recorded as its last.
     fn add_video(
         &self,
-        playlist: &Playlist,
+        playlist: Playlist,
         youtube_id: VideoId,
         current: &YoutubePlaylistItem,
         now: DateTime<Utc>,
-    ) -> anyhow::Result<(PlaylistVideo, Video)> {
-        let video = Video::create(youtube_id, current.title.clone(), now);
+    ) -> anyhow::Result<(Playlist, (PlaylistVideo, Video))> {
+        let number = playlist.next_episode_number()?;
+        let video = Video::create(youtube_id, current.title.clone(), now)
+            .with_episode_number(number.into(), now);
         self.video_repository.save(&video)?;
         let playlist_video =
             PlaylistVideo::create(playlist.id.clone(), video.id.clone(), current.position, now);
         self.playlist_video_repository.save(&playlist_video)?;
+        self.playlist_repository
+            .record_last_episode(&playlist.id, number)?;
+        let playlist = playlist.with_last_episode(number);
         info!(
             playlist_id = %playlist.id,
             video_id = %video.youtube_id,
             title = %current.title,
+            episode = number.episode(),
             "added video to playlist"
         );
         self.event_publisher
@@ -282,20 +295,18 @@ impl PlaylistVideoReconciler {
                 video_id: video.id.as_str().to_string(),
             }))?;
 
-        Ok((playlist_video, video))
+        Ok((playlist, (playlist_video, video)))
     }
 
     /// Follows a known video's title and playlist position on YouTube.
-    /// Returns the video's previous title when it was renamed.
     fn refresh_known_video(
         &self,
         existing: &PlaylistVideo,
         video: &Video,
         current: &YoutubePlaylistItem,
         now: DateTime<Utc>,
-    ) -> anyhow::Result<Option<String>> {
-        let renamed = video.title != current.title;
-        if renamed {
+    ) -> anyhow::Result<()> {
+        if video.title != current.title {
             self.video_repository
                 .update_title(&video.id, &current.title, now)?;
         }
@@ -307,7 +318,7 @@ impl PlaylistVideoReconciler {
             })?;
         }
 
-        Ok(renamed.then(|| video.title.clone()))
+        Ok(())
     }
 
     /// Deletes every stored video whose YouTube id is not in
@@ -344,6 +355,14 @@ impl PlaylistVideoReconciler {
                         },
                     ))
             })
+    }
+
+    /// The listed items by playlist position, so new videos are numbered in
+    /// playlist order.
+    fn in_position_order(items: &[YoutubePlaylistItem]) -> Vec<&YoutubePlaylistItem> {
+        let mut ordered: Vec<&YoutubePlaylistItem> = items.iter().collect();
+        ordered.sort_by_key(|item| item.position);
+        ordered
     }
 
     /// What the database says the playlist's folder should contain.

@@ -1,15 +1,15 @@
 use crate::domain::shared::Quality;
-use crate::domain::video::{PlaybackPosition, Video, VideoStatus};
+use crate::domain::video::{
+    ChannelEpisodeNumber, EpisodeNumber, PlaybackPosition, Video, VideoStatus,
+};
 use crate::domain::video::{VideoId, VideoRecordId};
 use crate::infrastructure::shared::sqlite_connection::Database;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-#[cfg(test)]
-use rusqlite::Connection;
-use rusqlite::{OptionalExtension, Row, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use std::collections::HashMap;
 
-const VIDEO_COLUMNS: &str = "id, youtube_id, title, status, quality, filename, thumbnail_filename, duration_seconds, created_at, updated_at, watched_at, playback_position_seconds, synced_at, last_errored_at, last_played_at";
+const VIDEO_COLUMNS: &str = "id, youtube_id, title, status, quality, filename, thumbnail_filename, duration_seconds, created_at, updated_at, watched_at, playback_position_seconds, synced_at, last_errored_at, last_played_at, season, episode";
 
 /// A `videos` row as read, before its values are parsed into a `Video`.
 struct VideoRow {
@@ -28,6 +28,8 @@ struct VideoRow {
     synced_at: Option<String>,
     last_errored_at: Option<String>,
     last_played_at: Option<String>,
+    season: Option<i32>,
+    episode: Option<u32>,
 }
 
 pub trait VideoRepository: Send + Sync {
@@ -62,6 +64,25 @@ pub trait VideoRepository: Send + Sync {
     fn delete(&self, id: &VideoRecordId) -> anyhow::Result<()>;
     /// Every stored copy of a YouTube video, across all playlists/channels.
     fn find_by_youtube_id(&self, youtube_id: &VideoId) -> anyhow::Result<Vec<Video>>;
+    /// The video's episode number: the one already recorded, if any, else the
+    /// next free same-day index among the videos of the same channel
+    /// published on `published_at`'s day, recorded in one write. Fails for an
+    /// unnumbered video in no channel: a playlist video is numbered when it is
+    /// added to its playlist, never by publish date.
+    fn assign_episode_number(
+        &self,
+        id: &VideoRecordId,
+        published_at: DateTime<Utc>,
+    ) -> anyhow::Result<EpisodeNumber>;
+    /// Every `Downloaded` video, across all playlists and channels.
+    fn list_downloaded(&self) -> anyhow::Result<Vec<Video>>;
+    /// The number `assign_episode_number` would return right now, without
+    /// recording it.
+    fn next_episode_number(
+        &self,
+        id: &VideoRecordId,
+        published_at: DateTime<Utc>,
+    ) -> anyhow::Result<EpisodeNumber>;
 }
 
 pub struct SqliteVideoRepository {
@@ -93,8 +114,8 @@ impl VideoRepository for SqliteVideoRepository {
     fn save(&self, video: &Video) -> anyhow::Result<()> {
         let conn = self.db.write()?;
         conn.execute(
-            "INSERT INTO videos (id, youtube_id, title, status, quality, filename, thumbnail_filename, duration_seconds, created_at, updated_at, watched_at, playback_position_seconds, synced_at, last_errored_at, last_played_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            "INSERT INTO videos (id, youtube_id, title, status, quality, filename, thumbnail_filename, duration_seconds, created_at, updated_at, watched_at, playback_position_seconds, synced_at, last_errored_at, last_played_at, season, episode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT (id) DO UPDATE SET
                 youtube_id = excluded.youtube_id,
                 title = excluded.title,
@@ -109,7 +130,9 @@ impl VideoRepository for SqliteVideoRepository {
                 playback_position_seconds = excluded.playback_position_seconds,
                 synced_at = excluded.synced_at,
                 last_errored_at = excluded.last_errored_at,
-                last_played_at = excluded.last_played_at",
+                last_played_at = excluded.last_played_at,
+                season = excluded.season,
+                episode = excluded.episode",
             params![
                 video.id.as_str(),
                 video.youtube_id.as_str(),
@@ -126,6 +149,8 @@ impl VideoRepository for SqliteVideoRepository {
                 video.synced_at.map(|s| s.to_rfc3339()),
                 video.last_errored_at.map(|e| e.to_rfc3339()),
                 video.last_played_at.map(|p| p.to_rfc3339()),
+                video.episode_number.map(|n| n.season()),
+                video.episode_number.map(|n| n.episode()),
             ],
         )
         .inspect_err(|e| {
@@ -177,7 +202,7 @@ impl VideoRepository for SqliteVideoRepository {
     fn update(&self, video: &Video) -> anyhow::Result<()> {
         let conn = self.db.write()?;
         conn.execute(
-            "UPDATE videos SET youtube_id = ?2, title = ?3, status = ?4, quality = ?5, filename = ?6, thumbnail_filename = ?7, duration_seconds = ?8, updated_at = ?9, watched_at = ?10, playback_position_seconds = ?11, synced_at = ?12, last_errored_at = ?13, last_played_at = ?14
+            "UPDATE videos SET youtube_id = ?2, title = ?3, status = ?4, quality = ?5, filename = ?6, thumbnail_filename = ?7, duration_seconds = ?8, updated_at = ?9, watched_at = ?10, playback_position_seconds = ?11, synced_at = ?12, last_errored_at = ?13, last_played_at = ?14, season = ?15, episode = ?16
              WHERE id = ?1",
             params![
                 video.id.as_str(),
@@ -194,6 +219,8 @@ impl VideoRepository for SqliteVideoRepository {
                 video.synced_at.map(|s| s.to_rfc3339()),
                 video.last_errored_at.map(|e| e.to_rfc3339()),
                 video.last_played_at.map(|p| p.to_rfc3339()),
+                video.episode_number.map(|n| n.season()),
+                video.episode_number.map(|n| n.episode()),
             ],
         )
         .inspect_err(|e| {
@@ -264,9 +291,127 @@ impl VideoRepository for SqliteVideoRepository {
             .map(Self::row_to_video)
             .collect()
     }
+
+    fn assign_episode_number(
+        &self,
+        id: &VideoRecordId,
+        published_at: DateTime<Utc>,
+    ) -> anyhow::Result<EpisodeNumber> {
+        let conn = self.db.write()?;
+        if let Some(recorded) = Self::recorded_episode_number(&conn, id)? {
+            return Ok(recorded);
+        }
+        let number = Self::next_free_episode_number(&conn, id, published_at)?;
+        conn.execute(
+            "UPDATE videos SET season = ?2, episode = ?3 WHERE id = ?1",
+            params![id.as_str(), number.season(), number.episode()],
+        )
+        .inspect_err(
+            |e| tracing::error!(video_id = %id, error = %e, "failed to record the episode number"),
+        )
+        .context("failed to record the episode number")?;
+        Ok(number)
+    }
+
+    fn next_episode_number(
+        &self,
+        id: &VideoRecordId,
+        published_at: DateTime<Utc>,
+    ) -> anyhow::Result<EpisodeNumber> {
+        let conn = self.db.read()?;
+        match Self::recorded_episode_number(&conn, id)? {
+            Some(recorded) => Ok(recorded),
+            None => Self::next_free_episode_number(&conn, id, published_at),
+        }
+    }
+
+    fn list_downloaded(&self) -> anyhow::Result<Vec<Video>> {
+        let conn = self.db.read()?;
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {VIDEO_COLUMNS} FROM videos WHERE status = ?1 ORDER BY rowid ASC"
+            ))
+            .context("failed to prepare list downloaded videos")?;
+        stmt.query_map(params![VideoStatus::Downloaded.as_str()], Self::read_row)
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .inspect_err(|e| tracing::error!(error = %e, "failed to list downloaded videos"))
+            .context("failed to list downloaded videos")?
+            .into_iter()
+            .map(Self::row_to_video)
+            .collect()
+    }
 }
 
 impl SqliteVideoRepository {
+    fn recorded_episode_number(
+        conn: &Connection,
+        id: &VideoRecordId,
+    ) -> anyhow::Result<Option<EpisodeNumber>> {
+        let (season, episode): (Option<i32>, Option<u32>) = conn
+            .query_row(
+                "SELECT season, episode FROM videos WHERE id = ?1",
+                params![id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .inspect_err(|e| {
+                tracing::error!(video_id = %id, error = %e, "failed to read the episode number")
+            })
+            .context("failed to read the episode number")?;
+        Self::decode_episode_number(season, episode)
+    }
+
+    /// The next free same-day index on `published_at`'s day among the videos
+    /// sharing a channel with `id`.
+    fn next_free_episode_number(
+        conn: &Connection,
+        id: &VideoRecordId,
+        published_at: DateTime<Utc>,
+    ) -> anyhow::Result<EpisodeNumber> {
+        if !Self::is_channel_video(conn, id)? {
+            anyhow::bail!(
+                "video {id} has no episode number and is in no channel: only a channel video is numbered by publish date"
+            );
+        }
+        let first = ChannelEpisodeNumber::first_of_day(published_at);
+        match Self::last_sibling_episode_of_day(conn, id, &first)? {
+            Some(last) => Ok(ChannelEpisodeNumber::new(first.season(), last + 1)?.into()),
+            None => Ok(first.into()),
+        }
+    }
+
+    fn is_channel_video(conn: &Connection, id: &VideoRecordId) -> anyhow::Result<bool> {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM channel_videos WHERE video_id = ?1)",
+            params![id.as_str()],
+            |row| row.get(0),
+        )
+        .inspect_err(|e| {
+            tracing::error!(video_id = %id, error = %e, "failed to read the video's channel membership")
+        })
+        .context("failed to read the video's channel membership")
+    }
+
+    /// The highest episode recorded on `first`'s day among the videos sharing
+    /// a channel with `id`.
+    fn last_sibling_episode_of_day(
+        conn: &Connection,
+        id: &VideoRecordId,
+        first: &ChannelEpisodeNumber,
+    ) -> anyhow::Result<Option<u32>> {
+        conn.query_row(
+            "SELECT MAX(episode) FROM videos
+             WHERE season = ?2 AND episode / 100 = ?3 AND id IN (
+                 SELECT video_id FROM channel_videos WHERE channel_id IN (
+                     SELECT channel_id FROM channel_videos WHERE video_id = ?1))",
+            params![id.as_str(), first.season(), first.same_day_prefix()],
+            |row| row.get(0),
+        )
+        .inspect_err(|e| {
+            tracing::error!(video_id = %id, error = %e, "failed to find the last episode of the day")
+        })
+        .context("failed to find the last episode of the day")
+    }
+
     fn read_row(row: &Row<'_>) -> rusqlite::Result<VideoRow> {
         Ok(VideoRow {
             id: row.get(0)?,
@@ -284,6 +429,8 @@ impl SqliteVideoRepository {
             synced_at: row.get(12)?,
             last_errored_at: row.get(13)?,
             last_played_at: row.get(14)?,
+            season: row.get(15)?,
+            episode: row.get(16)?,
         })
     }
 
@@ -316,6 +463,7 @@ impl SqliteVideoRepository {
                 .last_played_at
                 .map(|p| Self::parse_timestamp(&p, "last_played_at"))
                 .transpose()?,
+            episode_number: Self::decode_episode_number(row.season, row.episode)?,
         })
     }
 
@@ -324,11 +472,37 @@ impl SqliteVideoRepository {
             .with_context(|| format!("failed to parse stored {column}"))?
             .with_timezone(&Utc))
     }
+
+    /// The episode number recorded in a row's `season`/`episode` columns,
+    /// none unless both are set.
+    fn decode_episode_number(
+        season: Option<i32>,
+        episode: Option<u32>,
+    ) -> anyhow::Result<Option<EpisodeNumber>> {
+        season
+            .zip(episode)
+            .map(|(season, episode)| {
+                EpisodeNumber::from_columns(season, episode).map_err(Into::into)
+            })
+            .transpose()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::channel::ChannelHandle;
+    use crate::domain::channel_video::ChannelVideo;
+    use crate::domain::playlist::PlaylistId;
+    use crate::domain::playlist_video::PlaylistVideo;
+    use crate::domain::video::PlaylistEpisodeNumber;
+    use crate::infrastructure::repositories::sqlite_channel_video_repository::{
+        ChannelVideoRepository, SqliteChannelVideoRepository,
+    };
+    use crate::infrastructure::repositories::sqlite_playlist_video_repository::{
+        PlaylistVideoRepository, SqlitePlaylistVideoRepository,
+    };
+    use crate::infrastructure::shared::sqlite_connection::TestDatabase;
 
     fn repo() -> SqliteVideoRepository {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -668,5 +842,223 @@ mod tests {
         let found = repo.find_by_youtube_id(&VideoId::new("unknown").unwrap());
 
         assert_eq!(found.unwrap(), vec![]);
+    }
+
+    #[test]
+    fn it_should_assign_the_first_index_of_the_day() {
+        let db = TestDatabase::new();
+        let repo = SqliteVideoRepository::new(db.database());
+        let video = video("First", fixed_timestamp());
+        repo.save(&video).unwrap();
+        link_to_channel(&db, &video, "@somechannel");
+
+        let number = repo.assign_episode_number(&video.id, published_at());
+
+        assert_eq!(number.unwrap(), episode(31501));
+        assert_eq!(
+            repo.find(&video.id).unwrap(),
+            Some(Video {
+                episode_number: Some(episode(31501)),
+                ..video
+            })
+        );
+    }
+
+    #[test]
+    fn it_should_assign_the_next_free_index_within_the_same_channel_and_day() {
+        let db = TestDatabase::new();
+        let repo = SqliteVideoRepository::new(db.database());
+        let sibling = video("Sibling", fixed_timestamp());
+        let other_channel_video = video("Other channel video", fixed_timestamp());
+        let video = video("Video", fixed_timestamp());
+        [&sibling, &other_channel_video, &video]
+            .into_iter()
+            .for_each(|video| repo.save(video).unwrap());
+        let _ = numbered(&repo, sibling.clone(), episode(31503));
+        let _ = numbered(&repo, other_channel_video.clone(), episode(31507));
+        link_to_channel(&db, &sibling, "@somechannel");
+        link_to_channel(&db, &other_channel_video, "@otherchannel");
+        link_to_channel(&db, &video, "@somechannel");
+
+        let number = repo.assign_episode_number(&video.id, published_at());
+
+        assert_eq!(number.unwrap(), episode(31504));
+    }
+
+    #[test]
+    fn it_should_fail_to_number_an_unnumbered_playlist_video_by_publish_date() {
+        let db = TestDatabase::new();
+        let repo = SqliteVideoRepository::new(db.database());
+        let video = video("Playlist video", fixed_timestamp());
+        repo.save(&video).unwrap();
+        link_to_playlist(&db, &video, "PL1");
+
+        let number = repo.assign_episode_number(&video.id, published_at());
+
+        assert_eq!(
+            number.map_err(|e| e.to_string()),
+            Err(format!(
+                "video {} has no episode number and is in no channel: only a channel video is numbered by publish date",
+                video.id
+            ))
+        );
+        assert_eq!(repo.find(&video.id).unwrap(), Some(video));
+    }
+
+    #[test]
+    fn it_should_number_copies_in_different_shows_independently() {
+        let db = TestDatabase::new();
+        let repo = SqliteVideoRepository::new(db.database());
+        let first_copy = video("Copy", fixed_timestamp());
+        let second_copy = video("Copy", fixed_timestamp());
+        repo.save(&first_copy).unwrap();
+        repo.save(&second_copy).unwrap();
+        link_to_channel(&db, &first_copy, "@somechannel");
+        link_to_channel(&db, &second_copy, "@otherchannel");
+
+        let numbers = [&first_copy, &second_copy].map(|video| {
+            repo.assign_episode_number(&video.id, published_at())
+                .unwrap()
+        });
+
+        assert_eq!(numbers, [episode(31501), episode(31501)]);
+    }
+
+    #[test]
+    fn it_should_return_the_existing_number_when_already_assigned() {
+        let db = TestDatabase::new();
+        let repo = SqliteVideoRepository::new(db.database());
+        let video = video("First", fixed_timestamp());
+        repo.save(&video).unwrap();
+        let video = numbered(&repo, video, episode(31503));
+        link_to_playlist(&db, &video, "PL1");
+
+        let number = repo.assign_episode_number(
+            &video.id,
+            DateTime::parse_from_rfc3339("2026-04-01T10:00:00Z")
+                .unwrap()
+                .to_utc(),
+        );
+
+        assert_eq!(number.unwrap(), episode(31503));
+        assert_eq!(repo.find(&video.id).unwrap(), Some(video));
+    }
+
+    #[test]
+    fn it_should_persist_and_read_the_episode_number() {
+        let repo = repo();
+        let saved = video("Saved", fixed_timestamp())
+            .with_episode_number(episode(31501), fixed_timestamp());
+        let updated = video("Updated", fixed_timestamp());
+        repo.save(&saved).unwrap();
+        repo.save(&updated).unwrap();
+        let updated = updated.with_episode_number(episode(31502), fixed_timestamp());
+
+        repo.update(&updated).unwrap();
+
+        assert_eq!(
+            [
+                repo.find(&saved.id).unwrap(),
+                repo.find(&updated.id).unwrap()
+            ],
+            [Some(saved), Some(updated)]
+        );
+    }
+
+    #[test]
+    fn it_should_persist_and_read_a_playlist_episode_number() {
+        let repo = repo();
+        let video = video("Playlist video", fixed_timestamp()).with_episode_number(
+            PlaylistEpisodeNumber::new(7).unwrap().into(),
+            fixed_timestamp(),
+        );
+
+        repo.save(&video).unwrap();
+
+        assert_eq!(repo.find(&video.id).unwrap(), Some(video));
+    }
+
+    #[test]
+    fn it_should_list_downloaded_videos() {
+        let repo = repo();
+        let pending = video("Pending", fixed_timestamp());
+        let downloaded = video("Downloaded", fixed_timestamp())
+            .start_download(fixed_timestamp())
+            .mark_downloaded(
+                Quality::High,
+                "Season 2026/S2026E031501 - Downloaded.mp4",
+                None,
+                None,
+                fixed_timestamp(),
+            );
+        let errored = video("Errored", fixed_timestamp()).mark_errored(fixed_timestamp());
+        [&pending, &downloaded, &errored]
+            .into_iter()
+            .for_each(|video| repo.save(video).unwrap());
+
+        let listed = repo.list_downloaded();
+
+        assert_eq!(listed.unwrap(), vec![downloaded]);
+    }
+
+    #[test]
+    fn it_should_peek_the_next_episode_number_without_recording_it() {
+        let db = TestDatabase::new();
+        let repo = SqliteVideoRepository::new(db.database());
+        let sibling = video("Sibling", fixed_timestamp());
+        let video = video("Next", fixed_timestamp());
+        repo.save(&sibling).unwrap();
+        repo.save(&video).unwrap();
+        let _ = numbered(&repo, sibling.clone(), episode(31501));
+        link_to_channel(&db, &sibling, "@somechannel");
+        link_to_channel(&db, &video, "@somechannel");
+
+        let number = repo.next_episode_number(&video.id, published_at());
+
+        assert_eq!(number.unwrap(), episode(31502));
+        assert_eq!(repo.find(&video.id).unwrap(), Some(video));
+    }
+
+    fn link_to_playlist(db: &TestDatabase, video: &Video, playlist_id: &str) {
+        SqlitePlaylistVideoRepository::new(db.database())
+            .save(&PlaylistVideo::create(
+                PlaylistId::new(playlist_id).unwrap(),
+                video.id.clone(),
+                0,
+                fixed_timestamp(),
+            ))
+            .unwrap();
+    }
+
+    fn link_to_channel(db: &TestDatabase, video: &Video, channel_id: &str) {
+        SqliteChannelVideoRepository::new(db.database())
+            .save(&ChannelVideo::create(
+                ChannelHandle::new(channel_id).unwrap(),
+                video.id.clone(),
+                0,
+                fixed_timestamp(),
+            ))
+            .unwrap();
+    }
+
+    /// Records `number` on a stored `video`.
+    fn numbered(repo: &SqliteVideoRepository, video: Video, number: EpisodeNumber) -> Video {
+        let numbered = video.with_episode_number(number, fixed_timestamp());
+        repo.update(&numbered).unwrap();
+        numbered
+    }
+
+    fn episode(episode: u32) -> EpisodeNumber {
+        EpisodeNumber::from_columns(2026, episode).unwrap()
+    }
+
+    fn published_at() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-03-15T10:00:00Z")
+            .unwrap()
+            .to_utc()
+    }
+
+    fn fixed_timestamp() -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap()
     }
 }

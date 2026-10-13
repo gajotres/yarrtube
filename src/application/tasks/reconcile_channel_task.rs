@@ -37,12 +37,16 @@ mod tests {
     use crate::domain::playlist::PlaylistPath;
     use crate::domain::services::InternalVideoReconciler;
     use crate::domain::services::MetadataGenerator;
+    use crate::domain::services::ShowFileWriter;
     use crate::domain::services::ThumbnailFetcher;
+    use crate::domain::services::VideoRelocator;
     use crate::domain::shared::Quality;
     use crate::domain::task::{ScheduledTask, TaskStatus};
     use crate::domain::video::Video;
-    use crate::domain::video::{VideoId, VideoRecordId, VideoStatus};
-    use crate::domain::video_metadata::VideoMetadata;
+    use crate::domain::video::{EpisodeNumber, VideoId, VideoRecordId, VideoStatus};
+    use crate::domain::video_metadata::{VideoMetadata, render_episode_nfo};
+    use crate::infrastructure::repositories::filesystem_channel_avatar_repository::FakeChannelAvatarRepository;
+    use crate::infrastructure::repositories::filesystem_show_file_repository::FakeShowFileRepository;
     use crate::infrastructure::repositories::filesystem_video_file_repository::FakeVideoFileRepository;
     use crate::infrastructure::repositories::sqlite_channel_repository::{
         ChannelRepository, SqliteChannelRepository,
@@ -75,6 +79,7 @@ mod tests {
     use crate::infrastructure::shared::ytdlp::FetchedThumbnail;
     use chrono::{DateTime, Utc};
     use rusqlite::Connection;
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     #[test]
@@ -570,6 +575,189 @@ mod tests {
     }
 
     #[test]
+    fn it_should_rewrite_missing_show_files_on_a_recurring_reconcile() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.database(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let show_file_repository = Arc::new(FakeShowFileRepository::default());
+        channel_repository
+            .insert(&Channel {
+                avatar_filename: Some("@somechannel.jpg".to_string()),
+                ..channel("@somechannel")
+            })
+            .unwrap();
+        let task = ReconcileChannelTask::new(ChannelVideoReconciler::new(
+            channel_repository,
+            video_repository.clone(),
+            Arc::new(SqliteChannelVideoRepository::new(db.database())),
+            Arc::new(FakeChannelVideosRepository::with_videos(Vec::new())),
+            Arc::new(SqliteEventPublisher::new(
+                db.database(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
+            task_repository.clone(),
+            Arc::new(InternalVideoReconciler::new(
+                video_repository.clone(),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+                task_repository.clone(),
+                Arc::new(FakeVideoFileRepository::default()),
+                Arc::new(ThumbnailFetcher::new(
+                    video_repository.clone(),
+                    Arc::new(FakeVideoDownloaderRepository::default()),
+                    Arc::new(FakeVideoFileRepository::default()),
+                    task_repository.clone(),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                    "/videos",
+                )),
+                Arc::new(VideoRelocator::new(
+                    video_repository.clone(),
+                    Arc::new(FakeVideoFileRepository::default()),
+                    Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(ShowFileWriter::new(
+                show_file_repository.clone(),
+                Arc::new(FakeChannelAvatarRepository::default()),
+                "/videos",
+            )),
+            Arc::new(FixedClock(fixed_timestamp())),
+            3600,
+        ));
+
+        let result = run(&task, &payload_for("@somechannel"));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            *show_file_repository.show_nfos.lock().unwrap(),
+            vec![(
+                PathBuf::from("/videos/creators/somechannel"),
+                concat!(
+                    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+                    "<tvshow><title>Some Channel</title><studio>Some Channel</studio>",
+                    r#"<uniqueid type="youtube">UC123</uniqueid><status>Continuing</status></tvshow>"#,
+                )
+                .to_string()
+            )]
+        );
+        assert_eq!(
+            *show_file_repository.posters.lock().unwrap(),
+            vec![(
+                PathBuf::from("/videos/creators/somechannel"),
+                PathBuf::from("avatars/@somechannel.jpg")
+            )]
+        );
+    }
+
+    #[test]
+    fn it_should_sync_the_channel_even_if_its_show_files_cannot_be_written() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.database(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let event_repository = SqliteEventRepository::new(db.database());
+        let show_file_repository = Arc::new(FakeShowFileRepository::failing());
+        let channel_video_repository = Arc::new(SqliteChannelVideoRepository::new(db.database()));
+        channel_repository.insert(&channel("@somechannel")).unwrap();
+        let task = ReconcileChannelTask::new(ChannelVideoReconciler::new(
+            channel_repository,
+            video_repository.clone(),
+            channel_video_repository.clone(),
+            Arc::new(FakeChannelVideosRepository::with_videos(vec![
+                listed_video("yt1", "One", 0),
+            ])),
+            Arc::new(SqliteEventPublisher::new(
+                db.database(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
+            task_repository.clone(),
+            Arc::new(InternalVideoReconciler::new(
+                video_repository.clone(),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+                task_repository.clone(),
+                Arc::new(FakeVideoFileRepository::default()),
+                Arc::new(ThumbnailFetcher::new(
+                    video_repository.clone(),
+                    Arc::new(FakeVideoDownloaderRepository::default()),
+                    Arc::new(FakeVideoFileRepository::default()),
+                    task_repository.clone(),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                    "/videos",
+                )),
+                Arc::new(VideoRelocator::new(
+                    video_repository.clone(),
+                    Arc::new(FakeVideoFileRepository::default()),
+                    Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(ShowFileWriter::new(
+                show_file_repository.clone(),
+                Arc::new(FakeChannelAvatarRepository::default()),
+                "/videos",
+            )),
+            Arc::new(FixedClock(fixed_timestamp())),
+            3600,
+        ));
+
+        let result = run(&task, &payload_for("@somechannel"));
+
+        assert_eq!(result, Ok(()));
+        let videos = video_repository.list().unwrap();
+        let video_id = videos[0].id.clone();
+        assert_eq!(
+            videos,
+            vec![Video {
+                id: video_id.clone(),
+                ..Video::create(VideoId::new("yt1").unwrap(), "One", fixed_timestamp())
+            }]
+        );
+        assert_eq!(
+            channel_video_repository
+                .list_for_channel(&handle("@somechannel"))
+                .unwrap(),
+            vec![ChannelVideo {
+                id: 1,
+                ..ChannelVideo::create(handle("@somechannel"), video_id, 0, fixed_timestamp())
+            }]
+        );
+        assert_eq!(*show_file_repository.show_nfos.lock().unwrap(), vec![]);
+        assert_eq!(
+            task_repository.list_non_completed().unwrap(),
+            vec![next_reconcile(1)]
+        );
+        assert_eq!(
+            event_repository.list_eligible().unwrap(),
+            vec![pending_event(
+                1,
+                DomainEvent::VideoAddedToChannel(VideoAddedToChannel {
+                    channel_id: "@somechannel".to_string(),
+                    video_id: videos[0].id.as_str().to_string(),
+                })
+            )]
+        );
+    }
+
+    #[test]
     fn it_should_skip_if_invalid_channel_id_provided() {
         let result = run(&any_task(), &payload_for(""));
 
@@ -654,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn it_should_keep_the_folder_of_a_download_in_progress_if_video_renamed() {
+    fn it_should_reset_a_numbered_video_whose_file_is_missing_without_dropping_its_number() {
         let db = TestDatabase::new();
         let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
         let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
@@ -663,23 +851,26 @@ mod tests {
             db.database(),
             Arc::new(FixedClock(fixed_timestamp())),
         ));
-        let video_file_repository = Arc::new(FakeVideoFileRepository::with_listing(vec![
-            "My Video".to_string(),
-        ]));
+        let video_file_repository = Arc::new(FakeVideoFileRepository::with_listing(Vec::new()));
         channel_repository.insert(&channel("@somechannel")).unwrap();
-        let video = my_video().start_download(fixed_timestamp());
+        let video = downloaded_video(
+            "Season 2023/S2023E111401 - My Video.mp4",
+            Some("Season 2023/S2023E111401 - My Video.jpg"),
+        )
+        .with_episode_number(recovered_episode(), fixed_timestamp());
         save_channel_video(
             video_repository.as_ref(),
             channel_video_repository.as_ref(),
             &video,
         );
+        video_repository.update(&video).unwrap();
         let task = ReconcileChannelTask::new(channel_video_reconciler(
             &db,
             channel_repository,
             video_repository.clone(),
             channel_video_repository.clone(),
             Arc::new(FakeChannelVideosRepository::with_videos(vec![
-                listed_video("yt1", "Renamed", 0),
+                listed_video("yt1", "My Video", 0),
             ])),
             task_repository.clone(),
             video_file_repository.clone(),
@@ -688,18 +879,37 @@ mod tests {
         let result = run(&task, &payload_for("@somechannel"));
 
         assert_eq!(result, Ok(()));
-        assert_eq!(*video_file_repository.deleted_calls.lock().unwrap(), vec![]);
         assert_eq!(
             video_repository.list().unwrap(),
             vec![Video {
-                title: "Renamed".to_string(),
-                ..video
+                status: VideoStatus::Pending,
+                quality: None,
+                filename: None,
+                thumbnail_filename: None,
+                synced_at: None,
+                episode_number: Some(recovered_episode()),
+                ..video.clone()
             }]
+        );
+        assert_eq!(
+            task_repository.list_non_completed().unwrap(),
+            vec![
+                pending_task(
+                    1,
+                    &Task::DownloadVideo {
+                        video_id: video.id.as_str().to_string(),
+                        quality: "high".to_string(),
+                        output_dir: "/videos/creators/somechannel".to_string(),
+                    },
+                    fixed_timestamp(),
+                ),
+                next_reconcile(2),
+            ]
         );
     }
 
     #[test]
-    fn it_should_generate_missing_metadata() {
+    fn it_should_relocate_a_legacy_video_when_its_metadata_is_recovered() {
         let db = TestDatabase::new();
         let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
         let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
@@ -709,10 +919,13 @@ mod tests {
             db.database(),
             Arc::new(FixedClock(fixed_timestamp())),
         ));
+        let relocated_files = Arc::new(FakeVideoFileRepository::with_file_exists(true));
         let videos_root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(videos_root.path().join("creators/somechannel/My Video")).unwrap();
+        let show_dir = videos_root.path().join("creators/somechannel");
+        std::fs::create_dir_all(show_dir.join("My Video")).unwrap();
+        std::fs::write(show_dir.join("My Video/movie.nfo"), "<movie/>").unwrap();
         channel_repository.insert(&channel("@somechannel")).unwrap();
-        let video = downloaded_video("My Video/My Video.mp4", None);
+        let video = downloaded_video("My Video/My Video.mp4", Some("My Video/My Video.jpg"));
         save_channel_video(
             video_repository.as_ref(),
             channel_video_repository.as_ref(),
@@ -744,11 +957,24 @@ mod tests {
                 Arc::new(ThumbnailFetcher::new(
                     video_repository.clone(),
                     Arc::new(FakeVideoDownloaderRepository::default()),
+                    Arc::new(FakeVideoFileRepository::default()),
                     task_repository.clone(),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                    "/videos",
+                )),
+                Arc::new(VideoRelocator::new(
+                    video_repository.clone(),
+                    relocated_files.clone(),
+                    video_metadata_repository.clone(),
                     Arc::new(FixedClock(fixed_timestamp())),
                 )),
                 Arc::new(FixedClock(fixed_timestamp())),
                 videos_root.path().to_string_lossy(),
+            )),
+            Arc::new(ShowFileWriter::new(
+                Arc::new(FakeShowFileRepository::default()),
+                Arc::new(FakeChannelAvatarRepository::default()),
+                "/videos",
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,
@@ -758,39 +984,122 @@ mod tests {
 
         assert_eq!(result, Ok(()));
         assert_eq!(
-            video_metadata_repository.find(&video.id).unwrap(),
-            Some(VideoMetadata::new(
-                "My Video",
-                "A description",
-                "My Channel",
-                "My Channel",
+            video_repository.list().unwrap(),
+            vec![video.clone().relocate_to_episode(
+                recovered_episode(),
+                "Season 2023/S2023E111401 - My Video.mp4",
+                Some("Season 2023/S2023E111401 - My Video.jpg".to_string()),
                 fixed_timestamp(),
-                None,
-                Vec::new(),
-                "yt1",
-                None,
-                "20231114 My Video",
-                fixed_timestamp(),
-            ))
+            )]
         );
-        assert_eq!(video_repository.list().unwrap(), vec![video.clone()]);
+        assert_eq!(
+            *relocated_files.moved.lock().unwrap(),
+            vec![
+                (
+                    show_dir.join("My Video/My Video.mp4"),
+                    show_dir.join("Season 2023/S2023E111401 - My Video.mp4"),
+                ),
+                (
+                    show_dir.join("My Video/My Video.jpg"),
+                    show_dir.join("Season 2023/S2023E111401 - My Video.jpg"),
+                ),
+            ]
+        );
+        assert_eq!(
+            *relocated_files.removed_if_empty.lock().unwrap(),
+            vec![show_dir.join("My Video")]
+        );
+        assert!(!show_dir.join("My Video/movie.nfo").exists());
+        assert_eq!(
+            video_metadata_repository.find(&video.id).unwrap(),
+            Some(recovered_metadata())
+        );
+        assert_eq!(
+            std::fs::read_to_string(show_dir.join("Season 2023/S2023E111401 - My Video.nfo"))
+                .unwrap(),
+            render_episode_nfo(&recovered_metadata(), &recovered_episode())
+        );
         assert_eq!(
             task_repository.list_non_completed().unwrap(),
-            vec![
-                pending_task(
-                    1,
-                    &Task::FetchThumbnail {
-                        video_id: video.id.as_str().to_string(),
-                        output_dir: videos_root
-                            .path()
-                            .join("creators/somechannel")
-                            .to_string_lossy()
-                            .to_string(),
-                    },
-                    fixed_timestamp(),
-                ),
-                next_reconcile(2),
-            ]
+            vec![next_reconcile(1)]
+        );
+    }
+
+    #[test]
+    fn it_should_leave_a_legacy_video_in_place_when_its_metadata_is_still_unavailable() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let channel_video_repository = Arc::new(SqliteChannelVideoRepository::new(db.database()));
+        let video_metadata_repository = Arc::new(SqliteVideoMetadataRepository::new(db.database()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.database(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let relocated_files = Arc::new(FakeVideoFileRepository::with_file_exists(true));
+        channel_repository.insert(&channel("@somechannel")).unwrap();
+        let video = downloaded_video("My Video/My Video.mp4", Some("My Video/My Video.jpg"));
+        save_channel_video(
+            video_repository.as_ref(),
+            channel_video_repository.as_ref(),
+            &video,
+        );
+        let task = ReconcileChannelTask::new(ChannelVideoReconciler::new(
+            channel_repository,
+            video_repository.clone(),
+            channel_video_repository,
+            Arc::new(FakeChannelVideosRepository::with_videos(vec![
+                listed_video("yt1", "My Video", 0),
+            ])),
+            Arc::new(SqliteEventPublisher::new(
+                db.database(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
+            task_repository.clone(),
+            Arc::new(InternalVideoReconciler::new(
+                video_repository.clone(),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                video_metadata_repository.clone(),
+                task_repository.clone(),
+                Arc::new(FakeVideoFileRepository::with_file_exists(true)),
+                Arc::new(ThumbnailFetcher::new(
+                    video_repository.clone(),
+                    Arc::new(FakeVideoDownloaderRepository::default()),
+                    Arc::new(FakeVideoFileRepository::default()),
+                    task_repository.clone(),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                    "/videos",
+                )),
+                Arc::new(VideoRelocator::new(
+                    video_repository.clone(),
+                    relocated_files.clone(),
+                    video_metadata_repository.clone(),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(ShowFileWriter::new(
+                Arc::new(FakeShowFileRepository::default()),
+                Arc::new(FakeChannelAvatarRepository::default()),
+                "/videos",
+            )),
+            Arc::new(FixedClock(fixed_timestamp())),
+            3600,
+        ));
+
+        let result = run(&task, &payload_for("@somechannel"));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(video_repository.list().unwrap(), vec![video.clone()]);
+        assert_eq!(*relocated_files.moved.lock().unwrap(), vec![]);
+        assert_eq!(video_metadata_repository.find(&video.id).unwrap(), None);
+        assert_eq!(
+            task_repository.list_non_completed().unwrap(),
+            vec![next_reconcile(1)]
         );
     }
 
@@ -835,10 +1144,23 @@ mod tests {
                 Arc::new(ThumbnailFetcher::new(
                     video_repository.clone(),
                     video_downloader_repository.clone(),
+                    Arc::new(FakeVideoFileRepository::default()),
                     task_repository.clone(),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                    "/videos",
+                )),
+                Arc::new(VideoRelocator::new(
+                    Arc::new(SqliteVideoRepository::new(db.database())),
+                    Arc::new(FakeVideoFileRepository::default()),
+                    Arc::new(SqliteVideoMetadataRepository::new(db.database())),
                     Arc::new(FixedClock(fixed_timestamp())),
                 )),
                 Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(ShowFileWriter::new(
+                Arc::new(FakeShowFileRepository::default()),
+                Arc::new(FakeChannelAvatarRepository::default()),
                 "/videos",
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -936,8 +1258,10 @@ mod tests {
         let thumbnail_fetcher = Arc::new(ThumbnailFetcher::new(
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::default()),
+            Arc::new(FakeVideoFileRepository::default()),
             task_repository.clone(),
             Arc::new(FixedClock(fixed_timestamp())),
+            "/videos",
         ));
         ChannelVideoReconciler::new(
             channel_repository,
@@ -959,7 +1283,18 @@ mod tests {
                 task_repository.clone(),
                 video_file_repository,
                 thumbnail_fetcher,
+                Arc::new(VideoRelocator::new(
+                    Arc::new(SqliteVideoRepository::new(db.database())),
+                    Arc::new(FakeVideoFileRepository::default()),
+                    Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
                 Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(ShowFileWriter::new(
+                Arc::new(FakeShowFileRepository::default()),
+                Arc::new(FakeChannelAvatarRepository::default()),
                 "/videos",
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -999,10 +1334,23 @@ mod tests {
                 Arc::new(ThumbnailFetcher::new(
                     video_repository,
                     Arc::new(FakeVideoDownloaderRepository::default()),
+                    Arc::new(FakeVideoFileRepository::default()),
                     task_repository.clone(),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                    "/videos",
+                )),
+                Arc::new(VideoRelocator::new(
+                    Arc::new(SqliteVideoRepository::new(unused_connection())),
+                    Arc::new(FakeVideoFileRepository::default()),
+                    Arc::new(SqliteVideoMetadataRepository::new(unused_connection())),
                     Arc::new(FixedClock(fixed_timestamp())),
                 )),
                 Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(ShowFileWriter::new(
+                Arc::new(FakeShowFileRepository::default()),
+                Arc::new(FakeChannelAvatarRepository::default()),
                 "/videos",
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1081,6 +1429,28 @@ mod tests {
             )
     }
 
+    /// The episode `my_video()` gets from `youtube_metadata()`'s publish time.
+    fn recovered_episode() -> EpisodeNumber {
+        EpisodeNumber::from_columns(2023, 111401).unwrap()
+    }
+
+    /// The metadata reconcile recovers for `my_video()` once relocated.
+    fn recovered_metadata() -> VideoMetadata {
+        VideoMetadata::new(
+            "My Video",
+            "A description",
+            "My Channel",
+            "My Channel",
+            fixed_timestamp(),
+            None,
+            Vec::new(),
+            "yt1",
+            Some("S2023E111401 - My Video.jpg".to_string()),
+            "20231114 My Video",
+            fixed_timestamp(),
+        )
+    }
+
     fn listed_video(youtube_id: &str, title: &str, position: i64) -> ChannelVideoListing {
         ChannelVideoListing {
             youtube_id: youtube_id.to_string(),
@@ -1103,8 +1473,8 @@ mod tests {
     /// The thumbnail the fake downloader reports for `my_video()`.
     fn fetched_thumbnail() -> FetchedThumbnail {
         FetchedThumbnail {
-            folder: "My Video".to_string(),
-            filename: "My Video.jpg".to_string(),
+            path: std::path::PathBuf::from("My Video.jpg"),
+            published_at: None,
         }
     }
 

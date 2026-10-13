@@ -32,8 +32,7 @@ Yarrtube is designed to run on your NAS via Docker alongside the rest of your me
 - Track YouTube public playlists.
 - Track entire channels and download new videos when they are published!
 - Minimalistic webapp to see the videos from the browser in both desktop and mobile.
-- Basic support for Plex, Kodi and Jellyfin.
-- Support for Plex collections: one collection per tracked playlist/channel, kept in sync automatically. Take a look at the [Plex Collections integration guide](doc/PLEX.md) for more details.
+- Every playlist and channel shows up as a TV show in Plex, Kodi and Jellyfin, with channel posters, episode thumbnails, Continue Watching and play-next. See the [Plex guide](doc/PLEX.md).
 
 <p align="center">
   <img src="doc/screenshot_mobile.png" alt="Yarrtube mobile UI screenshot" width="150"/>

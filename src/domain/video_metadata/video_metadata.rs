@@ -1,6 +1,6 @@
 use chrono::{DateTime, Datelike, Utc};
 
-/// A video's Plex-facing `movie.nfo` content: everything derived from its
+/// A video's Plex-facing episode NFO content: everything derived from its
 /// YouTube metadata (plus a locally-resolved sort order and, when present, a
 /// saved thumbnail filename) needed to render that file. Fields are already
 /// fully resolved (plot truncated, sorttitle computed, genre mapped) by the
@@ -56,12 +56,12 @@ impl VideoMetadata {
         Self { thumb, ..self }
     }
 
-    /// The `movie.nfo` `premiered` value: the publish date as `YYYY-MM-DD`.
+    /// The NFO `aired`/`premiered` value: the publish date as `YYYY-MM-DD`.
     pub fn premiered(&self) -> String {
         self.published_at.format("%Y-%m-%d").to_string()
     }
 
-    /// The `movie.nfo` `year` value: the publish date's year.
+    /// The NFO `year` value: the publish date's year.
     pub fn year(&self) -> i32 {
         self.published_at.year()
     }

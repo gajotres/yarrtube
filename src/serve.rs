@@ -2,12 +2,13 @@ use crate::application::http::{self, ApiServices, VideosRoot};
 use crate::application::{subscribers, tasks};
 use crate::domain::services::{
     ChannelCreator, ChannelDeleter, ChannelPreviewer, ChannelUpdater, ChannelVideoReconciler,
-    ChannelViewSearcher, DirectorySearcher, InternalVideoReconciler, MetadataGenerator,
-    PlaylistCreator, PlaylistDeleter, PlaylistPreviewer, PlaylistSearcher, PlaylistUpdater,
-    PlaylistVideoReconciler, PlexCollectionDeleter, PlexCollectionReconciler, PlexFolderScanner,
-    TaskViewSearcher, ThumbnailFetcher, VideoDownloader, VideoFileDeleter, VideoSearcher,
+    ChannelViewSearcher, DirectorySearcher, InternalVideoReconciler, LayoutMigrator,
+    MetadataGenerator, PlaylistCreator, PlaylistDeleter, PlaylistPreviewer, PlaylistSearcher,
+    PlaylistUpdater, PlaylistVideoReconciler, PlexFolderScanner, ShowFileWriter, TaskViewSearcher,
+    ThumbnailFetcher, VideoDownloader, VideoFileDeleter, VideoRelocator, VideoSearcher,
     VideoWatchStateUpdater,
 };
+use crate::domain::video::STAGING_DIRNAME;
 use crate::infrastructure::client::ytdlp_updater::{RealYtdlpUpdater, YtdlpUpdater, target_path};
 use crate::infrastructure::infrastructure_container::{
     InfrastructureContainer, InfrastructureSettings,
@@ -15,8 +16,8 @@ use crate::infrastructure::infrastructure_container::{
 use crate::infrastructure::repositories::domain_events_consumer::{
     DomainEventsConsumer, SubscriberRegistry,
 };
-use crate::infrastructure::repositories::plex_collection_repository::{
-    HttpPlexCollectionRepository, PlexCollectionRepository, PlexConfig,
+use crate::infrastructure::repositories::plex_library_repository::{
+    HttpPlexLibraryRepository, PlexConfig, PlexLibraryRepository,
 };
 use crate::infrastructure::repositories::task_executor::{HandlerRegistry, TaskExecutor};
 use crate::infrastructure::shared::web_assets::WebAssets;
@@ -44,7 +45,6 @@ const DEFAULT_RETRY_BASE_DELAY_SECONDS: i64 = 150;
 const DEFAULT_VIDEOS_PATH: &str = "/videos";
 const DEFAULT_DOWNLOAD_CONCURRENCY: usize = 2;
 const DEFAULT_AVATARS_PATH: &str = "avatars";
-const DEFAULT_PLEX_RECONCILE_INTERVAL_SECONDS: i64 = 900;
 /// The parent directories the add dialog's folder browser defaults to, seeded
 /// under the videos root at startup so the browser is never empty on a fresh
 /// install.
@@ -53,6 +53,112 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 /// How long shutdown waits for in-flight blocking work before exiting.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+pub fn run() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
+        .init();
+
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            error!(error = %e, "failed to start async runtime");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Listen for shutdown signals before the blocking startup work below, so
+    // a stop that arrives during startup (e.g. while yt-dlp updates) exits
+    // right away instead of being ignored until SIGKILL. Nothing has started
+    // downloading yet, so exiting the process there is safe.
+    let startup_done = Arc::new(AtomicBool::new(false));
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    runtime.spawn({
+        let startup_done = Arc::clone(&startup_done);
+        async move {
+            shutdown_signal().await;
+            if !startup_done.load(Ordering::SeqCst) {
+                info!("shutdown signal received during startup, exiting");
+                std::process::exit(0);
+            }
+            let _ = shutdown_tx.send(());
+        }
+    });
+
+    // These use a blocking HTTP client, so they run on this thread outside the
+    // tokio runtime rather than inside it (a blocking client can't run on a
+    // tokio worker thread).
+    run_startup_ytdlp_update();
+    run_startup_database_check();
+    run_startup_youtube_api_key_check();
+    run_startup_storage_directories_check();
+    run_startup_staging_directory_check();
+
+    if let Err(e) = run_startup_migrations() {
+        error!(error = %e, "failed to apply database migrations");
+        return ExitCode::FAILURE;
+    }
+
+    let infrastructure = match build_infrastructure() {
+        Ok(infrastructure) => infrastructure,
+        Err(e) => {
+            error!(error = %e, "failed to initialize infrastructure");
+            return ExitCode::FAILURE;
+        }
+    };
+    let plex = plex_integration();
+    let task_executor = Arc::new(task_executor(&infrastructure));
+    if let Err(e) = prepare_task_queue(&infrastructure, &task_executor) {
+        error!(error = %e, "failed to prepare the task queue");
+        return ExitCode::FAILURE;
+    }
+
+    startup_done.store(true, Ordering::SeqCst);
+    let exit_code = runtime.block_on(run_async(infrastructure, task_executor, plex, shutdown_rx));
+    // Don't wait on blocking work such as a download in progress: a task
+    // left running is recovered and retried on the next start.
+    runtime.shutdown_timeout(SHUTDOWN_TIMEOUT);
+    exit_code
+}
+
+/// Applies pending schema migrations once at startup, before any repository
+/// opens its own connection (see `build_infrastructure`).
+pub(crate) fn run_startup_migrations() -> Result<()> {
+    let mut conn =
+        sqlite_connection::open(&db_path()).context("failed to open database for migrations")?;
+    sqlite_migrations::apply(&mut conn)
+}
+
+pub(crate) fn build_infrastructure() -> Result<InfrastructureContainer> {
+    InfrastructureContainer::new(InfrastructureSettings {
+        db_path: db_path(),
+        youtube_api_key: youtube_api_key(),
+        videos_path: PathBuf::from(videos_path()),
+        avatars_path: avatars_path(),
+        ytdlp_path: target_path(),
+    })
+}
+
+pub(crate) fn layout_migrator(infrastructure: &InfrastructureContainer) -> LayoutMigrator {
+    LayoutMigrator::new(
+        infrastructure.video_repository.clone(),
+        infrastructure.playlist_repository.clone(),
+        infrastructure.channel_repository.clone(),
+        infrastructure.playlist_video_repository.clone(),
+        infrastructure.channel_video_repository.clone(),
+        infrastructure.video_metadata_repository.clone(),
+        video_relocator(infrastructure),
+        show_file_writer(infrastructure),
+        videos_path(),
+    )
+}
 
 fn port() -> u16 {
     std::env::var("YARRTUBE_PORT")
@@ -155,79 +261,59 @@ fn run_startup_storage_directories_check() {
     create_default_storage_directories(std::path::Path::new(&videos_path()));
 }
 
-fn plex_reconcile_interval_seconds() -> i64 {
-    std::env::var("YARRTUBE_PLEX_RECONCILE_INTERVAL_SECONDS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_PLEX_RECONCILE_INTERVAL_SECONDS)
+/// Creates `<videos root>/.downloads`, where downloads and thumbnail fetches
+/// are staged before being moved into their show. Runs at startup for the
+/// same reason as `run_startup_storage_directories_check`; a failure is
+/// logged and skipped.
+fn run_startup_staging_directory_check() {
+    let dir = std::path::Path::new(&videos_path()).join(STAGING_DIRNAME);
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => info!(directory = ?dir, "staging directory is present"),
+        Err(e) => error!(directory = ?dir, error = %e, "failed to create staging directory"),
+    }
 }
 
-/// The Plex integration's adapter and target sections, present only when
-/// the daemon is configured to talk to a Plex server: `YARRTUBE_PLEX_URL`,
-/// `YARRTUBE_PLEX_TOKEN` and at least one of
-/// `YARRTUBE_PLEX_PLAYLIST_SECTION_ID` / `YARRTUBE_PLEX_CHANNEL_SECTION_ID`
-/// (each one section id, or a comma-separated list for content spread across
-/// several libraries) must be set to a non-empty value (wrappers like
-/// `run-local.sh` pass empty strings for unset variables). Each section is
-/// scoped to a single kind: playlist sections are reconciled against tracked
-/// playlists and channel sections against tracked channels. When absent,
-/// nothing Plex-related is wired and the daemon behaves exactly as without
-/// the integration.
-#[derive(Clone)]
+/// The Plex scan integration, present only when the daemon is configured to
+/// talk to a Plex server: `YARRTUBE_PLEX_URL`, `YARRTUBE_PLEX_TOKEN` and
+/// `YARRTUBE_PLEX_VIDEOS_PATH` (where Plex sees `videos_path()`) must all be
+/// set to a non-empty value (wrappers like `run-local.sh` pass empty strings
+/// for unset variables). Library sections are discovered, not configured.
+/// When absent, nothing Plex-related is wired and the daemon behaves exactly
+/// as without the integration; a partial configuration is warned about.
 struct PlexIntegration {
-    repository: Arc<dyn PlexCollectionRepository>,
-    playlist_section_ids: Vec<String>,
-    channel_section_ids: Vec<String>,
-    /// `YARRTUBE_PLEX_VIDEOS_PATH`: where Plex sees `videos_path()`. Without
-    /// it, downloaded videos' folders aren't scanned into Plex explicitly.
-    plex_videos_path: Option<String>,
+    repository: Arc<dyn PlexLibraryRepository>,
+    plex_videos_path: String,
 }
 
 fn plex_integration() -> Option<PlexIntegration> {
-    let base_url = non_empty_env("YARRTUBE_PLEX_URL")?;
-    let token = non_empty_env("YARRTUBE_PLEX_TOKEN")?;
-    let (playlist_section_ids, channel_section_ids) = plex_section_ids(
-        std::env::var("YARRTUBE_PLEX_PLAYLIST_SECTION_ID").ok(),
-        std::env::var("YARRTUBE_PLEX_CHANNEL_SECTION_ID").ok(),
-    )?;
-    Some(PlexIntegration {
-        repository: Arc::new(HttpPlexCollectionRepository::new(PlexConfig {
-            base_url,
-            token,
-        })),
-        playlist_section_ids,
-        channel_section_ids,
-        plex_videos_path: non_empty_env("YARRTUBE_PLEX_VIDEOS_PATH"),
-    })
+    plex_integration_from(
+        non_empty_env("YARRTUBE_PLEX_URL"),
+        non_empty_env("YARRTUBE_PLEX_TOKEN"),
+        non_empty_env("YARRTUBE_PLEX_VIDEOS_PATH"),
+    )
 }
 
-/// Parses the two kind-scoped section lists, returning `None` when both are
-/// empty — the signal that the integration stays off. A present list keeps
-/// only its non-empty, trimmed comma-separated entries.
-fn plex_section_ids(
-    playlist: Option<String>,
-    channel: Option<String>,
-) -> Option<(Vec<String>, Vec<String>)> {
-    let playlist_section_ids = parse_section_ids(playlist);
-    let channel_section_ids = parse_section_ids(channel);
-    if playlist_section_ids.is_empty() && channel_section_ids.is_empty() {
-        return None;
+fn plex_integration_from(
+    base_url: Option<String>,
+    token: Option<String>,
+    plex_videos_path: Option<String>,
+) -> Option<PlexIntegration> {
+    match (base_url, token, plex_videos_path) {
+        (Some(base_url), Some(token), Some(plex_videos_path)) => Some(PlexIntegration {
+            repository: Arc::new(HttpPlexLibraryRepository::new(PlexConfig {
+                base_url,
+                token,
+            })),
+            plex_videos_path,
+        }),
+        (None, None, None) => None,
+        _ => {
+            warn!(
+                "Plex scan integration disabled: YARRTUBE_PLEX_URL, YARRTUBE_PLEX_TOKEN and YARRTUBE_PLEX_VIDEOS_PATH must all be set"
+            );
+            None
+        }
     }
-    Some((playlist_section_ids, channel_section_ids))
-}
-
-fn parse_section_ids(value: Option<String>) -> Vec<String> {
-    value
-        .into_iter()
-        .flat_map(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .filter(|section_id| !section_id.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .collect()
 }
 
 fn non_empty_env(name: &str) -> Option<String> {
@@ -246,32 +332,11 @@ fn run_startup_youtube_api_key_check() {
     }
 }
 
-/// Applies pending schema migrations once at startup, before any repository
-/// opens its own connection (see `build_infrastructure`).
-fn run_startup_migrations() -> Result<()> {
-    let mut conn =
-        sqlite_connection::open(&db_path()).context("failed to open database for migrations")?;
-    sqlite_migrations::apply(&mut conn)
-}
-
-fn build_infrastructure() -> Result<InfrastructureContainer> {
-    InfrastructureContainer::new(InfrastructureSettings {
-        db_path: db_path(),
-        youtube_api_key: youtube_api_key(),
-        videos_path: PathBuf::from(videos_path()),
-        avatars_path: avatars_path(),
-        ytdlp_path: target_path(),
-    })
-}
-
 /// Must run before the task executor starts polling: requeues tasks a
-/// previous run left `running` and seeds the recurring yt-dlp self-update
-/// and, when the Plex integration is enabled, the recurring Plex
-/// collections reconcile.
+/// previous run left `running` and seeds the recurring yt-dlp self-update.
 fn prepare_task_queue(
     infrastructure: &InfrastructureContainer,
     task_executor: &TaskExecutor,
-    plex_enabled: bool,
 ) -> Result<()> {
     task_executor
         .recover_stuck_tasks()
@@ -284,14 +349,6 @@ fn prepare_task_queue(
         update_ytdlp_first_run_at,
     )
     .context("failed to schedule the recurring yt-dlp self-update task")?;
-
-    if plex_enabled {
-        tasks::reconcile_plex_collections_task::schedule_reconcile_plex_collections_if_absent(
-            &infrastructure.task_repository,
-            &infrastructure.clock,
-        )
-        .context("failed to schedule the recurring Plex collections reconcile task")?;
-    }
     Ok(())
 }
 
@@ -388,46 +445,25 @@ fn event_subscribers(
         infrastructure.task_repository.clone(),
         infrastructure.clock.clone(),
         videos_path(),
-        plex.clone().map(|plex| {
-            PlexCollectionDeleter::new(
-                plex.playlist_section_ids,
-                plex.channel_section_ids,
-                plex.repository,
-            )
-        }),
-        plex.and_then(plex_folder_scanner),
+        plex.map(plex_folder_scanner),
     )
 }
 
-/// Present only when `YARRTUBE_PLEX_VIDEOS_PATH` says where Plex sees the
-/// videos root; it scans in every configured section, of either kind.
-fn plex_folder_scanner(plex: PlexIntegration) -> Option<PlexFolderScanner> {
-    let plex_videos_path = plex.plex_videos_path?;
-    Some(PlexFolderScanner::new(
-        [plex.playlist_section_ids, plex.channel_section_ids].concat(),
-        videos_path(),
-        plex_videos_path,
-        plex.repository,
-    ))
+fn plex_folder_scanner(plex: PlexIntegration) -> PlexFolderScanner {
+    PlexFolderScanner::new(videos_path(), plex.plex_videos_path, plex.repository)
 }
 
-fn task_executor(
-    infrastructure: &InfrastructureContainer,
-    plex: Option<PlexIntegration>,
-) -> TaskExecutor {
+fn task_executor(infrastructure: &InfrastructureContainer) -> TaskExecutor {
     TaskExecutor::new(
         infrastructure.task_repository.clone(),
-        task_handlers(infrastructure, plex),
+        task_handlers(infrastructure),
         infrastructure.clock.clone(),
         retry_base_delay_seconds(),
         download_concurrency(),
     )
 }
 
-fn task_handlers(
-    infrastructure: &InfrastructureContainer,
-    plex: Option<PlexIntegration>,
-) -> HandlerRegistry {
+fn task_handlers(infrastructure: &InfrastructureContainer) -> HandlerRegistry {
     tasks::registry(
         playlist_video_reconciler(infrastructure),
         channel_video_reconciler(infrastructure),
@@ -439,30 +475,6 @@ fn task_handlers(
         infrastructure.clock.clone(),
         infrastructure.ytdlp_updater.clone(),
         target_path(),
-        plex.map(|plex| {
-            tasks::reconcile_plex_collections_task::ReconcilePlexCollectionsTask::new(
-                plex_collection_reconciler(infrastructure, plex),
-                infrastructure.task_repository.clone(),
-                infrastructure.clock.clone(),
-                plex_reconcile_interval_seconds(),
-            )
-        }),
-    )
-}
-
-fn plex_collection_reconciler(
-    infrastructure: &InfrastructureContainer,
-    plex: PlexIntegration,
-) -> PlexCollectionReconciler {
-    PlexCollectionReconciler::new(
-        plex.playlist_section_ids,
-        plex.channel_section_ids,
-        infrastructure.playlist_repository.clone(),
-        infrastructure.channel_repository.clone(),
-        infrastructure.playlist_video_repository.clone(),
-        infrastructure.channel_video_repository.clone(),
-        infrastructure.video_repository.clone(),
-        plex.repository,
     )
 }
 
@@ -475,6 +487,7 @@ fn playlist_video_reconciler(infrastructure: &InfrastructureContainer) -> Playli
         infrastructure.event_publisher.clone(),
         infrastructure.task_repository.clone(),
         internal_video_reconciler(infrastructure),
+        show_file_writer(infrastructure),
         infrastructure.clock.clone(),
         reconcile_interval_seconds(),
     )
@@ -489,9 +502,27 @@ fn channel_video_reconciler(infrastructure: &InfrastructureContainer) -> Channel
         infrastructure.event_publisher.clone(),
         infrastructure.task_repository.clone(),
         internal_video_reconciler(infrastructure),
+        show_file_writer(infrastructure),
         infrastructure.clock.clone(),
         reconcile_interval_seconds(),
     )
+}
+
+fn show_file_writer(infrastructure: &InfrastructureContainer) -> Arc<ShowFileWriter> {
+    Arc::new(ShowFileWriter::new(
+        infrastructure.show_file_repository.clone(),
+        infrastructure.channel_avatar_repository.clone(),
+        videos_path(),
+    ))
+}
+
+fn video_relocator(infrastructure: &InfrastructureContainer) -> Arc<VideoRelocator> {
+    Arc::new(VideoRelocator::new(
+        infrastructure.video_repository.clone(),
+        infrastructure.video_file_repository.clone(),
+        infrastructure.video_metadata_repository.clone(),
+        infrastructure.clock.clone(),
+    ))
 }
 
 fn video_downloader(infrastructure: &InfrastructureContainer) -> VideoDownloader {
@@ -504,6 +535,7 @@ fn video_downloader(infrastructure: &InfrastructureContainer) -> VideoDownloader
         infrastructure.video_metadata_repository.clone(),
         infrastructure.event_publisher.clone(),
         infrastructure.clock.clone(),
+        videos_path(),
     )
 }
 
@@ -524,6 +556,7 @@ fn internal_video_reconciler(
         infrastructure.task_repository.clone(),
         infrastructure.video_file_repository.clone(),
         thumbnail_fetcher(infrastructure),
+        video_relocator(infrastructure),
         infrastructure.clock.clone(),
         videos_path(),
     ))
@@ -533,8 +566,10 @@ fn thumbnail_fetcher(infrastructure: &InfrastructureContainer) -> Arc<ThumbnailF
     Arc::new(ThumbnailFetcher::new(
         infrastructure.video_repository.clone(),
         infrastructure.video_downloader_repository.clone(),
+        infrastructure.video_file_repository.clone(),
         infrastructure.task_repository.clone(),
         infrastructure.clock.clone(),
+        videos_path(),
     ))
 }
 
@@ -629,79 +664,6 @@ async fn shutdown_signal() {
         _ = tokio::signal::ctrl_c() => {}
         () = terminate => {}
     }
-}
-
-pub fn run() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::builder()
-                .with_default_directive(LevelFilter::INFO.into())
-                .from_env_lossy(),
-        )
-        .init();
-
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            error!(error = %e, "failed to start async runtime");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    // Listen for shutdown signals before the blocking startup work below, so
-    // a stop that arrives during startup (e.g. while yt-dlp updates) exits
-    // right away instead of being ignored until SIGKILL. Nothing has started
-    // downloading yet, so exiting the process there is safe.
-    let startup_done = Arc::new(AtomicBool::new(false));
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    runtime.spawn({
-        let startup_done = Arc::clone(&startup_done);
-        async move {
-            shutdown_signal().await;
-            if !startup_done.load(Ordering::SeqCst) {
-                info!("shutdown signal received during startup, exiting");
-                std::process::exit(0);
-            }
-            let _ = shutdown_tx.send(());
-        }
-    });
-
-    // These use a blocking HTTP client, so they run on this thread outside the
-    // tokio runtime rather than inside it (a blocking client can't run on a
-    // tokio worker thread).
-    run_startup_ytdlp_update();
-    run_startup_database_check();
-    run_startup_youtube_api_key_check();
-    run_startup_storage_directories_check();
-
-    if let Err(e) = run_startup_migrations() {
-        error!(error = %e, "failed to apply database migrations");
-        return ExitCode::FAILURE;
-    }
-
-    let infrastructure = match build_infrastructure() {
-        Ok(infrastructure) => infrastructure,
-        Err(e) => {
-            error!(error = %e, "failed to initialize infrastructure");
-            return ExitCode::FAILURE;
-        }
-    };
-    let plex = plex_integration();
-    let task_executor = Arc::new(task_executor(&infrastructure, plex.clone()));
-    if let Err(e) = prepare_task_queue(&infrastructure, &task_executor, plex.is_some()) {
-        error!(error = %e, "failed to prepare the task queue");
-        return ExitCode::FAILURE;
-    }
-
-    startup_done.store(true, Ordering::SeqCst);
-    let exit_code = runtime.block_on(run_async(infrastructure, task_executor, plex, shutdown_rx));
-    // Don't wait on blocking work such as a download in progress: a task
-    // left running is recovered and retried on the next start.
-    runtime.shutdown_timeout(SHUTDOWN_TIMEOUT);
-    exit_code
 }
 
 #[cfg(test)]
@@ -933,7 +895,7 @@ mod tests {
         let db = TestDatabase::new();
         let infrastructure = test_infrastructure(&db);
 
-        let handlers = task_handlers(&infrastructure, None);
+        let handlers = task_handlers(&infrastructure);
 
         assert_eq!(
             handlers.keys().map(String::as_str).collect::<BTreeSet<_>>(),
@@ -976,71 +938,57 @@ mod tests {
     }
 
     #[test]
-    fn it_should_register_the_plex_subscribers_with_the_plex_videos_path() {
+    fn it_should_register_the_scan_subscriber_only_with_url_token_and_videos_path() {
         let db = TestDatabase::new();
         let infrastructure = test_infrastructure(&db);
+        let configurations = [
+            (
+                Some("http://plex:32400"),
+                Some("token"),
+                Some("/plex/videos"),
+            ),
+            (None, Some("token"), Some("/plex/videos")),
+            (Some("http://plex:32400"), None, Some("/plex/videos")),
+            (Some("http://plex:32400"), Some("token"), None),
+        ];
 
-        let subscribers = event_subscribers(&infrastructure, Some(test_plex(Some("/plex/videos"))));
+        let scan_subscribers: Vec<Option<usize>> = configurations
+            .into_iter()
+            .map(|(url, token, videos_path)| {
+                plex_integration_from(
+                    url.map(str::to_string),
+                    token.map(str::to_string),
+                    videos_path.map(str::to_string),
+                )
+            })
+            .map(|plex| {
+                event_subscribers(&infrastructure, plex)
+                    .get("video_downloaded")
+                    .map(Vec::len)
+            })
+            .collect();
 
-        assert_eq!(
-            subscribers
-                .iter()
-                .map(|(event_type, subscribers)| (event_type.as_str(), subscribers.len()))
-                .collect::<BTreeMap<_, _>>(),
-            BTreeMap::from([
-                ("channel_created", 1),
-                ("channel_deleted", 2),
-                ("playlist_created", 1),
-                ("playlist_deleted", 2),
-                ("video_added_to_channel", 2),
-                ("video_added_to_playlist", 2),
-                ("video_downloaded", 1),
-                ("video_removed_from_channel", 1),
-                ("video_removed_from_playlist", 1),
-            ])
-        );
+        assert_eq!(scan_subscribers, vec![Some(1), None, None, None]);
     }
 
     #[test]
-    fn it_should_not_scan_plex_folders_without_the_plex_videos_path() {
+    fn it_should_not_register_the_collections_task_or_subscribers() {
         let db = TestDatabase::new();
         let infrastructure = test_infrastructure(&db);
-
-        let subscribers = event_subscribers(&infrastructure, Some(test_plex(None)));
-
-        assert_eq!(subscribers.get("video_downloaded").map(Vec::len), None);
-    }
-
-    #[test]
-    fn it_should_disable_plex_when_both_section_lists_are_empty() {
-        assert_eq!(plex_section_ids(None, None), None);
-        assert_eq!(
-            plex_section_ids(Some(String::new()), Some("  ,  ".to_string())),
-            None
+        let plex = plex_integration_from(
+            Some("http://plex:32400".to_string()),
+            Some("token".to_string()),
+            Some("/plex/videos".to_string()),
         );
-    }
 
-    #[test]
-    fn it_should_enable_plex_with_only_playlist_sections() {
-        assert_eq!(
-            plex_section_ids(Some("19, 21".to_string()), None),
-            Some((vec!["19".to_string(), "21".to_string()], vec![]))
-        );
-    }
+        let handlers = task_handlers(&infrastructure);
+        let subscribers = event_subscribers(&infrastructure, plex);
 
-    #[test]
-    fn it_should_enable_plex_with_only_channel_sections() {
+        assert!(!handlers.contains_key("reconcile_plex_collections"));
         assert_eq!(
-            plex_section_ids(Some(String::new()), Some("20".to_string())),
-            Some((vec![], vec!["20".to_string()]))
-        );
-    }
-
-    #[test]
-    fn it_should_enable_plex_with_both_playlist_and_channel_sections() {
-        assert_eq!(
-            plex_section_ids(Some("19".to_string()), Some("20".to_string())),
-            Some((vec!["19".to_string()], vec!["20".to_string()]))
+            ["playlist_deleted", "channel_deleted"]
+                .map(|event_type| subscribers.get(event_type).map(Vec::len)),
+            [Some(1), Some(1)]
         );
     }
 
@@ -1108,16 +1056,5 @@ mod tests {
             ytdlp_path: PathBuf::from("yt-dlp"),
         })
         .unwrap()
-    }
-
-    fn test_plex(plex_videos_path: Option<&str>) -> PlexIntegration {
-        PlexIntegration {
-            repository: Arc::new(
-                crate::infrastructure::repositories::plex_collection_repository::FakePlexCollectionRepository::default(),
-            ),
-            playlist_section_ids: vec!["19".to_string()],
-            channel_section_ids: vec!["21".to_string()],
-            plex_videos_path: plex_videos_path.map(str::to_string),
-        }
     }
 }

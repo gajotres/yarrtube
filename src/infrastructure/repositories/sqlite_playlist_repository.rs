@@ -1,17 +1,27 @@
 use crate::domain::playlist::PlaylistId;
 use crate::domain::playlist::{Playlist, PlaylistKind, PlaylistName, PlaylistPath};
 use crate::domain::shared::Quality;
+use crate::domain::video::PlaylistEpisodeNumber;
 use crate::infrastructure::shared::sqlite_connection::Database;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 #[cfg(test)]
 use rusqlite::Connection;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Row, params};
 
 pub trait PlaylistRepository: Send + Sync {
     fn find(&self, id: &PlaylistId) -> anyhow::Result<Option<Playlist>>;
     fn insert(&self, playlist: &Playlist) -> anyhow::Result<()>;
+    /// Writes every field but `last_episode`: a full-row write from a stale
+    /// read (e.g. the home-visibility toggle racing a reconcile that numbers
+    /// new videos) must not move the counter back and reuse an episode.
     fn update(&self, playlist: &Playlist) -> anyhow::Result<()>;
+    /// Raises the playlist's episode counter to `number`; never lowers it.
+    fn record_last_episode(
+        &self,
+        id: &PlaylistId,
+        number: PlaylistEpisodeNumber,
+    ) -> anyhow::Result<()>;
     fn delete(&self, id: &PlaylistId) -> anyhow::Result<()>;
     fn list(&self) -> anyhow::Result<Vec<Playlist>>;
 }
@@ -30,33 +40,21 @@ impl PlaylistRepository for SqlitePlaylistRepository {
     fn find(&self, id: &PlaylistId) -> anyhow::Result<Option<Playlist>> {
         let conn = self.db.read()?;
         conn.query_row(
-            "SELECT id, name, path, quality, kind, exclude_from_home, created_at FROM playlists WHERE id = ?1",
+            &format!("SELECT {PLAYLIST_COLUMNS} FROM playlists WHERE id = ?1"),
             params![id.as_str()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, bool>(5)?,
-                    row.get::<_, String>(6)?,
-                ))
-            },
+            Self::read_row,
         )
         .optional()
         .inspect_err(|e| tracing::error!(playlist_id = %id, error = %e, "failed to query playlist"))
         .context("failed to query playlist")?
-        .map(|(id, name, path, quality, kind, exclude_from_home, created_at)| {
-            Self::row_to_playlist(id, name, path, quality, kind, exclude_from_home, created_at)
-        })
+        .map(Self::row_to_playlist)
         .transpose()
     }
 
     fn insert(&self, playlist: &Playlist) -> anyhow::Result<()> {
         let conn = self.db.write()?;
         conn.execute(
-            "INSERT INTO playlists (id, name, path, quality, kind, exclude_from_home, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO playlists (id, name, path, quality, kind, exclude_from_home, created_at, last_episode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 playlist.id.as_str(),
                 playlist.name.as_str(),
@@ -64,7 +62,8 @@ impl PlaylistRepository for SqlitePlaylistRepository {
                 playlist.quality.as_str(),
                 playlist.kind.as_str(),
                 playlist.exclude_from_home,
-                playlist.created_at.to_rfc3339()
+                playlist.created_at.to_rfc3339(),
+                playlist.last_episode.map(|number| number.episode())
             ],
         )
         .inspect_err(|e| tracing::error!(playlist_id = %playlist.id, error = %e, "failed to insert playlist"))
@@ -83,11 +82,28 @@ impl PlaylistRepository for SqlitePlaylistRepository {
                 playlist.quality.as_str(),
                 playlist.kind.as_str(),
                 playlist.exclude_from_home,
-                playlist.created_at.to_rfc3339()
+                playlist.created_at.to_rfc3339(),
             ],
         )
         .inspect_err(|e| tracing::error!(playlist_id = %playlist.id, error = %e, "failed to update playlist"))
         .context("failed to update playlist")?;
+        Ok(())
+    }
+
+    fn record_last_episode(
+        &self,
+        id: &PlaylistId,
+        number: PlaylistEpisodeNumber,
+    ) -> anyhow::Result<()> {
+        let conn = self.db.write()?;
+        conn.execute(
+            "UPDATE playlists SET last_episode = MAX(COALESCE(last_episode, 0), ?2) WHERE id = ?1",
+            params![id.as_str(), number.episode()],
+        )
+        .inspect_err(
+            |e| tracing::error!(playlist_id = %id, error = %e, "failed to record the last episode"),
+        )
+        .context("failed to record the last episode")?;
         Ok(())
     }
 
@@ -104,65 +120,70 @@ impl PlaylistRepository for SqlitePlaylistRepository {
     fn list(&self) -> anyhow::Result<Vec<Playlist>> {
         let conn = self.db.read()?;
         let mut stmt = conn
-            .prepare(
-                "SELECT id, name, path, quality, kind, exclude_from_home, created_at FROM playlists ORDER BY name COLLATE NOCASE, rowid",
-            )
+            .prepare(&format!(
+                "SELECT {PLAYLIST_COLUMNS} FROM playlists ORDER BY name COLLATE NOCASE, rowid"
+            ))
             .inspect_err(|e| tracing::error!(error = %e, "failed to prepare list query"))
             .context("failed to prepare list query")?;
         let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, bool>(5)?,
-                    row.get::<_, String>(6)?,
-                ))
-            })
+            .query_map([], Self::read_row)
             .inspect_err(|e| tracing::error!(error = %e, "failed to list playlists"))
             .context("failed to list playlists")?;
 
         rows.map(|row| {
-            let (id, name, path, quality, kind, exclude_from_home, created_at) = row
-                .inspect_err(|e| tracing::error!(error = %e, "failed to read playlist row"))
-                .context("failed to read playlist row")?;
-            Self::row_to_playlist(id, name, path, quality, kind, exclude_from_home, created_at)
+            row.inspect_err(|e| tracing::error!(error = %e, "failed to read playlist row"))
+                .context("failed to read playlist row")
+                .and_then(Self::row_to_playlist)
         })
         .collect()
     }
 }
 
 impl SqlitePlaylistRepository {
-    #[allow(clippy::too_many_arguments)]
-    fn row_to_playlist(
-        id: String,
-        name: String,
-        path: String,
-        quality: String,
-        kind: String,
-        exclude_from_home: bool,
-        created_at: String,
-    ) -> anyhow::Result<Playlist> {
-        let id = PlaylistId::new(id)?;
-        let name = PlaylistName::new(name)?;
-        let path = PlaylistPath::new(path)?;
-        let quality = Quality::new(quality)?;
-        let kind = PlaylistKind::new(kind)?;
-        let created_at = DateTime::parse_from_rfc3339(&created_at)
-            .context("failed to parse stored created_at")?
-            .with_timezone(&Utc);
-        Ok(Playlist::create(
-            id,
-            name,
-            path,
-            quality,
-            kind,
-            exclude_from_home,
-            created_at,
-        ))
+    fn read_row(row: &Row<'_>) -> rusqlite::Result<PlaylistRow> {
+        Ok(PlaylistRow {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            path: row.get(2)?,
+            quality: row.get(3)?,
+            kind: row.get(4)?,
+            exclude_from_home: row.get(5)?,
+            created_at: row.get(6)?,
+            last_episode: row.get(7)?,
+        })
     }
+
+    fn row_to_playlist(row: PlaylistRow) -> anyhow::Result<Playlist> {
+        Ok(Playlist {
+            id: PlaylistId::new(row.id)?,
+            name: PlaylistName::new(row.name)?,
+            path: PlaylistPath::new(row.path)?,
+            quality: Quality::new(row.quality)?,
+            kind: PlaylistKind::new(row.kind)?,
+            exclude_from_home: row.exclude_from_home,
+            created_at: DateTime::parse_from_rfc3339(&row.created_at)
+                .context("failed to parse stored created_at")?
+                .with_timezone(&Utc),
+            last_episode: row
+                .last_episode
+                .map(PlaylistEpisodeNumber::new)
+                .transpose()?,
+        })
+    }
+}
+
+const PLAYLIST_COLUMNS: &str =
+    "id, name, path, quality, kind, exclude_from_home, created_at, last_episode";
+
+struct PlaylistRow {
+    id: String,
+    name: String,
+    path: String,
+    quality: String,
+    kind: String,
+    exclude_from_home: bool,
+    created_at: String,
+    last_episode: Option<u32>,
 }
 
 #[cfg(test)]
@@ -228,6 +249,64 @@ mod tests {
         repo.update(&updated).unwrap();
 
         assert_eq!(repo.find(&updated.id).unwrap(), Some(updated));
+    }
+
+    #[test]
+    fn it_should_raise_the_last_episode() {
+        let repo = repo();
+        let inserted = Playlist {
+            last_episode: Some(PlaylistEpisodeNumber::new(3).unwrap()),
+            ..playlist("PL1", "First")
+        };
+        repo.insert(&inserted).unwrap();
+
+        repo.record_last_episode(&inserted.id, PlaylistEpisodeNumber::new(5).unwrap())
+            .unwrap();
+
+        let raised = Playlist {
+            last_episode: Some(PlaylistEpisodeNumber::new(5).unwrap()),
+            ..inserted
+        };
+        assert_eq!(
+            (repo.find(&raised.id).unwrap(), repo.list().unwrap()),
+            (Some(raised.clone()), vec![raised])
+        );
+    }
+
+    #[test]
+    fn it_should_never_lower_the_last_episode() {
+        let repo = repo();
+        let inserted = Playlist {
+            last_episode: Some(PlaylistEpisodeNumber::new(5).unwrap()),
+            ..playlist("PL1", "First")
+        };
+        repo.insert(&inserted).unwrap();
+
+        repo.record_last_episode(&inserted.id, PlaylistEpisodeNumber::new(4).unwrap())
+            .unwrap();
+
+        assert_eq!(repo.find(&inserted.id).unwrap(), Some(inserted));
+    }
+
+    #[test]
+    fn it_should_keep_the_last_episode_when_updating_from_a_stale_read() {
+        let repo = repo();
+        let stale = playlist("PL1", "First");
+        repo.insert(&stale).unwrap();
+        repo.record_last_episode(&stale.id, PlaylistEpisodeNumber::new(6).unwrap())
+            .unwrap();
+
+        repo.update(&stale.clone().with_exclude_from_home(true))
+            .unwrap();
+
+        assert_eq!(
+            repo.find(&stale.id).unwrap(),
+            Some(Playlist {
+                exclude_from_home: true,
+                last_episode: Some(PlaylistEpisodeNumber::new(6).unwrap()),
+                ..stale
+            })
+        );
     }
 
     #[test]

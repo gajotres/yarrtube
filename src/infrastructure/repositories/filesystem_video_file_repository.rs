@@ -1,3 +1,4 @@
+use crate::domain::video::is_season_folder;
 use std::path::Path;
 
 /// yt-dlp's own in-progress-download marker extensions — never treated as
@@ -13,13 +14,14 @@ const IN_PROGRESS_EXTENSIONS: &[&str] = &["part", "ytdl"];
 /// listing, and removal.
 pub trait VideoFileRepository: Send + Sync {
     /// Deletes the entry in `output_dir` named exactly `filename`, if any —
-    /// a whole directory (a new-style video's own folder) is removed
+    /// a whole directory (a legacy video's own folder) is removed
     /// recursively, a file is removed directly. Returns whether an entry was
     /// found and deleted. A missing `output_dir` or a missing entry is
     /// "nothing to delete" (`Ok(false)`), not an error.
     fn delete(&self, output_dir: &Path, filename: &str) -> anyhow::Result<bool>;
 
-    /// Lists the filenames currently present in `output_dir`, excluding
+    /// Lists the entries currently present in `output_dir` plus every file
+    /// inside its `Season ` folders (as `Season <s>/<file>`), excluding
     /// yt-dlp's own in-progress-download temporary files. A missing
     /// `output_dir` is an empty listing (`Ok(vec![])`), not an error.
     fn list(&self, output_dir: &Path) -> anyhow::Result<Vec<String>>;
@@ -34,6 +36,14 @@ pub trait VideoFileRepository: Send + Sync {
     /// check, which needs to test one specific recorded path directly
     /// rather than intersect against a top-level directory listing.
     fn file_exists(&self, output_dir: &Path, filename: &str) -> bool;
+
+    /// Moves the file at `from` to `to`, creating `to`'s parent directory
+    /// first. A rename, so it is atomic within one filesystem.
+    fn move_file(&self, from: &Path, to: &Path) -> anyhow::Result<()>;
+
+    /// Removes `dir` if it is empty; a non-empty or missing `dir` is left
+    /// alone, not an error.
+    fn remove_if_empty(&self, dir: &Path) -> anyhow::Result<()>;
 }
 
 pub struct FilesystemVideoFileRepository;
@@ -66,35 +76,19 @@ impl VideoFileRepository for FilesystemVideoFileRepository {
     }
 
     fn list(&self, output_dir: &Path) -> anyhow::Result<Vec<String>> {
-        let entries = match std::fs::read_dir(output_dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => {
-                tracing::error!(output_dir = ?output_dir, error = %e, "failed to read output directory");
-                return Err(anyhow::anyhow!(
-                    "failed to read output directory {output_dir:?}: {e}"
-                ));
-            }
-        };
-
-        entries
-            .filter_map(|entry| {
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(e) => {
-                        tracing::error!(output_dir = ?output_dir, error = %e, "failed to read directory entry");
-                        return Some(Err(anyhow::anyhow!("failed to read directory entry: {e}")));
-                    }
-                };
-                if is_in_progress_temp_file(&entry.path()) {
-                    return None;
-                }
-                Some(entry.file_name().into_string().map_err(|name| {
-                    tracing::error!(output_dir = ?output_dir, filename = ?name, "non-UTF-8 filename");
-                    anyhow::anyhow!("non-UTF-8 filename: {name:?}")
-                }))
+        let entries = list_entries(output_dir)?;
+        let season_files = entries
+            .iter()
+            .filter(|entry| is_season_folder(entry) && output_dir.join(entry).is_dir())
+            .map(|season| {
+                Ok(list_entries(&output_dir.join(season))?
+                    .into_iter()
+                    .map(|file| format!("{season}/{file}"))
+                    .collect::<Vec<_>>())
             })
-            .collect()
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .concat();
+        Ok([entries, season_files].concat())
     }
 
     fn delete_dir_recursive(&self, dir: &Path) -> anyhow::Result<()> {
@@ -111,6 +105,72 @@ impl VideoFileRepository for FilesystemVideoFileRepository {
     fn file_exists(&self, output_dir: &Path, filename: &str) -> bool {
         output_dir.join(filename).is_file()
     }
+
+    fn move_file(&self, from: &Path, to: &Path) -> anyhow::Result<()> {
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)
+                .inspect_err(
+                    |e| tracing::error!(dir = ?parent, error = %e, "failed to create directory"),
+                )
+                .map_err(|e| anyhow::anyhow!("failed to create directory {parent:?}: {e}"))?;
+        }
+        std::fs::rename(from, to)
+            .inspect_err(
+                |e| tracing::error!(from = ?from, to = ?to, error = %e, "failed to move file"),
+            )
+            .map_err(|e| anyhow::anyhow!("failed to move {from:?} to {to:?}: {e}"))
+    }
+
+    fn remove_if_empty(&self, dir: &Path) -> anyhow::Result<()> {
+        let is_empty = match std::fs::read_dir(dir) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => {
+                tracing::error!(dir = ?dir, error = %e, "failed to read directory");
+                return Err(anyhow::anyhow!("failed to read directory {dir:?}: {e}"));
+            }
+        };
+        if !is_empty {
+            return Ok(());
+        }
+        std::fs::remove_dir(dir)
+            .inspect_err(|e| tracing::error!(dir = ?dir, error = %e, "failed to remove directory"))
+            .map_err(|e| anyhow::anyhow!("failed to remove directory {dir:?}: {e}"))
+    }
+}
+
+/// The entries directly in `output_dir`, excluding yt-dlp's in-progress
+/// temp files; a missing `output_dir` has none.
+fn list_entries(output_dir: &Path) -> anyhow::Result<Vec<String>> {
+    let entries = match std::fs::read_dir(output_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            tracing::error!(output_dir = ?output_dir, error = %e, "failed to read output directory");
+            return Err(anyhow::anyhow!(
+                "failed to read output directory {output_dir:?}: {e}"
+            ));
+        }
+    };
+
+    entries
+        .filter_map(|entry| {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    tracing::error!(output_dir = ?output_dir, error = %e, "failed to read directory entry");
+                    return Some(Err(anyhow::anyhow!("failed to read directory entry: {e}")));
+                }
+            };
+            if is_in_progress_temp_file(&entry.path()) {
+                return None;
+            }
+            Some(entry.file_name().into_string().map_err(|name| {
+                tracing::error!(output_dir = ?output_dir, filename = ?name, "non-UTF-8 filename");
+                anyhow::anyhow!("non-UTF-8 filename: {name:?}")
+            }))
+        })
+        .collect()
 }
 
 fn is_in_progress_temp_file(path: &Path) -> bool {
@@ -133,6 +193,14 @@ pub struct FakeVideoFileRepository {
     pub(crate) list_snapshot: std::sync::Mutex<Option<Vec<String>>>,
     pub(crate) deleted_dirs: std::sync::Mutex<Vec<std::path::PathBuf>>,
     pub(crate) file_exists_result: std::sync::Mutex<Option<bool>>,
+    pub(crate) moved: std::sync::Mutex<Vec<(std::path::PathBuf, std::path::PathBuf)>>,
+    pub(crate) removed_if_empty: std::sync::Mutex<Vec<std::path::PathBuf>>,
+    /// Runs on every `move_file`, before it is recorded, e.g. to observe
+    /// what is already on disk when a file is moved into place.
+    #[allow(clippy::type_complexity)]
+    pub(crate) on_move: Option<Box<dyn Fn(&Path, &Path) + Send + Sync>>,
+    /// Sources whose `move_file` fails, as a permission error would.
+    pub(crate) failing_moves: Vec<std::path::PathBuf>,
 }
 
 #[cfg(test)]
@@ -145,6 +213,7 @@ impl FakeVideoFileRepository {
             list_snapshot: std::sync::Mutex::new(None),
             deleted_dirs: std::sync::Mutex::new(Vec::new()),
             file_exists_result: std::sync::Mutex::new(None),
+            ..Self::default()
         }
     }
 
@@ -156,6 +225,22 @@ impl FakeVideoFileRepository {
             list_snapshot: std::sync::Mutex::new(Some(files)),
             deleted_dirs: std::sync::Mutex::new(Vec::new()),
             file_exists_result: std::sync::Mutex::new(None),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_on_move(self, hook: impl Fn(&Path, &Path) + Send + Sync + 'static) -> Self {
+        Self {
+            on_move: Some(Box::new(hook)),
+            ..self
+        }
+    }
+
+    /// The same fake, failing every move of `from`.
+    pub fn with_failing_move(self, from: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            failing_moves: [self.failing_moves, vec![from.into()]].concat(),
+            ..self
         }
     }
 
@@ -167,6 +252,7 @@ impl FakeVideoFileRepository {
             list_snapshot: std::sync::Mutex::new(None),
             deleted_dirs: std::sync::Mutex::new(Vec::new()),
             file_exists_result: std::sync::Mutex::new(Some(exists)),
+            ..Self::default()
         }
     }
 }
@@ -205,6 +291,28 @@ impl VideoFileRepository for FakeVideoFileRepository {
             .unwrap()
             .as_ref()
             .is_some_and(|files| files.iter().any(|f| f == filename))
+    }
+
+    fn move_file(&self, from: &Path, to: &Path) -> anyhow::Result<()> {
+        if let Some(hook) = &self.on_move {
+            hook(from, to);
+        }
+        if self.failing_moves.iter().any(|failing| failing == from) {
+            anyhow::bail!("permission denied moving {from:?}");
+        }
+        self.moved
+            .lock()
+            .unwrap()
+            .push((from.to_path_buf(), to.to_path_buf()));
+        Ok(())
+    }
+
+    fn remove_if_empty(&self, dir: &Path) -> anyhow::Result<()> {
+        self.removed_if_empty
+            .lock()
+            .unwrap()
+            .push(dir.to_path_buf());
+        Ok(())
     }
 }
 
@@ -262,6 +370,133 @@ mod tests {
         listed.sort();
 
         assert_eq!(listed, vec!["One.mp4".to_string(), "Two.mp4".to_string()]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn it_should_list_top_level_entries_and_season_files() {
+        let dir = unique_temp_dir("video-file-repository-list-seasons");
+        std::fs::write(dir.join("tvshow.nfo"), b"").unwrap();
+        std::fs::create_dir_all(dir.join("Legacy")).unwrap();
+        std::fs::write(dir.join("Legacy/Legacy.mp4"), b"").unwrap();
+        std::fs::create_dir_all(dir.join("Season 2026")).unwrap();
+        std::fs::write(dir.join("Season 2026/S2026E031501 - One.mp4"), b"").unwrap();
+        std::fs::write(dir.join("Season 2026/S2026E031502 - Two.mp4.part"), b"").unwrap();
+
+        let mut listed = FilesystemVideoFileRepository.list(&dir).unwrap();
+        listed.sort();
+
+        assert_eq!(
+            listed,
+            vec![
+                "Legacy".to_string(),
+                "Season 2026".to_string(),
+                "Season 2026/S2026E031501 - One.mp4".to_string(),
+                "tvshow.nfo".to_string(),
+            ]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn it_should_move_a_file_creating_its_parent() {
+        let dir = unique_temp_dir("video-file-repository-move");
+        std::fs::create_dir_all(dir.join(".downloads/yt1")).unwrap();
+        std::fs::write(dir.join(".downloads/yt1/yt1.mp4"), b"media").unwrap();
+        let to = dir.join("show/Season 2026/S2026E031501 - One.mp4");
+
+        FilesystemVideoFileRepository
+            .move_file(&dir.join(".downloads/yt1/yt1.mp4"), &to)
+            .unwrap();
+
+        assert_eq!(std::fs::read(&to).ok(), Some(b"media".to_vec()));
+        assert!(!dir.join(".downloads/yt1/yt1.mp4").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn it_should_remove_an_empty_dir_only() {
+        let dir = unique_temp_dir("video-file-repository-remove-if-empty");
+        std::fs::create_dir_all(dir.join("Empty")).unwrap();
+        std::fs::create_dir_all(dir.join("Full")).unwrap();
+        std::fs::write(dir.join("Full/leftover.mp4"), b"").unwrap();
+
+        let results = [
+            FilesystemVideoFileRepository.remove_if_empty(&dir.join("Empty")),
+            FilesystemVideoFileRepository.remove_if_empty(&dir.join("Full")),
+            FilesystemVideoFileRepository.remove_if_empty(&dir.join("Missing")),
+        ];
+
+        assert_eq!(results.map(|result| result.is_ok()), [true, true, true]);
+        assert_eq!(
+            [dir.join("Empty"), dir.join("Full/leftover.mp4")].map(|path| path.exists()),
+            [false, true]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn it_should_fail_to_remove_a_dir_it_cannot_read() {
+        let dir = unique_temp_dir("video-file-repository-remove-if-empty-unreadable");
+        let not_a_dir = dir.join("leftover.mp4");
+        std::fs::write(&not_a_dir, b"").unwrap();
+
+        let result = FilesystemVideoFileRepository.remove_if_empty(&not_a_dir);
+
+        assert_eq!(
+            result.map_err(|e| e.to_string()),
+            Err(format!(
+                "failed to read directory {not_a_dir:?}: Not a directory (os error 20)"
+            ))
+        );
+        assert!(not_a_dir.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn it_should_fail_to_list_an_output_directory_it_cannot_read() {
+        let dir = unique_temp_dir("video-file-repository-list-unreadable");
+        let not_a_dir = dir.join("leftover.mp4");
+        std::fs::write(&not_a_dir, b"").unwrap();
+
+        let result = FilesystemVideoFileRepository.list(&not_a_dir);
+
+        assert_eq!(
+            result.map_err(|e| e.to_string()),
+            Err(format!(
+                "failed to read output directory {not_a_dir:?}: Not a directory (os error 20)"
+            ))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn it_should_delete_a_file_or_a_dir_by_relative_path() {
+        let dir = unique_temp_dir("video-file-repository-delete-relative");
+        std::fs::create_dir_all(dir.join("Season 2026")).unwrap();
+        std::fs::write(dir.join("Season 2026/S2026E031501 - One.mp4"), b"").unwrap();
+        std::fs::create_dir_all(dir.join("Legacy")).unwrap();
+        std::fs::write(dir.join("Legacy/Legacy.mp4"), b"").unwrap();
+
+        let deleted = [
+            FilesystemVideoFileRepository
+                .delete(&dir, "Season 2026/S2026E031501 - One.mp4")
+                .unwrap(),
+            FilesystemVideoFileRepository
+                .delete(&dir, "Legacy")
+                .unwrap(),
+        ];
+
+        assert_eq!(deleted, [true, true]);
+        assert_eq!(
+            [
+                dir.join("Season 2026/S2026E031501 - One.mp4"),
+                dir.join("Season 2026"),
+                dir.join("Legacy"),
+            ]
+            .map(|path| path.exists()),
+            [false, true, false]
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

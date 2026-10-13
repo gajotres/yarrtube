@@ -130,10 +130,15 @@ mod tests {
     use crate::domain::playlist_video::{VideoAddedToPlaylist, VideoRemovedFromPlaylist};
     use crate::domain::services::InternalVideoReconciler;
     use crate::domain::services::MetadataGenerator;
+    use crate::domain::services::ShowFileWriter;
     use crate::domain::services::ThumbnailFetcher;
+    use crate::domain::services::VideoRelocator;
     use crate::domain::task::{ScheduledTask, Task, TaskStatus};
+    use crate::domain::video::PlaylistEpisodeNumber;
     use crate::domain::video::Video;
     use crate::domain::video::VideoId;
+    use crate::infrastructure::repositories::filesystem_channel_avatar_repository::FakeChannelAvatarRepository;
+    use crate::infrastructure::repositories::filesystem_show_file_repository::FakeShowFileRepository;
     use crate::infrastructure::repositories::filesystem_video_file_repository::FakeVideoFileRepository;
     use crate::infrastructure::repositories::sqlite_playlist_repository::{
         PlaylistRepository, SqlitePlaylistRepository,
@@ -1113,7 +1118,7 @@ mod tests {
             videos,
             vec![Video {
                 id: video_id.clone(),
-                ..Video::create(VideoId::new("vid1").unwrap(), "One", fixed_timestamp())
+                ..playlist_episode("vid1", "One", 1)
             }]
         );
         assert_eq!(
@@ -1313,8 +1318,10 @@ mod tests {
         let thumbnail_fetcher = Arc::new(ThumbnailFetcher::new(
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::default()),
+            Arc::new(FakeVideoFileRepository::default()),
             task_repository.clone(),
             Arc::new(FixedClock(fixed_timestamp())),
+            "/videos",
         ));
         let playlist_video_reconciler = PlaylistVideoReconciler::new(
             playlist_repository,
@@ -1333,7 +1340,18 @@ mod tests {
                 task_repository.clone(),
                 Arc::new(FakeVideoFileRepository::default()),
                 thumbnail_fetcher,
+                Arc::new(VideoRelocator::new(
+                    Arc::new(SqliteVideoRepository::new(db.database())),
+                    Arc::new(FakeVideoFileRepository::default()),
+                    Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
                 Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(ShowFileWriter::new(
+                Arc::new(FakeShowFileRepository::default()),
+                Arc::new(FakeChannelAvatarRepository::default()),
                 "/videos",
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1469,8 +1487,10 @@ mod tests {
         let thumbnail_fetcher = Arc::new(ThumbnailFetcher::new(
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::default()),
+            Arc::new(FakeVideoFileRepository::default()),
             task_repository.clone(),
             Arc::new(FixedClock(fixed_timestamp())),
+            "/videos",
         ));
         PlaylistVideoReconciler::new(
             playlist_repository,
@@ -1491,7 +1511,18 @@ mod tests {
                 task_repository,
                 Arc::new(FakeVideoFileRepository::default()),
                 thumbnail_fetcher,
+                Arc::new(VideoRelocator::new(
+                    Arc::new(SqliteVideoRepository::new(db.database())),
+                    Arc::new(FakeVideoFileRepository::default()),
+                    Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
                 Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(ShowFileWriter::new(
+                Arc::new(FakeShowFileRepository::default()),
+                Arc::new(FakeChannelAvatarRepository::default()),
                 "/videos",
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1526,10 +1557,23 @@ mod tests {
                 Arc::new(ThumbnailFetcher::new(
                     video_repository,
                     Arc::new(FakeVideoDownloaderRepository::default()),
+                    Arc::new(FakeVideoFileRepository::default()),
                     task_repository.clone(),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                    "/videos",
+                )),
+                Arc::new(VideoRelocator::new(
+                    Arc::new(SqliteVideoRepository::new(unused_connection())),
+                    Arc::new(FakeVideoFileRepository::default()),
+                    Arc::new(SqliteVideoMetadataRepository::new(unused_connection())),
                     Arc::new(FixedClock(fixed_timestamp())),
                 )),
                 Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(ShowFileWriter::new(
+                Arc::new(FakeShowFileRepository::default()),
+                Arc::new(FakeChannelAvatarRepository::default()),
                 "/videos",
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1608,6 +1652,15 @@ mod tests {
 
     fn playlist_id(id: &str) -> PlaylistId {
         PlaylistId::new(id).unwrap()
+    }
+
+    /// A newly stored playlist video numbered `episode`.
+    fn playlist_episode(youtube_id: &str, title: &str, episode: u32) -> Video {
+        Video::create(VideoId::new(youtube_id).unwrap(), title, fixed_timestamp())
+            .with_episode_number(
+                PlaylistEpisodeNumber::new(episode).unwrap().into(),
+                fixed_timestamp(),
+            )
     }
 
     fn playlist(id: &str, path: &str) -> Playlist {

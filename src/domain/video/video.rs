@@ -1,7 +1,8 @@
+use super::episode_number::EpisodeNumber;
 use super::playback_position::PlaybackPosition;
 use super::video_duration::VideoDuration;
-use super::video_filename::video_folder_candidates;
 use super::video_id::VideoId;
+use super::video_output_entry::is_episode_path;
 use super::video_record_id::VideoRecordId;
 use super::video_status::VideoStatus;
 use crate::domain::shared::Quality;
@@ -43,6 +44,9 @@ pub struct Video {
     pub synced_at: Option<DateTime<Utc>>,
     pub last_errored_at: Option<DateTime<Utc>>,
     pub last_played_at: Option<DateTime<Utc>>,
+    /// The video's episode number within its show, assigned once by the
+    /// first thumbnail fetch, download or relocation that places a file.
+    pub episode_number: Option<EpisodeNumber>,
 }
 
 const WATCHED_THRESHOLD: f64 = 0.9;
@@ -66,6 +70,7 @@ impl Video {
             synced_at: None,
             last_errored_at: None,
             last_played_at: None,
+            episode_number: None,
         }
     }
 
@@ -271,21 +276,40 @@ impl Video {
         !matches!(self.status, VideoStatus::Excluded | VideoStatus::Errored)
     }
 
-    /// The folders a download or thumbnail fetch of this video may be writing
-    /// into right now. Until the video is downloaded its folder isn't
-    /// recorded (a thumbnail fetch records it only once it finishes), so it
-    /// is predicted from the title, and also from `previous_title` when the
-    /// video was just renamed: a download started before the rename still
-    /// writes under the old name. Empty once the download recorded its
-    /// folder.
-    pub fn unrecorded_folder_candidates(&self, previous_title: Option<&str>) -> Vec<String> {
-        match self.filename {
-            Some(_) => Vec::new(),
-            None => std::iter::once(self.title.as_str())
-                .chain(previous_title)
-                .flat_map(|title| video_folder_candidates(title, &self.youtube_id))
-                .collect(),
+    /// Records the episode number assigned to this video.
+    pub fn with_episode_number(self, number: EpisodeNumber, now: DateTime<Utc>) -> Self {
+        Self {
+            episode_number: Some(number),
+            updated_at: now,
+            ..self
         }
+    }
+
+    /// Records a legacy video's files at their new paths in its season
+    /// folder, under the episode number they were relocated for.
+    pub fn relocate_to_episode(
+        self,
+        number: EpisodeNumber,
+        filename: impl Into<String>,
+        thumbnail_filename: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            filename: Some(filename.into()),
+            thumbnail_filename,
+            episode_number: Some(number),
+            updated_at: now,
+            ..self
+        }
+    }
+
+    /// Whether the video's recorded file is in the per-video-folder (or flat)
+    /// layout that predates the TV-show layout, i.e. not under a `Season `
+    /// folder.
+    pub fn is_in_legacy_layout(&self) -> bool {
+        self.filename
+            .as_deref()
+            .is_some_and(|filename| !is_episode_path(filename))
     }
 
     /// The recorded duration, else the reported one. The reported one is
@@ -458,6 +482,49 @@ mod tests {
             excluded,
             Video {
                 status: VideoStatus::Excluded,
+                updated_at: now,
+                ..video
+            }
+        );
+    }
+
+    #[test]
+    fn it_should_record_its_episode_number() {
+        let now = DateTime::<Utc>::from_timestamp(100, 0).unwrap();
+        let number = EpisodeNumber::from_columns(1, 3).unwrap();
+        let video = video();
+
+        let numbered = video.clone().with_episode_number(number, now);
+
+        assert_eq!(
+            numbered,
+            Video {
+                episode_number: Some(number),
+                updated_at: now,
+                ..video
+            }
+        );
+    }
+
+    #[test]
+    fn it_should_record_its_files_when_relocated_to_an_episode() {
+        let now = DateTime::<Utc>::from_timestamp(100, 0).unwrap();
+        let number = EpisodeNumber::from_columns(1, 3).unwrap();
+        let video = video();
+
+        let relocated = video.clone().relocate_to_episode(
+            number,
+            "Season 1/S01E003 - My Video.mp4",
+            Some("Season 1/S01E003 - My Video.jpg".to_string()),
+            now,
+        );
+
+        assert_eq!(
+            relocated,
+            Video {
+                filename: Some("Season 1/S01E003 - My Video.mp4".to_string()),
+                thumbnail_filename: Some("Season 1/S01E003 - My Video.jpg".to_string()),
+                episode_number: Some(number),
                 updated_at: now,
                 ..video
             }

@@ -1,13 +1,16 @@
 use crate::domain::playlist::PlaylistPath;
 use crate::domain::services::{
-    MetadataGenerator, MetadataGeneratorApi, ThumbnailFetcher, ThumbnailFetcherApi,
+    MetadataGenerator, MetadataGeneratorApi, Relocation, ThumbnailFetcher, ThumbnailFetcherApi,
+    VideoRelocator, VideoRelocatorApi,
 };
 use crate::domain::shared::Quality;
 use crate::domain::task::{ScheduledTask, Task};
 use crate::domain::video::VideoRecordId;
 use crate::domain::video::{
-    Video, VideoStatus, resolve_output_dir, top_level_entry, video_dir_for_filename,
+    EpisodePaths, SHOW_NFO_FILENAME, SHOW_POSTER_FILENAME, Video, VideoStatus, is_episode_path,
+    is_season_folder, nfo_path_for, owning_entry, resolve_output_dir,
 };
+use crate::domain::video_metadata::VideoMetadata;
 use crate::infrastructure::repositories::filesystem_video_file_repository::VideoFileRepository;
 use crate::infrastructure::repositories::sqlite_task_repository::TaskRepository;
 use crate::infrastructure::repositories::sqlite_video_metadata_repository::VideoMetadataRepository;
@@ -40,9 +43,6 @@ pub struct MembershipDelta {
     /// Videos added by the sync: their download and thumbnail come from their
     /// own video-added event, not from this reconciler's recoveries.
     pub added_ids: Vec<VideoRecordId>,
-    /// The title each renamed video had before the sync: a download started
-    /// before the rename is still writing into the folder named after it.
-    pub previous_titles: HashMap<VideoRecordId, String>,
 }
 
 /// Reconciles our database with our filesystem: brings a playlist's or
@@ -59,6 +59,7 @@ pub struct InternalVideoReconciler {
     task_repository: Arc<dyn TaskRepository>,
     video_file_repository: Arc<dyn VideoFileRepository>,
     thumbnail_fetcher: Arc<ThumbnailFetcher>,
+    video_relocator: Arc<VideoRelocator>,
     clock: Arc<dyn Clock>,
     videos_path: String,
 }
@@ -72,6 +73,7 @@ impl InternalVideoReconciler {
         task_repository: Arc<dyn TaskRepository>,
         video_file_repository: Arc<dyn VideoFileRepository>,
         thumbnail_fetcher: Arc<ThumbnailFetcher>,
+        video_relocator: Arc<VideoRelocator>,
         clock: Arc<dyn Clock>,
         videos_path: impl Into<String>,
     ) -> Self {
@@ -82,6 +84,7 @@ impl InternalVideoReconciler {
             task_repository,
             video_file_repository,
             thumbnail_fetcher,
+            video_relocator,
             clock,
             videos_path: videos_path.into(),
         }
@@ -101,7 +104,7 @@ pub trait InternalVideoReconcilerApi: Send + Sync {
 
 impl InternalVideoReconcilerApi for InternalVideoReconciler {
     fn reconcile(&self, desired: &DesiredState, delta: &MembershipDelta) -> anyhow::Result<()> {
-        let actual = self.read_actual_state(desired, delta)?;
+        let actual = self.read_actual_state(desired)?;
 
         let redownloaded = self.redownload_broken_files(desired, &actual)?;
         self.generate_missing_metadata(desired, &actual)?;
@@ -129,11 +132,7 @@ impl InternalVideoReconciler {
     /// same picture taken before any of them changes something. The videos
     /// are read last: a download that completes between these reads is then
     /// seen as `Downloaded`, never as unsettled with no download in flight.
-    fn read_actual_state(
-        &self,
-        desired: &DesiredState,
-        delta: &MembershipDelta,
-    ) -> anyhow::Result<ActualState> {
+    fn read_actual_state(&self, desired: &DesiredState) -> anyhow::Result<ActualState> {
         let downloads_in_flight = self.video_ids_with_download_in_flight()?;
         let output_dir = resolve_output_dir(&self.videos_path, desired.path.as_str());
         let files = self.video_file_repository.list(&output_dir)?;
@@ -145,7 +144,8 @@ impl InternalVideoReconciler {
             })
             .map(|v| v.id.clone())
             .collect();
-        let protected_entries = protected_entries(&videos, &delta.previous_titles);
+        let protected_entries = protected_entries(&videos);
+        let numbered_episode_paths = numbered_episode_paths(&videos);
 
         Ok(ActualState {
             output_dir,
@@ -154,6 +154,7 @@ impl InternalVideoReconciler {
             downloads_in_flight,
             broken_download_ids,
             protected_entries,
+            numbered_episode_paths,
         })
     }
 
@@ -227,33 +228,56 @@ impl InternalVideoReconciler {
     }
 
     /// Regenerates `video`'s metadata the same way `VideoDownloader` does at
-    /// download time, referencing the thumbnail already on disk. Any failure
-    /// is logged and swallowed — a `Downloaded` video's status and file are
-    /// never touched by this, and a repeated failure simply tries again on
-    /// the next reconcile pass.
+    /// download time, referencing the thumbnail already on disk; a video still
+    /// in the legacy layout is first relocated into its season folder, now
+    /// that its publish time is known. Any failure is logged and swallowed —
+    /// a `Downloaded` video's status is never touched by this, and a repeated
+    /// failure simply tries again on the next reconcile pass.
     fn generate_metadata(&self, video: &Video, output_dir: &Path, sort_position: Option<i64>) {
-        let Some(filename) = video.filename.as_deref() else {
-            return;
-        };
-        let thumbnail_filename = video
-            .thumbnail_filename
-            .as_deref()
-            .and_then(|f| Path::new(f).file_name())
-            .and_then(|f| f.to_str())
-            .map(str::to_string);
-        let Some(video_metadata) =
-            self.metadata_generator
-                .generate(video, sort_position, thumbnail_filename)
+        let Some(video_metadata) = self.metadata_generator.generate(video, sort_position, None)
         else {
             return;
         };
-        let video_dir = video_dir_for_filename(output_dir, filename);
+        let Some(video) = self.relocate_if_legacy(video, &video_metadata, output_dir) else {
+            return;
+        };
+        let (Some(filename), Some(number)) = (video.filename.as_deref(), video.episode_number)
+        else {
+            return;
+        };
+        let video_metadata = video_metadata.with_thumb(thumbnail_basename(&video));
+        let nfo_path = output_dir.join(nfo_path_for(filename));
 
-        if let Err(e) = self
-            .video_metadata_repository
-            .save(&video.id, &video_metadata, &video_dir)
+        if let Err(e) =
+            self.video_metadata_repository
+                .save(&video.id, &video_metadata, &number, &nfo_path)
         {
             warn!(video_id = %video.id, error = %e, "failed to save video metadata during reconcile");
+        }
+    }
+
+    /// `video` itself when already in its season folder, else `video` as
+    /// stored once relocated there; `None` when the relocation failed or
+    /// moved nothing.
+    fn relocate_if_legacy(
+        &self,
+        video: &Video,
+        metadata: &VideoMetadata,
+        output_dir: &Path,
+    ) -> Option<Video> {
+        if !video.is_in_legacy_layout() {
+            return Some(video.clone());
+        }
+        match self
+            .video_relocator
+            .relocate(video, Some(metadata.published_at), output_dir)
+        {
+            Ok(Relocation::Moved { .. }) => self.video_repository.find(&video.id).ok().flatten(),
+            Ok(_) => None,
+            Err(e) => {
+                warn!(video_id = %video.id, error = %e, "failed to relocate legacy video during reconcile");
+                None
+            }
         }
     }
 
@@ -309,11 +333,11 @@ impl InternalVideoReconciler {
             })
     }
 
-    /// Deletes every top-level entry of the output folder that doesn't
-    /// belong to a stored video.
+    /// Deletes every entry of the output folder that is neither a show file,
+    /// a season folder, nor a file of a stored video.
     fn delete_orphaned_files(&self, actual: &ActualState) -> anyhow::Result<()> {
         for file in &actual.files {
-            if actual.protected_entries.contains(file) {
+            if actual.is_protected(file) {
                 continue;
             }
             if self
@@ -367,39 +391,80 @@ struct ActualState {
     downloads_in_flight: HashSet<String>,
     /// `Downloaded` videos whose file is missing or not mp4.
     broken_download_ids: HashSet<VideoRecordId>,
-    /// Top-level entries of `output_dir` that orphan cleanup must keep.
+    /// Entries of `output_dir` that orphan cleanup must keep.
     protected_entries: HashSet<String>,
+    /// `Season <s>/<base name>` of every numbered video: whatever a download
+    /// or thumbnail fetch already moved into place under it is kept, even
+    /// before the video records it.
+    numbered_episode_paths: HashSet<String>,
 }
 
 impl ActualState {
     fn is_broken(&self, video: &Video) -> bool {
         self.broken_download_ids.contains(&video.id)
     }
+
+    fn is_protected(&self, entry: &str) -> bool {
+        self.protected_entries.contains(entry)
+            || is_season_folder(entry)
+            || self.numbered_episode_paths.contains(
+                Path::new(entry)
+                    .with_extension("")
+                    .to_string_lossy()
+                    .as_ref(),
+            )
+    }
 }
 
-/// Top-level entries of the output folder orphan cleanup must keep: every
-/// `Downloaded` video's file, every stored video's thumbnail (a
-/// `Pending`/`InProgress` video may already have one pre-fetched, see the
-/// `video-thumbnails` capability), and the folder an in-flight download or
-/// thumbnail fetch is writing into — not recorded yet, so protected by its
-/// predicted name.
-fn protected_entries(
-    videos: &[Video],
-    previous_titles: &HashMap<VideoRecordId, String>,
-) -> HashSet<String> {
-    let downloaded_files = videos
+/// Entries of the output folder orphan cleanup must keep: the show files,
+/// every `Downloaded` video's file and episode NFO, and every stored video's
+/// thumbnail (a `Pending`/`InProgress` video may already have one
+/// pre-fetched, see the `video-thumbnails` capability). An episode file is
+/// kept by its path in its season folder, a legacy video by its top-level
+/// folder or flat file.
+fn protected_entries(videos: &[Video]) -> HashSet<String> {
+    let downloaded_files: Vec<&str> = videos
         .iter()
         .filter(|v| v.status == VideoStatus::Downloaded)
-        .filter_map(|v| v.filename.clone());
-    let thumbnails = videos.iter().filter_map(|v| v.thumbnail_filename.clone());
-    let unrecorded_folders = videos.iter().flat_map(|video| {
-        video.unrecorded_folder_candidates(previous_titles.get(&video.id).map(String::as_str))
-    });
-
-    downloaded_files
+        .filter_map(|v| v.filename.as_deref())
+        .collect();
+    let thumbnails = videos
+        .iter()
+        .filter_map(|v| v.thumbnail_filename.as_deref());
+    let episode_nfos = downloaded_files
+        .iter()
+        .filter(|filename| is_episode_path(filename))
+        .map(|filename| nfo_path_for(filename));
+    let recorded = downloaded_files
+        .iter()
+        .copied()
         .chain(thumbnails)
-        .chain(unrecorded_folders)
-        .map(|entry| top_level_entry(&entry).to_string())
+        .map(|path| owning_entry(path).to_string());
+    [SHOW_NFO_FILENAME, SHOW_POSTER_FILENAME]
+        .map(str::to_string)
+        .into_iter()
+        .chain(recorded)
+        .chain(episode_nfos)
+        .collect()
+}
+
+/// The thumbnail's file name as an NFO references it, next to the episode.
+fn thumbnail_basename(video: &Video) -> Option<String> {
+    video
+        .thumbnail_filename
+        .as_deref()
+        .and_then(|f| Path::new(f).file_name())
+        .and_then(|f| f.to_str())
+        .map(str::to_string)
+}
+
+fn numbered_episode_paths(videos: &[Video]) -> HashSet<String> {
+    videos
+        .iter()
+        .filter_map(|v| {
+            v.episode_number
+                .map(|number| EpisodePaths::new(&number, &v.title).stem())
+        })
         .collect()
 }
 
@@ -409,7 +474,7 @@ mod tests {
     use crate::application::tasks::log_capture::captured_log_messages;
     use crate::domain::services::MetadataGenerator;
     use crate::domain::task::TaskStatus;
-    use crate::domain::video::VideoId;
+    use crate::domain::video::{EpisodeNumber, VideoId};
     use crate::domain::video_metadata::VideoMetadata;
     use crate::infrastructure::repositories::filesystem_video_file_repository::FakeVideoFileRepository;
     use crate::infrastructure::repositories::sqlite_task_repository::SqliteTaskRepository;
@@ -595,178 +660,6 @@ mod tests {
         );
         assert_eq!(video_repository.list().unwrap(), vec![]);
         assert_eq!(task_repository.list_non_completed().unwrap(), vec![]);
-    }
-
-    #[test]
-    fn it_should_keep_the_folder_of_a_download_in_progress() {
-        let db = TestDatabase::new();
-        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
-        let task_repository = Arc::new(SqliteTaskRepository::new(
-            db.database(),
-            Arc::new(FixedClock(fixed_timestamp())),
-        ));
-        let video_file_repository = Arc::new(FakeVideoFileRepository::with_listing(vec![
-            "My Video".to_string(),
-        ]));
-        let video = my_video().start_download(fixed_timestamp());
-        video_repository.save(&video).unwrap();
-        let reconciler = internal_video_reconciler(
-            &db,
-            video_repository.clone(),
-            task_repository.clone(),
-            video_file_repository.clone(),
-        );
-        let desired = desired_state(vec![(video.clone(), 0)]);
-
-        let result = reconcile(&reconciler, &desired, &MembershipDelta::default());
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(*video_file_repository.deleted_calls.lock().unwrap(), vec![]);
-        assert_eq!(video_repository.list().unwrap(), vec![video.clone()]);
-        assert_eq!(
-            task_repository.list_non_completed().unwrap(),
-            vec![download_video_task(1, &video.id)]
-        );
-    }
-
-    #[test]
-    fn it_should_keep_the_folder_of_a_thumbnail_fetch_in_progress() {
-        let db = TestDatabase::new();
-        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
-        let task_repository = Arc::new(SqliteTaskRepository::new(
-            db.database(),
-            Arc::new(FixedClock(fixed_timestamp())),
-        ));
-        let video_file_repository = Arc::new(FakeVideoFileRepository::with_listing(vec![
-            "My Video".to_string(),
-        ]));
-        let video = my_video();
-        video_repository.save(&video).unwrap();
-        let reconciler = internal_video_reconciler(
-            &db,
-            video_repository.clone(),
-            task_repository.clone(),
-            video_file_repository.clone(),
-        );
-        let desired = desired_state(vec![(video.clone(), 0)]);
-
-        let result = reconcile(&reconciler, &desired, &MembershipDelta::default());
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(*video_file_repository.deleted_calls.lock().unwrap(), vec![]);
-        assert_eq!(video_repository.list().unwrap(), vec![video.clone()]);
-        assert_eq!(
-            task_repository.list_non_completed().unwrap(),
-            vec![
-                download_video_task(1, &video.id),
-                fetch_thumbnail_task(2, &video.id)
-            ]
-        );
-    }
-
-    #[test]
-    fn it_should_keep_the_suffixed_folder_of_a_download_in_progress() {
-        let db = TestDatabase::new();
-        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
-        let task_repository = Arc::new(SqliteTaskRepository::new(
-            db.database(),
-            Arc::new(FixedClock(fixed_timestamp())),
-        ));
-        let video_file_repository = Arc::new(FakeVideoFileRepository::with_listing(vec![
-            "My Video [vid1]".to_string(),
-        ]));
-        let video = my_video().start_download(fixed_timestamp());
-        video_repository.save(&video).unwrap();
-        let reconciler = internal_video_reconciler(
-            &db,
-            video_repository.clone(),
-            task_repository.clone(),
-            video_file_repository.clone(),
-        );
-        let desired = desired_state(vec![(video.clone(), 0)]);
-
-        let result = reconcile(&reconciler, &desired, &MembershipDelta::default());
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(*video_file_repository.deleted_calls.lock().unwrap(), vec![]);
-        assert_eq!(video_repository.list().unwrap(), vec![video.clone()]);
-        assert_eq!(
-            task_repository.list_non_completed().unwrap(),
-            vec![download_video_task(1, &video.id)]
-        );
-    }
-
-    #[test]
-    fn it_should_keep_the_folder_of_a_download_being_retried() {
-        let db = TestDatabase::new();
-        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
-        let task_repository = Arc::new(SqliteTaskRepository::new(
-            db.database(),
-            Arc::new(FixedClock(fixed_timestamp())),
-        ));
-        let video_file_repository = Arc::new(FakeVideoFileRepository::with_listing(vec![
-            "My Video".to_string(),
-        ]));
-        let video = my_video()
-            .start_download(fixed_timestamp())
-            .mark_errored_retrying(fixed_timestamp());
-        video_repository.save(&video).unwrap();
-        let reconciler = internal_video_reconciler(
-            &db,
-            video_repository.clone(),
-            task_repository.clone(),
-            video_file_repository.clone(),
-        );
-        let desired = desired_state(vec![(video.clone(), 0)]);
-
-        let result = reconcile(&reconciler, &desired, &MembershipDelta::default());
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(*video_file_repository.deleted_calls.lock().unwrap(), vec![]);
-        assert_eq!(video_repository.list().unwrap(), vec![video.clone()]);
-        assert_eq!(
-            task_repository.list_non_completed().unwrap(),
-            vec![
-                download_video_task(1, &video.id),
-                fetch_thumbnail_task(2, &video.id)
-            ]
-        );
-    }
-
-    #[test]
-    fn it_should_still_delete_a_folder_no_video_accounts_for() {
-        let db = TestDatabase::new();
-        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
-        let task_repository = Arc::new(SqliteTaskRepository::new(
-            db.database(),
-            Arc::new(FixedClock(fixed_timestamp())),
-        ));
-        let video_file_repository = Arc::new(FakeVideoFileRepository::with_listing(vec![
-            "My Video".to_string(),
-            "Other".to_string(),
-        ]));
-        let video = my_video().start_download(fixed_timestamp());
-        video_repository.save(&video).unwrap();
-        let reconciler = internal_video_reconciler(
-            &db,
-            video_repository.clone(),
-            task_repository.clone(),
-            video_file_repository.clone(),
-        );
-        let desired = desired_state(vec![(video.clone(), 0)]);
-
-        let result = reconcile(&reconciler, &desired, &MembershipDelta::default());
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(
-            *video_file_repository.deleted_calls.lock().unwrap(),
-            vec![deleted("Other")]
-        );
-        assert_eq!(video_repository.list().unwrap(), vec![video.clone()]);
-        assert_eq!(
-            task_repository.list_non_completed().unwrap(),
-            vec![download_video_task(1, &video.id)]
-        );
     }
 
     #[test]
@@ -1251,9 +1144,14 @@ mod tests {
             Arc::new(FixedClock(fixed_timestamp())),
         ));
         let videos_root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(videos_root.path().join("my-playlist/My Video")).unwrap();
-        let video = downloaded_video("My Video/My Video.mp4", None);
+        std::fs::create_dir_all(videos_root.path().join("my-playlist/Season 2026")).unwrap();
+        let video = downloaded_video("Season 2026/S2026E031501 - My Video.mp4", None)
+            .with_episode_number(
+                EpisodeNumber::from_columns(2026, 31501).unwrap(),
+                fixed_timestamp(),
+            );
         video_repository.save(&video).unwrap();
+        video_repository.update(&video).unwrap();
         let reconciler = InternalVideoReconciler::new(
             video_repository.clone(),
             Arc::new(MetadataGenerator::new(
@@ -1268,7 +1166,15 @@ mod tests {
             Arc::new(ThumbnailFetcher::new(
                 video_repository.clone(),
                 Arc::new(FakeVideoDownloaderRepository::default()),
+                Arc::new(FakeVideoFileRepository::default()),
                 task_repository.clone(),
+                Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(VideoRelocator::new(
+                Arc::new(SqliteVideoRepository::new(db.database())),
+                Arc::new(FakeVideoFileRepository::default()),
+                Arc::new(SqliteVideoMetadataRepository::new(db.database())),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1323,9 +1229,14 @@ mod tests {
             Arc::new(FixedClock(fixed_timestamp())),
         ));
         let videos_root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(videos_root.path().join("my-playlist/My Video")).unwrap();
-        let video = downloaded_video("My Video/My Video.mp4", None);
+        std::fs::create_dir_all(videos_root.path().join("my-playlist/Season 2026")).unwrap();
+        let video = downloaded_video("Season 2026/S2026E031501 - My Video.mp4", None)
+            .with_episode_number(
+                EpisodeNumber::from_columns(2026, 31501).unwrap(),
+                fixed_timestamp(),
+            );
         video_repository.save(&video).unwrap();
+        video_repository.update(&video).unwrap();
         let reconciler = InternalVideoReconciler::new(
             video_repository.clone(),
             Arc::new(MetadataGenerator::new(
@@ -1340,7 +1251,15 @@ mod tests {
             Arc::new(ThumbnailFetcher::new(
                 video_repository.clone(),
                 Arc::new(FakeVideoDownloaderRepository::default()),
+                Arc::new(FakeVideoFileRepository::default()),
                 task_repository.clone(),
+                Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(VideoRelocator::new(
+                Arc::new(SqliteVideoRepository::new(db.database())),
+                Arc::new(FakeVideoFileRepository::default()),
+                Arc::new(SqliteVideoMetadataRepository::new(db.database())),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1418,7 +1337,12 @@ mod tests {
             DateTime::UNIX_EPOCH,
         );
         video_metadata_repository
-            .save(&video.id, &existing_metadata, &video_dir)
+            .save(
+                &video.id,
+                &existing_metadata,
+                &EpisodeNumber::from_columns(2024, 10101).unwrap(),
+                &video_dir.join("movie.nfo"),
+            )
             .unwrap();
         let reconciler = InternalVideoReconciler::new(
             video_repository.clone(),
@@ -1434,7 +1358,15 @@ mod tests {
             Arc::new(ThumbnailFetcher::new(
                 video_repository.clone(),
                 Arc::new(FakeVideoDownloaderRepository::default()),
+                Arc::new(FakeVideoFileRepository::default()),
                 task_repository.clone(),
+                Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(VideoRelocator::new(
+                Arc::new(SqliteVideoRepository::new(db.database())),
+                Arc::new(FakeVideoFileRepository::default()),
+                Arc::new(SqliteVideoMetadataRepository::new(db.database())),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1494,7 +1426,15 @@ mod tests {
             Arc::new(ThumbnailFetcher::new(
                 video_repository.clone(),
                 Arc::new(FakeVideoDownloaderRepository::default()),
+                Arc::new(FakeVideoFileRepository::default()),
                 task_repository.clone(),
+                Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(VideoRelocator::new(
+                Arc::new(SqliteVideoRepository::new(db.database())),
+                Arc::new(FakeVideoFileRepository::default()),
+                Arc::new(SqliteVideoMetadataRepository::new(db.database())),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1554,7 +1494,15 @@ mod tests {
             Arc::new(ThumbnailFetcher::new(
                 video_repository.clone(),
                 video_downloader_repository.clone(),
+                Arc::new(FakeVideoFileRepository::default()),
                 task_repository.clone(),
+                Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(VideoRelocator::new(
+                Arc::new(SqliteVideoRepository::new(db.database())),
+                Arc::new(FakeVideoFileRepository::default()),
+                Arc::new(SqliteVideoMetadataRepository::new(db.database())),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1611,7 +1559,15 @@ mod tests {
             Arc::new(ThumbnailFetcher::new(
                 video_repository.clone(),
                 video_downloader_repository.clone(),
+                Arc::new(FakeVideoFileRepository::default()),
                 task_repository.clone(),
+                Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(VideoRelocator::new(
+                Arc::new(SqliteVideoRepository::new(db.database())),
+                Arc::new(FakeVideoFileRepository::default()),
+                Arc::new(SqliteVideoMetadataRepository::new(db.database())),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1665,7 +1621,15 @@ mod tests {
             Arc::new(ThumbnailFetcher::new(
                 video_repository.clone(),
                 video_downloader_repository.clone(),
+                Arc::new(FakeVideoFileRepository::default()),
                 task_repository.clone(),
+                Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(VideoRelocator::new(
+                Arc::new(SqliteVideoRepository::new(db.database())),
+                Arc::new(FakeVideoFileRepository::default()),
+                Arc::new(SqliteVideoMetadataRepository::new(db.database())),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1763,7 +1727,15 @@ mod tests {
             Arc::new(ThumbnailFetcher::new(
                 video_repository.clone(),
                 video_downloader_repository.clone(),
+                Arc::new(FakeVideoFileRepository::default()),
                 task_repository.clone(),
+                Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(VideoRelocator::new(
+                Arc::new(SqliteVideoRepository::new(db.database())),
+                Arc::new(FakeVideoFileRepository::default()),
+                Arc::new(SqliteVideoMetadataRepository::new(db.database())),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1808,7 +1780,15 @@ mod tests {
             Arc::new(ThumbnailFetcher::new(
                 video_repository.clone(),
                 video_downloader_repository.clone(),
+                Arc::new(FakeVideoFileRepository::default()),
                 task_repository.clone(),
+                Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(VideoRelocator::new(
+                Arc::new(SqliteVideoRepository::new(db.database())),
+                Arc::new(FakeVideoFileRepository::default()),
+                Arc::new(SqliteVideoMetadataRepository::new(db.database())),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1842,45 +1822,6 @@ mod tests {
     }
 
     #[test]
-    fn it_should_keep_the_folder_of_a_download_in_progress_if_video_renamed() {
-        let db = TestDatabase::new();
-        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
-        let task_repository = Arc::new(SqliteTaskRepository::new(
-            db.database(),
-            Arc::new(FixedClock(fixed_timestamp())),
-        ));
-        let video_file_repository = Arc::new(FakeVideoFileRepository::with_listing(vec![
-            "My Video".to_string(),
-        ]));
-        let renamed = Video {
-            title: "Renamed".to_string(),
-            ..my_video().start_download(fixed_timestamp())
-        };
-        video_repository.save(&renamed).unwrap();
-        let reconciler = internal_video_reconciler(
-            &db,
-            video_repository.clone(),
-            task_repository.clone(),
-            video_file_repository.clone(),
-        );
-        let desired = desired_state(vec![(renamed.clone(), 0)]);
-        let delta = MembershipDelta {
-            previous_titles: HashMap::from([(renamed.id.clone(), "My Video".to_string())]),
-            ..MembershipDelta::default()
-        };
-
-        let result = reconcile(&reconciler, &desired, &delta);
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(*video_file_repository.deleted_calls.lock().unwrap(), vec![]);
-        assert_eq!(video_repository.list().unwrap(), vec![renamed.clone()]);
-        assert_eq!(
-            task_repository.list_non_completed().unwrap(),
-            vec![download_video_task(1, &renamed.id)]
-        );
-    }
-
-    #[test]
     fn it_should_not_schedule_a_download_or_thumbnail_fetch_for_a_video_added_in_the_same_pass() {
         let db = TestDatabase::new();
         let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
@@ -1900,7 +1841,6 @@ mod tests {
         let desired = desired_state(vec![(added.clone(), 0)]);
         let delta = MembershipDelta {
             added_ids: vec![added.id.clone()],
-            ..MembershipDelta::default()
         };
 
         let result = reconcile(&reconciler, &desired, &delta);
@@ -1930,7 +1870,15 @@ mod tests {
             Arc::new(ThumbnailFetcher::new(
                 video_repository,
                 Arc::new(FakeVideoDownloaderRepository::default()),
+                Arc::new(FakeVideoFileRepository::default()),
                 task_repository,
+                Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(VideoRelocator::new(
+                Arc::new(SqliteVideoRepository::new(db.database())),
+                Arc::new(FakeVideoFileRepository::default()),
+                Arc::new(SqliteVideoMetadataRepository::new(db.database())),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1984,8 +1932,8 @@ mod tests {
     /// The thumbnail the fake downloader reports for `my_video()`.
     fn fetched_thumbnail() -> FetchedThumbnail {
         FetchedThumbnail {
-            folder: "My Video".to_string(),
-            filename: "My Video.jpg".to_string(),
+            path: std::path::PathBuf::from("My Video.jpg"),
+            published_at: None,
         }
     }
 

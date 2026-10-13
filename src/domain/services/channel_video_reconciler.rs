@@ -4,6 +4,7 @@ use crate::domain::channel_video::{VideoAddedToChannel, VideoRemovedFromChannel}
 use crate::domain::event::DomainEvent;
 use crate::domain::services::{
     DesiredState, InternalVideoReconciler, InternalVideoReconcilerApi, MembershipDelta,
+    ShowFileWriter, ShowFileWriterApi,
 };
 use crate::domain::task::Task;
 use crate::domain::video::{Video, VideoId, VideoRecordId, VideoStatus};
@@ -35,6 +36,7 @@ pub struct ChannelVideoReconciler {
     event_publisher: Arc<dyn EventPublisher>,
     task_repository: Arc<dyn TaskRepository>,
     internal_video_reconciler: Arc<InternalVideoReconciler>,
+    show_file_writer: Arc<ShowFileWriter>,
     clock: Arc<dyn Clock>,
     reconcile_interval_seconds: i64,
 }
@@ -49,6 +51,7 @@ impl ChannelVideoReconciler {
         event_publisher: Arc<dyn EventPublisher>,
         task_repository: Arc<dyn TaskRepository>,
         internal_video_reconciler: Arc<InternalVideoReconciler>,
+        show_file_writer: Arc<ShowFileWriter>,
         clock: Arc<dyn Clock>,
         reconcile_interval_seconds: i64,
     ) -> Self {
@@ -60,6 +63,7 @@ impl ChannelVideoReconciler {
             event_publisher,
             task_repository,
             internal_video_reconciler,
+            show_file_writer,
             clock,
             reconcile_interval_seconds,
         }
@@ -137,6 +141,11 @@ impl ChannelVideoReconciler {
         let _span = info_span!("reconcile_channel", channel_id = %channel.id).entered();
         info!(channel_id = %channel.id, "reconciling channel");
 
+        // Best effort: a show file that can't be written must not stop the
+        // source from syncing; the next pass tries again.
+        if let Err(e) = self.show_file_writer.write_channel_show(channel) {
+            warn!(channel_id = %channel.id, error = %e, "failed to write show files");
+        }
         let delta = self.sync_membership_with_youtube(channel, on_listing_failure)?;
         let desired = self.desired_state(channel)?;
         self.internal_video_reconciler.reconcile(&desired, &delta)
@@ -181,13 +190,7 @@ impl ChannelVideoReconciler {
                     known_videos.insert(current.youtube_id.clone(), added);
                 }
                 Some((existing, video)) => {
-                    if let Some(previous_title) =
-                        self.refresh_known_video(existing, video, current, now)?
-                    {
-                        delta
-                            .previous_titles
-                            .insert(video.id.clone(), previous_title);
-                    }
+                    self.refresh_known_video(existing, video, current, now)?
                 }
             }
         }
@@ -281,16 +284,14 @@ impl ChannelVideoReconciler {
     }
 
     /// Follows a known video's title and recency position on YouTube.
-    /// Returns the video's previous title when it was renamed.
     fn refresh_known_video(
         &self,
         existing: &ChannelVideo,
         video: &Video,
         current: &ChannelVideoListing,
         now: DateTime<Utc>,
-    ) -> anyhow::Result<Option<String>> {
-        let renamed = video.title != current.title;
-        if renamed {
+    ) -> anyhow::Result<()> {
+        if video.title != current.title {
             self.video_repository
                 .update_title(&video.id, &current.title, now)?;
         }
@@ -302,7 +303,7 @@ impl ChannelVideoReconciler {
             })?;
         }
 
-        Ok(renamed.then(|| video.title.clone()))
+        Ok(())
     }
 
     /// Deletes every stored video whose YouTube id is not in

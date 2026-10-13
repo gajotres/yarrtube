@@ -55,6 +55,8 @@ To illustrate this domain-driven flow we can take a look at what happens when a 
 
 1. `POST /api/channels` saves the channel and publishes `ChannelCreated` domain event.
 2. The `ReconcileOnChannelCreated` subscriber runs asynchronously, polling the domain events table (which acts like a queue), and runs the first channel sync.
+   - The sync writes the channel's show files (`tvshow.nfo`, and
+     `poster.jpg` from its avatar), as every later sync does too.
    - The sync reads the channel's most recent uploads from YouTube using the YouTube API.
    - It saves each new video as `PENDING` and publishes one
      `VideoAddedToChannel` domain event per video.
@@ -64,8 +66,13 @@ To illustrate this domain-driven flow we can take a look at what happens when a 
    - `FetchThumbnailOnVideoAddedToChannel` schedules a `FetchThumbnail`
      task.
    - `DownloadVideoOnVideoAddedToChannel` schedules a `DownloadVideo` task.
-4. The `TaskExecutor` runs them. Both call `yt-dlp`. The thumbnail usually
+4. The `TaskExecutor` runs them. Both call `yt-dlp` inside the video's
+   staging folder (`<videos root>/.downloads/<youtube id>`), take its
+   episode number from the publish time `yt-dlp` reports, and move the
+   result into the show's season folder (see below). The thumbnail usually
    arrives first, so the UI can show it while the video is still downloading.
+   A finished download publishes `VideoDownloaded`, which asks Plex to scan
+   the show folder when the scan trigger is configured.
 5. Every hour, the `ReconcileChannel` task runs the sync again and schedules
    the next one. New uploads repeat steps 3–4. The sync also schedules a
    `FetchThumbnail` for any video still missing its thumbnail.
@@ -99,6 +106,45 @@ sequenceDiagram
 
     Note over Reconciler,Executor: One interval later, ReconcileChannel<br/>re-syncs and schedules the next run.
 ```
+
+## Videos on disk
+
+Each tracked playlist or channel is a TV show under its storage path:
+
+```
+<storage path>/
+├── tvshow.nfo                                  ShowFileWriter, on every sync
+├── poster.jpg                                  channels only (avatar copy)
+└── Season <year>/                              Season 1/ for a playlist
+    └── S<year>E<MMDDii> - <title>.{mp4,jpg,nfo}  S01E<nnn> - <title>.* for a playlist
+```
+
+- **Episode number** (`EpisodeNumber`, one of two value objects), assigned
+  once, stored on the video and never recomputed, so files never rename:
+  - `ChannelEpisodeNumber`: season = publish year, episode = publish month
+    and day plus a two-digit index among the channel's videos published
+    that day. Assigned in the database
+    (`VideoRepository::assign_episode_number`, by whichever of the
+    thumbnail fetch or the download needs it first).
+  - `PlaylistEpisodeNumber`: season 1, episode = the playlist's next
+    number (`Playlist::last_episode` + 1), assigned by
+    `PlaylistVideoReconciler` when it first stores the video, in playlist
+    position order. The counter guarantees a removed video's number is
+    never reused. Migration `0008` numbered the videos of playlists
+    tracked before this existed by their stored position.
+
+  A stored season of `1` decodes as a playlist number.
+- **Staging**: `yt-dlp` writes into `.downloads/<youtube id>`; the NFO is
+  written at its final path first, then media and thumbnail are renamed
+  into the season folder, so players never see a partial file.
+- **Reconcile** sweeps orphans by path: show files, season folders and
+  every file under a numbered video's base name are protected.
+- **Legacy layout**: a recorded filename not under `Season ` is a per-video
+  folder from older versions. It keeps being served; `VideoRelocator`
+  moves it into the TV layout, either from the `migrate-layout`
+  subcommand (`LayoutMigrator`, with a `--dry-run` that plans numbers
+  without writing them) or from reconcile once the video's metadata can be
+  fetched.
 
 ## Testing
 

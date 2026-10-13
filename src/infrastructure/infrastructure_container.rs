@@ -5,6 +5,9 @@ use crate::infrastructure::repositories::filesystem_channel_avatar_repository::{
 use crate::infrastructure::repositories::filesystem_directory_repository::{
     DirectoryRepository, FilesystemDirectoryRepository,
 };
+use crate::infrastructure::repositories::filesystem_show_file_repository::{
+    FilesystemShowFileRepository, ShowFileRepository,
+};
 use crate::infrastructure::repositories::filesystem_video_file_repository::{
     FilesystemVideoFileRepository, VideoFileRepository,
 };
@@ -90,6 +93,7 @@ pub struct InfrastructureContainer {
     pub channel_videos_repository: Arc<dyn ChannelVideosRepository>,
     pub video_downloader_repository: Arc<dyn VideoDownloaderRepository>,
     pub video_file_repository: Arc<dyn VideoFileRepository>,
+    pub show_file_repository: Arc<dyn ShowFileRepository>,
     pub channel_avatar_repository: Arc<dyn ChannelAvatarRepository>,
     pub directory_repository: Arc<dyn DirectoryRepository>,
     pub ytdlp_updater: Arc<dyn YtdlpUpdater>,
@@ -136,6 +140,7 @@ impl InfrastructureContainer {
                 settings.ytdlp_path,
             )),
             video_file_repository: Arc::new(FilesystemVideoFileRepository),
+            show_file_repository: Arc::new(FilesystemShowFileRepository),
             channel_avatar_repository: Arc::new(FilesystemChannelAvatarRepository::new(
                 settings.avatars_path,
             )),
