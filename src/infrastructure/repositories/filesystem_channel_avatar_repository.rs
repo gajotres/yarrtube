@@ -24,6 +24,9 @@ pub trait ChannelAvatarRepository: Send + Sync {
 
     /// The local path of a stored avatar file.
     fn path_of(&self, filename: &str) -> PathBuf;
+
+    /// Whether a previously stored avatar file is still present.
+    fn exists(&self, filename: &str) -> anyhow::Result<bool>;
 }
 
 pub struct FilesystemChannelAvatarRepository {
@@ -98,6 +101,10 @@ impl ChannelAvatarRepository for FilesystemChannelAvatarRepository {
 
     fn path_of(&self, filename: &str) -> PathBuf {
         self.avatars_dir.join(filename)
+    }
+
+    fn exists(&self, filename: &str) -> anyhow::Result<bool> {
+        Ok(self.avatars_dir.join(filename).try_exists()?)
     }
 }
 
@@ -196,6 +203,15 @@ impl ChannelAvatarRepository for FakeChannelAvatarRepository {
     /// The fake's avatars directory is `avatars`.
     fn path_of(&self, filename: &str) -> PathBuf {
         PathBuf::from("avatars").join(filename)
+    }
+
+    fn exists(&self, filename: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .avatars
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(stored, _)| stored == filename))
     }
 }
 
@@ -308,5 +324,28 @@ mod tests {
         let path = repo.path_of("@somechannel.jpg");
 
         assert_eq!(path, PathBuf::from("/data/avatars/@somechannel.jpg"));
+    }
+
+    #[test]
+    fn it_should_report_a_stored_avatar_file_as_existing() {
+        let dir = unique_temp_dir("channel-avatar-exists");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("@somechannel.jpg"), b"fake image bytes").unwrap();
+        let repo = FilesystemChannelAvatarRepository::new(dir.clone());
+
+        let exists = repo.exists("@somechannel.jpg").unwrap();
+
+        assert!(exists);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn it_should_report_an_avatar_as_missing_if_its_directory_is_gone() {
+        let dir = unique_temp_dir("channel-avatar-exists-missing-dir");
+        let repo = FilesystemChannelAvatarRepository::new(dir);
+
+        let exists = repo.exists("@somechannel.jpg").unwrap();
+
+        assert!(!exists);
     }
 }
