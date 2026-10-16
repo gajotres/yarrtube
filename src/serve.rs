@@ -143,6 +143,9 @@ pub(crate) fn build_infrastructure() -> Result<InfrastructureContainer> {
         videos_path: PathBuf::from(videos_path()),
         avatars_path: avatars_path(),
         ytdlp_path: target_path(),
+        sponsorblock: crate::infrastructure::shared::sponsorblock::SponsorBlockConfig::parse(
+            &std::env::var("YARRTUBE_SPONSORBLOCK_REMOVE").unwrap_or_default(),
+        )?,
     })
 }
 
@@ -1059,6 +1062,7 @@ mod tests {
             videos_path: unique_temp_dir("serve-registry-videos"),
             avatars_path: unique_temp_dir("serve-registry-avatars"),
             ytdlp_path: PathBuf::from("yt-dlp"),
+            sponsorblock: Default::default(),
         })
         .unwrap()
     }

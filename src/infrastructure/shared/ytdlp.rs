@@ -1,4 +1,5 @@
 use crate::domain::shared::Quality;
+use crate::infrastructure::shared::sponsorblock::SponsorBlockConfig;
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use std::io;
@@ -110,7 +111,7 @@ const STAGED_OUTPUT_TEMPLATE: &str = "%(id)s.%(ext)s";
 /// first), outside any show directory, so partial files never reach the
 /// library. This is a pure process-invocation layer with no YouTube API or
 /// XML knowledge. Asks `yt-dlp` to print its duration followed by the exact
-/// filename it saved via `--print %(duration)s --print after_move:filename`,
+/// filename it saved via `--print after_move:%(duration)s --print after_move:filename`,
 /// in quiet mode so those are the only lines on stdout, filename last.
 /// Returns `Ok(DownloadAttempt::Succeeded(..))` on a successful download,
 /// `Ok(DownloadAttempt::Failed { stderr })` for a clean `yt-dlp` failure
@@ -123,9 +124,16 @@ pub fn download_video(
     video_url: &str,
     quality: Quality,
     staging_dir: &Path,
+    sponsorblock: &SponsorBlockConfig,
 ) -> Result<DownloadAttempt> {
     ensure_output_dir(staging_dir)?;
     let mut args = args_for_quality(quality);
+    if let Some(categories) = sponsorblock.categories() {
+        args.extend(["--sponsorblock-remove".to_string(), categories.to_string()]);
+    } else {
+        // An explicit off switch also overrides an ambient yt-dlp configuration.
+        args.push("--no-sponsorblock".to_string());
+    }
     args.extend([
         "-o".to_string(),
         STAGED_OUTPUT_TEMPLATE.to_string(),
@@ -142,11 +150,11 @@ pub fn download_video(
         // `--print` stdout. See the `log-sabr-detection` change.
         "--quiet".to_string(),
         "--print".to_string(),
-        "%(timestamp)s".to_string(),
+        "after_move:%(timestamp)s".to_string(),
         "--print".to_string(),
-        "%(upload_date)s".to_string(),
+        "after_move:%(upload_date)s".to_string(),
         "--print".to_string(),
-        "%(duration)s".to_string(),
+        "after_move:%(duration)s".to_string(),
         "--print".to_string(),
         "after_move:filename".to_string(),
     ]);
@@ -174,6 +182,7 @@ pub fn download_video(
     )? {
         RunOutcome::Success(output) => output,
         RunOutcome::CleanFailure { stderr_raw } => {
+            log_sponsorblock_warnings(&stderr_raw);
             return Ok(DownloadAttempt::Failed {
                 stderr: reason_excluding_warnings(&stderr_raw),
                 sabr_notice: sabr_reason(&stderr_raw),
@@ -181,6 +190,7 @@ pub fn download_video(
         }
     };
 
+    log_sponsorblock_warnings(&String::from_utf8_lossy(&output.stderr));
     let sabr_notice = sabr_reason(&String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let lines: Vec<&str> = stdout.lines().collect();
@@ -203,6 +213,16 @@ pub fn download_video(
         published_at,
         sabr_notice,
     }))
+}
+
+/// SponsorBlock lookup errors may be non-fatal; do not silently hide them in quiet mode.
+fn log_sponsorblock_warnings(stderr: &str) {
+    for line in stderr
+        .lines()
+        .filter(|line| line.to_lowercase().contains("sponsorblock"))
+    {
+        tracing::warn!(reason = %line.trim(), "SponsorBlock diagnostic from yt-dlp");
+    }
 }
 
 /// A thumbnail-only fetch's result: the staged thumbnail's path and the
@@ -767,6 +787,49 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn sponsorblock_policy_only_affects_downloads_and_reports_processed_duration() {
+        use test_support::{FakeYtDlp, unique_temp_dir};
+        for policy in ["", "default", "all", "sponsor,selfpromo"] {
+            let fake = FakeYtDlp::with_stdout("1700000000\n20231114\n8\nvideo.mp4\n");
+            let dir = unique_temp_dir("sponsorblock-policy");
+            let config = SponsorBlockConfig::parse(policy).unwrap();
+            let result = unwrap_succeeded(
+                download_video(
+                    &fake.path,
+                    "https://example.com/video",
+                    Quality::High,
+                    &dir,
+                    &config,
+                )
+                .unwrap(),
+            );
+            assert_eq!(result.duration_seconds, Some(8));
+            assert_eq!(result.published_at, DateTime::from_timestamp(1700000000, 0));
+            let args = fake.captured_args();
+            if policy.is_empty() {
+                assert!(args.contains(&"--no-sponsorblock".to_string()));
+                assert!(!args.contains(&"--sponsorblock-remove".to_string()));
+            } else {
+                assert!(
+                    args.windows(2)
+                        .any(|pair| pair == ["--sponsorblock-remove", policy])
+                );
+            }
+            assert!(args.contains(&"after_move:%(duration)s".to_string()));
+            assert!(!args.contains(&"%(duration)s".to_string()));
+            fetch_thumbnail(&fake.path, "https://example.com/video", &dir).unwrap();
+            assert!(
+                !fake
+                    .captured_args()
+                    .iter()
+                    .any(|arg| arg.contains("sponsorblock"))
+            );
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn it_should_return_the_printed_filename_on_success() {
         use test_support::{DEFAULT_PRINTED_FILENAME, FakeYtDlp, unique_temp_dir};
 
@@ -778,6 +841,7 @@ mod tests {
             "https://example.com/video",
             Quality::High,
             &output_dir,
+            &SponsorBlockConfig::default(),
         )
         .unwrap();
 
@@ -808,6 +872,7 @@ mod tests {
                 "https://example.com/video",
                 Quality::High,
                 &staging_dir,
+                &SponsorBlockConfig::default(),
             )
             .unwrap(),
         );
@@ -843,6 +908,7 @@ mod tests {
             "https://example.com/video",
             Quality::High,
             &output_dir,
+            &SponsorBlockConfig::default(),
         )
         .unwrap();
 
@@ -870,6 +936,7 @@ mod tests {
             "https://example.com/video",
             Quality::High,
             &output_dir,
+            &SponsorBlockConfig::default(),
         )
         .unwrap();
 
@@ -896,6 +963,7 @@ mod tests {
             "https://example.com/video",
             Quality::High,
             &output_dir,
+            &SponsorBlockConfig::default(),
         )
         .unwrap();
 
@@ -920,6 +988,7 @@ mod tests {
             "https://example.com/video",
             Quality::High,
             &output_dir,
+            &SponsorBlockConfig::default(),
         );
 
         assert!(result.is_err());
@@ -938,6 +1007,7 @@ mod tests {
                 "https://example.com/video",
                 Quality::High,
                 &output_dir,
+                &SponsorBlockConfig::default(),
             )
             .unwrap(),
         );
@@ -967,6 +1037,7 @@ mod tests {
                 "https://example.com/video",
                 Quality::High,
                 &staging_dir,
+                &SponsorBlockConfig::default(),
             )
             .unwrap(),
         );
@@ -1005,6 +1076,7 @@ mod tests {
                 "https://example.com/video",
                 Quality::High,
                 &staging_dir,
+                &SponsorBlockConfig::default(),
             )
             .unwrap(),
         );
@@ -1064,6 +1136,7 @@ mod tests {
                 "https://example.com/video",
                 Quality::High,
                 &staging_dir,
+                &SponsorBlockConfig::default(),
             )
             .unwrap(),
         );
@@ -1084,6 +1157,7 @@ mod tests {
                 "https://example.com/video",
                 Quality::High,
                 &output_dir,
+                &SponsorBlockConfig::default(),
             )
             .unwrap(),
         );
@@ -1104,6 +1178,7 @@ mod tests {
                 "https://example.com/video",
                 Quality::High,
                 &output_dir,
+                &SponsorBlockConfig::default(),
             )
             .unwrap(),
         );
@@ -1127,6 +1202,7 @@ mod tests {
                 "https://example.com/video",
                 Quality::High,
                 &output_dir,
+                &SponsorBlockConfig::default(),
             )
             .unwrap(),
         );
@@ -1148,6 +1224,7 @@ mod tests {
             "https://example.com/video",
             Quality::High,
             &output_dir,
+            &SponsorBlockConfig::default(),
         );
 
         assert!(result.is_err());
@@ -1166,6 +1243,7 @@ mod tests {
             "https://example.com/video",
             Quality::High,
             &output_dir,
+            &SponsorBlockConfig::default(),
         );
 
         assert_eq!(
@@ -1192,6 +1270,7 @@ mod tests {
             "https://example.com/video",
             Quality::High,
             &output_dir,
+            &SponsorBlockConfig::default(),
         );
 
         assert_eq!(
@@ -1327,6 +1406,7 @@ mod tests {
             "https://example.com/video",
             Quality::High,
             &output_dir,
+            &SponsorBlockConfig::default(),
         )
         .unwrap();
 
@@ -1358,6 +1438,7 @@ mod tests {
             "https://example.com/video",
             Quality::High,
             &output_dir,
+            &SponsorBlockConfig::default(),
         )
         .unwrap();
 

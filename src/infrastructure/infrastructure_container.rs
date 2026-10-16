@@ -56,6 +56,7 @@ use crate::infrastructure::shared::domain_events::event_publisher::{
 use crate::infrastructure::shared::domain_events::event_repository::{
     EventRepository, SqliteEventRepository,
 };
+use crate::infrastructure::shared::sponsorblock::SponsorBlockConfig;
 use crate::infrastructure::shared::sqlite_connection;
 use crate::infrastructure::shared::system_clock::{Clock, SystemClock};
 use anyhow::Result;
@@ -69,6 +70,7 @@ pub struct InfrastructureSettings {
     pub videos_path: PathBuf,
     pub avatars_path: PathBuf,
     pub ytdlp_path: PathBuf,
+    pub sponsorblock: SponsorBlockConfig,
 }
 
 /// One production instance of every port implementation, shared by every
@@ -136,9 +138,10 @@ impl InfrastructureContainer {
             channel_videos_repository: Arc::new(YtDlpChannelVideosRepository::new(
                 settings.ytdlp_path.clone(),
             )),
-            video_downloader_repository: Arc::new(YtDlpVideoDownloaderRepository::new(
-                settings.ytdlp_path,
-            )),
+            video_downloader_repository: Arc::new(
+                YtDlpVideoDownloaderRepository::new(settings.ytdlp_path)
+                    .with_sponsorblock(settings.sponsorblock),
+            ),
             video_file_repository: Arc::new(FilesystemVideoFileRepository),
             show_file_repository: Arc::new(FilesystemShowFileRepository),
             channel_avatar_repository: Arc::new(FilesystemChannelAvatarRepository::new(
