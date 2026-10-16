@@ -1,10 +1,11 @@
 use anyhow::{Result, bail};
 
-/// Subtitle downloads are opt-in and always remain external SRT files.
+/// Subtitle downloads are opt-in; embedding of downloaded SRTs defaults to on.
 #[derive(Clone, Debug)]
 pub struct SubtitleConfig {
     pub write_subs: bool,
     pub write_auto_subs: bool,
+    pub embed: bool,
     languages: String,
 }
 
@@ -13,6 +14,7 @@ impl Default for SubtitleConfig {
         Self {
             write_subs: false,
             write_auto_subs: false,
+            embed: true,
             languages: "en.*".into(),
         }
     }
@@ -46,7 +48,17 @@ impl SubtitleConfig {
             write_subs: flag(creator, "YARRTUBE_WRITE_SUBS")?,
             write_auto_subs: flag(automatic, "YARRTUBE_WRITE_AUTO_SUBS")?,
             languages: parts.join(","),
+            embed: true,
         })
+    }
+
+    pub fn with_embedding(mut self, value: &str) -> Result<Self> {
+        self.embed = match value.trim() {
+            "" | "true" => true,
+            "false" => false,
+            _ => bail!("YARRTUBE_EMBED_SUBS must be true or false"),
+        };
+        Ok(self)
     }
 
     pub fn append_args(&self, args: &mut Vec<String>) {
@@ -66,7 +78,7 @@ impl SubtitleConfig {
             }
             .into(),
         );
-        // Override any ambient configuration requesting embedding.
+        // Native embedding must stay off: Yarrtube embeds after repairing cut timing.
         args.push("--no-embed-subs".into());
         if self.write_subs || self.write_auto_subs {
             args.extend([
@@ -86,7 +98,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn supports_independent_creator_and_automatic_switches_without_embedding() {
+    fn supports_independent_caption_switches_without_native_embedding() {
         for (creator, automatic) in [
             ("false", "false"),
             ("true", "false"),
@@ -130,6 +142,10 @@ mod tests {
         let config = SubtitleConfig::parse("", "", "").unwrap();
         assert!(!config.write_subs && !config.write_auto_subs);
         assert_eq!(config.languages, "en.*");
+        assert!(config.embed);
+        assert!(!config.clone().with_embedding("false").unwrap().embed);
+        assert!(config.clone().with_embedding("").unwrap().embed);
+        assert!(config.with_embedding("yes").is_err());
         for values in [
             ("yes", "false", "en"),
             ("true", "1", "en"),

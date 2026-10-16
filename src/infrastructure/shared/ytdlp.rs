@@ -131,6 +131,15 @@ pub fn download_video(
     ensure_output_dir(staging_dir)?;
     let mut args = args_for_quality(quality);
     subtitles.append_args(&mut args);
+    let embed_subtitles = subtitles.embed && (subtitles.write_subs || subtitles.write_auto_subs);
+    if embed_subtitles {
+        args.extend([
+            "--print".to_string(),
+            "after_move:%(requested_subtitles)j".to_string(),
+            "--print".to_string(),
+            "after_move:%(subtitles)j".to_string(),
+        ]);
+    }
     let cut_subtitles =
         sponsorblock.categories().is_some() && (subtitles.write_subs || subtitles.write_auto_subs);
     if cut_subtitles {
@@ -225,6 +234,15 @@ pub fn download_video(
         crate::infrastructure::shared::subtitle_timing::repair_cut_subtitles(
             &media_path,
             line_before_last(&lines, 4),
+        )?;
+    }
+    if embed_subtitles {
+        let extra = usize::from(cut_subtitles);
+        crate::infrastructure::shared::subtitle_embedding::embed_subtitles(
+            &media_path,
+            line_before_last(&lines, 5 + extra),
+            line_before_last(&lines, 4 + extra),
+            subtitles.write_subs,
         )?;
     }
     Ok(DownloadAttempt::Succeeded(DownloadedVideo {
@@ -825,7 +843,10 @@ mod tests {
             Quality::High,
             &dir,
             &SponsorBlockConfig::parse("default").unwrap(),
-            &SubtitleConfig::parse("true", "false", "en").unwrap(),
+            &SubtitleConfig::parse("true", "false", "en")
+                .unwrap()
+                .with_embedding("false")
+                .unwrap(),
         )
         .unwrap();
         assert!(
@@ -839,7 +860,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn subtitle_options_reach_only_video_downloads_and_never_embed() {
+    fn subtitle_options_reach_only_video_downloads_and_disable_native_embedding() {
         let fake = test_support::FakeYtDlp::with_exit_code(0);
         let dir = test_support::unique_temp_dir("subtitle-options");
         let config = SubtitleConfig::parse("true", "true", "en.*,de.*").unwrap();

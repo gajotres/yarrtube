@@ -147,7 +147,8 @@ pub(crate) fn build_infrastructure() -> Result<InfrastructureContainer> {
             &std::env::var("YARRTUBE_WRITE_SUBS").unwrap_or_default(),
             &std::env::var("YARRTUBE_WRITE_AUTO_SUBS").unwrap_or_default(),
             &std::env::var("YARRTUBE_SUB_LANGS").unwrap_or_default(),
-        )?,
+        )?
+        .with_embedding(&std::env::var("YARRTUBE_EMBED_SUBS").unwrap_or_default())?,
         sponsorblock: crate::infrastructure::shared::sponsorblock::SponsorBlockConfig::parse(
             &std::env::var("YARRTUBE_SPONSORBLOCK_REMOVE").unwrap_or_default(),
         )?,

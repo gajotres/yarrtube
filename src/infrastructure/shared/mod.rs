@@ -3,6 +3,7 @@ pub mod error_report;
 pub mod sponsorblock;
 pub mod sqlite_connection;
 pub mod sqlite_migrations;
+pub mod subtitle_embedding;
 pub mod subtitle_timing;
 pub mod subtitles;
 pub mod system_clock;
