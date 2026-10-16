@@ -61,6 +61,10 @@ impl SubtitleConfig {
         Ok(self)
     }
 
+    pub fn languages(&self) -> &str {
+        &self.languages
+    }
+
     pub fn append_args(&self, args: &mut Vec<String>) {
         args.push(
             if self.write_subs {

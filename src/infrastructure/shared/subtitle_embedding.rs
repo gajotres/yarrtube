@@ -71,6 +71,7 @@ fn embed_with(
         }
     }
     if sidecars.is_empty() {
+        tracing::warn!("Subtitle embedding skipped: no SRT subtitles found");
         return Ok(());
     }
     sidecars.sort();
@@ -98,6 +99,10 @@ fn embed_with(
         })
         .collect::<Result<Vec<_>>>()?;
 
+    tracing::info!(tracks = tracks.len(), "Starting FFmpeg subtitle embedding");
+    for track in &tracks {
+        tracing::info!(title = %track.title, language = %track.language, "Embedding subtitle track");
+    }
     let output_path = media.with_file_name(format!(
         "{}.subtitle-embedded.mp4",
         media
@@ -159,6 +164,10 @@ fn embed_with(
             Err(error) => return Err(error).context("failed to remove embedded subtitle sidecar"),
         }
     }
+    tracing::info!(
+        tracks = tracks.len(),
+        "Subtitle embedding completed; external SRTs removed"
+    );
     Ok(())
 }
 

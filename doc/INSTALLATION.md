@@ -193,3 +193,42 @@ With Docker Compose:
 docker compose pull yarrtube
 docker compose up -d yarrtube
 ```
+
+
+## Download and subtitle troubleshooting logs
+
+Yarrtube writes timestamped logs to the container output. View them in your
+container manager's **Logs** view, or run these commands on the Docker host
+(replace the container name if yours differs):
+
+```sh
+docker logs --since 1h --timestamps sergigp-yarrtube
+docker logs --follow --since 5m --timestamps sergigp-yarrtube
+```
+
+After reproducing a failed subtitle download, export a file you can share:
+
+```sh
+docker logs --since 1h --timestamps sergigp-yarrtube > yarrtube.log 2>&1
+```
+
+At the default `RUST_LOG=info` level, each download logs its effective creator,
+automatic, embedding, language and SponsorBlock settings; available and requested
+caption language codes; yt-dlp warnings even when the video download succeeds;
+SRT file counts and sizes; timing correction; and embedding track titles and
+completion. The `staging_dir` field correlates messages from concurrent downloads.
+`none` means an empty language inventory, while `unknown` means the tool did not
+provide readable metadata. Missing SRTs emit a warning rather than silently
+skipping embedding. Failed stages also appear in the task's error details.
+
+New yt-dlp diagnostic log lines redact URL-bearing tokens and the configured
+YouTube API key, and bound the output size. Raw caption metadata, signed caption
+URLs, cookies and the full process command are not dumped by these diagnostics.
+Review exported logs before sharing: other application messages can include
+video titles, local paths and source identifiers.
+
+These logs cover **new download attempts**. Changing subtitle settings does not
+retroactively process videos already downloaded. Pull the updated image and
+recreate the container, then retry a download or add a new video before exporting.
+Docker retains the logs according to the host's logging driver and rotation
+settings; no additional Yarrtube log volume or environment variable is needed.

@@ -1,7 +1,7 @@
 use crate::domain::shared::Quality;
 use crate::infrastructure::shared::sponsorblock::SponsorBlockConfig;
 use crate::infrastructure::shared::subtitles::SubtitleConfig;
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -128,12 +128,24 @@ pub fn download_video(
     sponsorblock: &SponsorBlockConfig,
     subtitles: &SubtitleConfig,
 ) -> Result<DownloadAttempt> {
+    let _span = tracing::info_span!("download", staging_dir = %staging_dir.display()).entered();
+    tracing::info!(
+        creator = subtitles.write_subs,
+        automatic = subtitles.write_auto_subs,
+        embed = subtitles.embed,
+        languages = subtitles.languages(),
+        sponsorblock = sponsorblock.categories().unwrap_or("disabled"),
+        "Starting video download with subtitle settings"
+    );
     ensure_output_dir(staging_dir)?;
     let mut args = args_for_quality(quality);
     subtitles.append_args(&mut args);
     let embed_subtitles = subtitles.embed && (subtitles.write_subs || subtitles.write_auto_subs);
-    if embed_subtitles {
+    let captions_enabled = subtitles.write_subs || subtitles.write_auto_subs;
+    if captions_enabled {
         args.extend([
+            "--print".to_string(),
+            "after_move:%(automatic_captions)j".to_string(),
             "--print".to_string(),
             "after_move:%(requested_subtitles)j".to_string(),
             "--print".to_string(),
@@ -182,12 +194,6 @@ pub fn download_video(
         "--print".to_string(),
         "after_move:filename".to_string(),
     ]);
-    println!(
-        "Running: {} {} {video_url} (in {})",
-        ytdlp_path.display(),
-        args.join(" "),
-        staging_dir.display()
-    );
     let mut cmd = Command::new(ytdlp_path);
     cmd.args(&args)
         .arg(video_url)
@@ -206,7 +212,8 @@ pub fn download_video(
     )? {
         RunOutcome::Success(output) => output,
         RunOutcome::CleanFailure { stderr_raw } => {
-            log_sponsorblock_warnings(&stderr_raw);
+            log_download_diagnostics(&stderr_raw);
+            tracing::error!("yt-dlp download failed before subtitle processing");
             return Ok(DownloadAttempt::Failed {
                 stderr: reason_excluding_warnings(&stderr_raw),
                 sabr_notice: sabr_reason(&stderr_raw),
@@ -214,7 +221,7 @@ pub fn download_video(
         }
     };
 
-    log_sponsorblock_warnings(&String::from_utf8_lossy(&output.stderr));
+    log_download_diagnostics(&String::from_utf8_lossy(&output.stderr));
     let sabr_notice = sabr_reason(&String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let lines: Vec<&str> = stdout.lines().collect();
@@ -230,11 +237,24 @@ pub fn download_video(
     let published_at = parse_published_at(line_before_last(&lines, 3), line_before_last(&lines, 2));
 
     let media_path = staging_dir.join(filename);
+    if captions_enabled {
+        let extra = usize::from(cut_subtitles);
+        tracing::info!(
+            requested = %subtitle_language_keys(line_before_last(&lines, 5 + extra)),
+            available_creator = %subtitle_language_keys(line_before_last(&lines, 4 + extra)),
+            available_automatic = %subtitle_language_keys(line_before_last(&lines, 6 + extra)),
+            "yt-dlp subtitle language inventory"
+        );
+        log_subtitle_files(&media_path)?;
+    }
     if cut_subtitles {
+        tracing::info!("Starting SponsorBlock subtitle timing correction");
         crate::infrastructure::shared::subtitle_timing::repair_cut_subtitles(
             &media_path,
             line_before_last(&lines, 4),
-        )?;
+        )
+        .context("SponsorBlock subtitle timing correction failed")?;
+        tracing::info!("Subtitle timing correction completed");
     }
     if embed_subtitles {
         let extra = usize::from(cut_subtitles);
@@ -243,8 +263,10 @@ pub fn download_video(
             line_before_last(&lines, 5 + extra),
             line_before_last(&lines, 4 + extra),
             subtitles.write_subs,
-        )?;
+        )
+        .context("Subtitle embedding stage failed")?;
     }
+    tracing::info!("Video download and subtitle processing completed");
     Ok(DownloadAttempt::Succeeded(DownloadedVideo {
         thumbnail_path: staged_thumbnail(&media_path),
         media_path,
@@ -254,14 +276,79 @@ pub fn download_video(
     }))
 }
 
-/// SponsorBlock lookup errors may be non-fatal; do not silently hide them in quiet mode.
-fn log_sponsorblock_warnings(stderr: &str) {
+/// Quiet mode still emits warnings, including caption HTTP/rate-limit failures on
+/// an otherwise successful video download. Keep those visible without signed URLs.
+fn log_download_diagnostics(stderr: &str) {
     for line in stderr
         .lines()
-        .filter(|line| line.to_lowercase().contains("sponsorblock"))
+        .filter(|line| !line.trim().is_empty())
+        .take(50)
     {
-        tracing::warn!(reason = %line.trim(), "SponsorBlock diagnostic from yt-dlp");
+        tracing::warn!(reason = %safe_diagnostic(line), "yt-dlp download diagnostic");
     }
+}
+
+fn safe_diagnostic(line: &str) -> String {
+    let mut text = line.to_string();
+    for name in ["YOUTUBE_API_KEY", "YOUTUBE_API_KEY_YARRTUBE"] {
+        if let Ok(key) = std::env::var(name)
+            && !key.is_empty()
+        {
+            text = text.replace(&key, "[REDACTED]");
+        }
+    }
+    // Remove whole URL-bearing tokens, including signed caption URLs and credentials.
+    // Bound each line and strip terminal/control characters before structured logging.
+    text.split_whitespace()
+        .map(|token| {
+            if token.contains("://") {
+                "[URL REDACTED]"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(2000)
+        .collect()
+}
+
+fn subtitle_language_keys(raw: Option<&str>) -> String {
+    match raw.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()) {
+        Some(serde_json::Value::Object(map)) => {
+            let keys: Vec<_> = map.keys().map(String::as_str).collect();
+            if keys.is_empty() {
+                "none".into()
+            } else {
+                safe_diagnostic(&keys.join(","))
+            }
+        }
+        _ => "unknown".into(),
+    }
+}
+
+fn log_subtitle_files(media: &Path) -> Result<()> {
+    use crate::domain::video::subtitle_sidecar::subtitle_suffix;
+    let mut count = 0;
+    for entry in std::fs::read_dir(media.parent().context("missing media directory")?)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file()
+            && let Some(suffix) = subtitle_suffix(media, &entry.path())
+        {
+            count += 1;
+            tracing::info!(subtitle = %suffix, bytes = entry.metadata()?.len(), "Downloaded SRT subtitle found");
+        }
+    }
+    if count == 0 {
+        tracing::warn!(
+            "No SRT subtitles produced; check available languages and yt-dlp diagnostics"
+        );
+    } else {
+        tracing::info!(count, "Subtitle file inventory completed");
+    }
+    Ok(())
 }
 
 /// A thumbnail-only fetch's result: the staged thumbnail's path and the
@@ -821,6 +908,91 @@ mod tests {
                     "expected a successful download attempt, got Failed {{ stderr: {stderr:?} }}"
                 )
             }
+        }
+    }
+
+    #[test]
+    fn subtitle_diagnostics_exclude_caption_urls_and_metadata_values() {
+        let line = safe_diagnostic(
+            "WARNING: Unable to download en subtitles: HTTP Error 429 https://user:password@example.test/captions?token=secret",
+        );
+        assert!(line.contains("HTTP Error 429"));
+        assert!(!line.contains("secret"));
+        assert!(!line.contains("password"));
+        assert_eq!(
+            subtitle_language_keys(Some(r#"{"en":{"url":"secret"},"de":[]}"#)),
+            "de,en"
+        );
+        assert_eq!(subtitle_language_keys(Some("{}")), "none");
+        assert_eq!(subtitle_language_keys(Some("NA")), "unknown");
+        assert!(safe_diagnostic(&"é".repeat(3000)).chars().count() <= 2000);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn successful_download_surfaces_subtitle_warnings_and_missing_srts_in_both_modes() {
+        use crate::application::tasks::log_capture::captured_log_messages;
+        // Other parallel tests rebuild tracing's global callsite cache. Isolate
+        // this subscriber test so those rebuilds cannot suppress captured events.
+        const CHILD: &str = "YARRTUBE_TEST_SUBTITLE_LOG_CAPTURE";
+        if std::env::var_os(CHILD).is_none() {
+            let result = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "infrastructure::shared::ytdlp::tests::successful_download_surfaces_subtitle_warnings_and_missing_srts_in_both_modes", "--test-threads=1"])
+                .env(CHILD, "1")
+                .output().unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+            return;
+        }
+        for embed in ["true", "false"] {
+            let fake = fake_ytdlp_writing_stdout_and_stderr(
+                "subtitle-diagnostics",
+                "{}\n{}\n{}\nNA\n20260101\n10\nvideo.mp4\n",
+                "WARNING: Unable to download subtitles: HTTP Error 429\n",
+            );
+            let dir = test_support::unique_temp_dir("subtitle-diagnostics-out");
+            let config = SubtitleConfig::parse("true", "true", "en.*")
+                .unwrap()
+                .with_embedding(embed)
+                .unwrap();
+            let messages = captured_log_messages(|| {
+                assert!(matches!(
+                    download_video(
+                        &fake,
+                        "https://example.test/video",
+                        Quality::High,
+                        &dir,
+                        &SponsorBlockConfig::default(),
+                        &config
+                    )
+                    .unwrap(),
+                    DownloadAttempt::Succeeded(_)
+                ));
+            });
+            assert!(
+                messages
+                    .iter()
+                    .any(|m| m.contains("yt-dlp download diagnostic"))
+            );
+            assert!(
+                messages
+                    .iter()
+                    .any(|m| m.contains("No SRT subtitles produced"))
+            );
+            assert!(
+                messages
+                    .iter()
+                    .any(|m| m.contains("subtitle language inventory")),
+                "{messages:?}"
+            );
+            assert_eq!(
+                messages.iter().any(|m| m.contains("embedding skipped")),
+                embed == "true"
+            );
+            std::fs::remove_dir_all(dir).unwrap();
         }
     }
 

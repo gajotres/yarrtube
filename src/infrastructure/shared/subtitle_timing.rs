@@ -22,6 +22,7 @@ pub fn repair_cut_subtitles(media: &Path, chapters: Option<&str>) -> Result<()> 
         }
     }
     if originals.is_empty() {
+        tracing::info!("No preserved SRTs to retime; yt-dlp may not have cut any segments");
         return Ok(());
     }
     let raw: Vec<serde_json::Value> =
@@ -48,6 +49,11 @@ pub fn repair_cut_subtitles(media: &Path, chapters: Option<&str>) -> Result<()> 
             merged.push((start, end));
         }
     }
+    tracing::info!(
+        tracks = originals.len(),
+        cut_ranges = merged.len(),
+        "Retiming subtitles from preserved originals"
+    );
     for (source, target) in originals {
         let text = std::fs::read_to_string(&source)?;
         std::fs::write(&target, retime_srt(&text, &merged)?)?;
