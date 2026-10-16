@@ -78,11 +78,38 @@ Environment variables read by Yarrtube are listed below. Every variable except `
 | `YARRTUBE_DOWNLOAD_CONCURRENCY`       | `2`                   | How many videos download at the same time. Higher values download faster but make YouTube more likely to throttle or bot-check you                                                                            |
 | `YARRTUBE_RETRY_BASE_DELAY_SECONDS`   | `150`                 | Delay before retrying a failed task; it grows exponentially with each further retry                                                                                                                           |
 | `YARRTUBE_AVATARS_PATH`               | `/config/avatars`     | Directory channel avatars are stored in (inside the container)                                                                                                                                                |
+| `YARRTUBE_SPONSORBLOCK_REMOVE` | empty (disabled) | SponsorBlock removal categories: `default`, `all`, or explicit comma-separated categories (see below). |
 | `YTDLP_PATH`                          | `/app/bin/yt-dlp`     | Path to the managed `yt-dlp` binary (also the path bundled into the image at build time)                                                                                                                      |
 | `RUST_LOG`                            | `info`                | Log verbosity (e.g. `RUST_LOG=debug`)                                                                                                                                                                         |
 | `YARRTUBE_PLEX_URL`                   | —                     | Base URL of your Plex server (e.g. `http://192.168.1.10:32400`). With the token and `YARRTUBE_PLEX_VIDEOS_PATH`, enables the [Plex scan trigger](#plex)                                                       |
 | `YARRTUBE_PLEX_TOKEN`                 | —                     | Plex authentication token (`X-Plex-Token`)                                                                                                                                                                    |
 | `YARRTUBE_PLEX_VIDEOS_PATH`           | —                     | Where the Plex server sees yarrtube's videos root (`YARRTUBE_VIDEOS_PATH`), e.g. the host path `/volume1/data/media/yarrtube` mounted at `/videos`. Plex is asked to scan a show's folder after each download |
+
+## SponsorBlock
+
+Set `YARRTUBE_SPONSORBLOCK_REMOVE=default` on the container to remove SponsorBlock
+segments from new downloads. This removes sponsorships, intros, outros,
+self-promotion, previews, interaction reminders, non-music sections, and hooks;
+filler tangents are preserved. Use `all` to include filler, or a comma-separated
+list such as `sponsor,selfpromo,interaction` to choose categories explicitly.
+An empty or unset value disables SponsorBlock. Invalid categories fail startup.
+
+For Compose, add this under the service environment and recreate the container:
+
+```yaml
+- YARRTUBE_SPONSORBLOCK_REMOVE=default
+```
+
+No additional API key, container, or database migration is needed. yt-dlp queries
+the public SponsorBlock service and FFmpeg cuts matching segments before the
+video reaches the library. Videos without matching segments remain uncut.
+The feature depends on community-submitted timestamps and is not guaranteed
+to remove every sponsored segment. Existing files are not reprocessed.
+
+Cuts use yt-dlp's default behaviour without forcing a full re-encode; minor
+artifacts near cut boundaries are possible. SponsorBlock lookup warnings are
+logged; SponsorBlock lookup, cutting, and download failures use the existing
+task retry mechanism rather than silently delivering an uncut video.
 
 ## Videos on disk
 

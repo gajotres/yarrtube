@@ -1,4 +1,5 @@
 use crate::domain::shared::Quality;
+use crate::infrastructure::shared::sponsorblock::SponsorBlockConfig;
 use crate::infrastructure::shared::ytdlp;
 pub use crate::infrastructure::shared::ytdlp::{
     DownloadAttempt, DownloadedVideo, FetchedThumbnail, ThumbnailFetch,
@@ -49,11 +50,20 @@ pub trait VideoDownloaderRepository: Send + Sync {
 /// installs to — see design.md's "Move the default YTDLP_PATH..." decision.
 pub struct YtDlpVideoDownloaderRepository {
     ytdlp_path: PathBuf,
+    sponsorblock: SponsorBlockConfig,
 }
 
 impl YtDlpVideoDownloaderRepository {
     pub fn new(ytdlp_path: PathBuf) -> Self {
-        Self { ytdlp_path }
+        Self {
+            ytdlp_path,
+            sponsorblock: SponsorBlockConfig::default(),
+        }
+    }
+
+    pub fn with_sponsorblock(mut self, sponsorblock: SponsorBlockConfig) -> Self {
+        self.sponsorblock = sponsorblock;
+        self
     }
 }
 
@@ -64,7 +74,13 @@ impl VideoDownloaderRepository for YtDlpVideoDownloaderRepository {
         quality: Quality,
         staging_dir: &Path,
     ) -> anyhow::Result<DownloadAttempt> {
-        ytdlp::download_video(&self.ytdlp_path, video_url, quality, staging_dir)
+        ytdlp::download_video(
+            &self.ytdlp_path,
+            video_url,
+            quality,
+            staging_dir,
+            &self.sponsorblock,
+        )
     }
 
     fn fetch_thumbnail(
@@ -294,6 +310,23 @@ impl VideoDownloaderRepository for FakeVideoDownloaderRepository {
 mod tests {
     use super::*;
     use crate::infrastructure::shared::ytdlp::test_support;
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_forward_the_configured_sponsorblock_policy() {
+        let fake = test_support::FakeYtDlp::with_exit_code(0);
+        let output_dir = test_support::unique_temp_dir("sponsorblock-repository");
+        YtDlpVideoDownloaderRepository::new(fake.path.clone())
+            .with_sponsorblock(SponsorBlockConfig::parse("default").unwrap())
+            .download("https://example.com/video", Quality::High, &output_dir)
+            .unwrap();
+        assert!(
+            fake.captured_args()
+                .windows(2)
+                .any(|pair| pair == ["--sponsorblock-remove", "default"])
+        );
+        std::fs::remove_dir_all(output_dir).unwrap();
+    }
 
     #[test]
     #[cfg(unix)]
