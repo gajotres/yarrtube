@@ -56,6 +56,7 @@ const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn run() -> ExitCode {
     tracing_subscriber::fmt()
+        .with_ansi(false)
         .with_env_filter(
             EnvFilter::builder()
                 .with_default_directive(LevelFilter::INFO.into())
