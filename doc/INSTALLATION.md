@@ -79,6 +79,9 @@ Environment variables read by Yarrtube are listed below. Every variable except `
 | `YARRTUBE_RETRY_BASE_DELAY_SECONDS`   | `150`                 | Delay before retrying a failed task; it grows exponentially with each further retry                                                                                                                           |
 | `YARRTUBE_AVATARS_PATH`               | `/config/avatars`     | Directory channel avatars are stored in (inside the container)                                                                                                                                                |
 | `YARRTUBE_SPONSORBLOCK_REMOVE` | empty (disabled) | SponsorBlock removal categories: `default`, `all`, or explicit comma-separated categories (see below). |
+| `YARRTUBE_WRITE_SUBS` | `false` | Download creator-provided captions as external SRT files. |
+| `YARRTUBE_WRITE_AUTO_SUBS` | `false` | Download automatically generated captions. |
+| `YARRTUBE_SUB_LANGS` | `en.*` | Comma-separated language codes/patterns; live chat excluded. |
 | `YTDLP_PATH`                          | `/app/bin/yt-dlp`     | Path to the managed `yt-dlp` binary (also the path bundled into the image at build time)                                                                                                                      |
 | `RUST_LOG`                            | `info`                | Log verbosity (e.g. `RUST_LOG=debug`)                                                                                                                                                                         |
 | `YARRTUBE_PLEX_URL`                   | —                     | Base URL of your Plex server (e.g. `http://192.168.1.10:32400`). With the token and `YARRTUBE_PLEX_VIDEOS_PATH`, enables the [Plex scan trigger](#plex)                                                       |
@@ -110,6 +113,36 @@ Cuts use yt-dlp's default behaviour without forcing a full re-encode; minor
 artifacts near cut boundaries are possible. SponsorBlock lookup warnings are
 logged; SponsorBlock lookup, cutting, and download failures use the existing
 task retry mechanism rather than silently delivering an uncut video.
+
+## External subtitles
+
+Subtitle downloading is optional and disabled by default. Add these environment
+variables to the container to download creator captions and automatic captions:
+
+```yaml
+- YARRTUBE_WRITE_SUBS=true
+- YARRTUBE_WRITE_AUTO_SUBS=true
+- YARRTUBE_SUB_LANGS=en.*
+```
+
+The two switches are independent (`true` or `false`). `YARRTUBE_SUB_LANGS`
+accepts yt-dlp language codes and patterns separated by commas: `en.*` (default),
+`en.*,de.*`, or `all`. Live chat is always excluded. When both sources offer the
+same language, yt-dlp prefers creator-provided captions. Missing captions or no
+matching languages do not by themselves fail the video download. Subtitle network
+or conversion errors follow the existing download retry mechanism.
+
+Subtitles are converted to SRT and kept as separate language-tagged files, such as
+`Season 1/S01E001 - A Video.en.srt`, next to the video. Embedding is explicitly
+disabled. Sidecars are moved/renamed with the episode, retained during orphan
+cleanup, and removed with the video. Redownloading replaces old sidecars, since
+new SponsorBlock cuts could make old timestamps incorrect. Existing downloaded
+videos are not automatically fetched again just because these settings change.
+
+With SponsorBlock enabled, Yarrtube adjusts original SRT timestamps using the
+SponsorBlock cut ranges. Original intermediate files stay in staging until the
+download is placed, then are deleted. This avoids FFmpeg dropping sparse cues. Recreate the container after changing these
+settings; selecting many auto-translated languages can increase YouTube requests.
 
 ## Videos on disk
 

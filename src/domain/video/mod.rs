@@ -9,6 +9,7 @@ pub mod home_videos;
 pub mod playback_position;
 pub mod playlist_episode_number;
 pub mod sourced_video;
+pub mod subtitle_sidecar;
 #[allow(clippy::module_inception)]
 pub mod video;
 pub mod video_duration;

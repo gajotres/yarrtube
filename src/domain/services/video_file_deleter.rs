@@ -115,6 +115,8 @@ impl VideoFileDeleter {
             debug!("video has no recorded filename, skipping file deletion");
             return Ok(());
         };
+        self.video_file_repository
+            .delete_subtitles(&output_dir.join(&filename))?;
         let nfo = is_episode_path(&filename).then(|| nfo_path_for(&filename));
         std::iter::once(owning_entry(&filename))
             .chain(nfo.as_deref())
@@ -152,6 +154,33 @@ mod tests {
     fn deleter(repo: FakeVideoFileRepository) -> (VideoFileDeleter, Arc<FakeVideoFileRepository>) {
         let repo = Arc::new(repo);
         (VideoFileDeleter::new(repo.clone(), "/videos"), repo)
+    }
+
+    #[test]
+    fn removes_sidecar_subtitles_with_the_episode() {
+        use crate::infrastructure::repositories::filesystem_video_file_repository::FilesystemVideoFileRepository;
+        let dir = tempfile::tempdir().unwrap();
+        let season = dir.path().join("Season 1");
+        std::fs::create_dir_all(&season).unwrap();
+        for name in [
+            "S01E001 - Video.mp4",
+            "S01E001 - Video.en.srt",
+            "S01E001 - Video.de.srt",
+            "S01E002 - Other.en.srt",
+        ] {
+            std::fs::write(season.join(name), "fixture").unwrap();
+        }
+        VideoFileDeleter::new(Arc::new(FilesystemVideoFileRepository), "/videos")
+            .delete_video_file(
+                Some("Season 1/S01E001 - Video.mp4".into()),
+                None,
+                dir.path(),
+            )
+            .unwrap();
+        assert!(!season.join("S01E001 - Video.mp4").exists());
+        assert!(!season.join("S01E001 - Video.en.srt").exists());
+        assert!(!season.join("S01E001 - Video.de.srt").exists());
+        assert!(season.join("S01E002 - Other.en.srt").is_file());
     }
 
     #[test]

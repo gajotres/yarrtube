@@ -1,5 +1,6 @@
 use crate::domain::shared::Quality;
 use crate::infrastructure::shared::sponsorblock::SponsorBlockConfig;
+use crate::infrastructure::shared::subtitles::SubtitleConfig;
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use std::io;
@@ -125,9 +126,23 @@ pub fn download_video(
     quality: Quality,
     staging_dir: &Path,
     sponsorblock: &SponsorBlockConfig,
+    subtitles: &SubtitleConfig,
 ) -> Result<DownloadAttempt> {
     ensure_output_dir(staging_dir)?;
     let mut args = args_for_quality(quality);
+    subtitles.append_args(&mut args);
+    let cut_subtitles =
+        sponsorblock.categories().is_some() && (subtitles.write_subs || subtitles.write_auto_subs);
+    if cut_subtitles {
+        // Preserve uncut SRTs for accurate retiming; the staging directory is
+        // discarded afterwards, including the intermediate uncut media.
+        args.extend([
+            "--keep-video".to_string(),
+            "--print".to_string(),
+            "after_move:%(sponsorblock_chapters)j".to_string(),
+        ]);
+    }
+
     if let Some(categories) = sponsorblock.categories() {
         args.extend(["--sponsorblock-remove".to_string(), categories.to_string()]);
     } else {
@@ -206,6 +221,12 @@ pub fn download_video(
     let published_at = parse_published_at(line_before_last(&lines, 3), line_before_last(&lines, 2));
 
     let media_path = staging_dir.join(filename);
+    if cut_subtitles {
+        crate::infrastructure::shared::subtitle_timing::repair_cut_subtitles(
+            &media_path,
+            line_before_last(&lines, 4),
+        )?;
+    }
     Ok(DownloadAttempt::Succeeded(DownloadedVideo {
         thumbnail_path: staged_thumbnail(&media_path),
         media_path,
@@ -787,6 +808,70 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn repairs_native_cut_subtitles_before_returning_a_successful_download() {
+        let fake = test_support::FakeYtDlp::with_stdout(
+            "[{\"start_time\":2,\"end_time\":4}]\n1700000000\n20231114\n8\nid.mp4\n",
+        );
+        let dir = test_support::unique_temp_dir("cut-subtitle-download");
+        std::fs::write(
+            dir.join("id.en.uncut.srt"),
+            "1\n00:00:05,000 --> 00:00:07,000\nHello\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("id.en.srt"), "").unwrap();
+        download_video(
+            &fake.path,
+            "https://example.com/video",
+            Quality::High,
+            &dir,
+            &SponsorBlockConfig::parse("default").unwrap(),
+            &SubtitleConfig::parse("true", "false", "en").unwrap(),
+        )
+        .unwrap();
+        assert!(
+            std::fs::read_to_string(dir.join("id.en.srt"))
+                .unwrap()
+                .contains("00:00:03,000 --> 00:00:05,000")
+        );
+        assert!(fake.captured_args().contains(&"--keep-video".to_string()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn subtitle_options_reach_only_video_downloads_and_never_embed() {
+        let fake = test_support::FakeYtDlp::with_exit_code(0);
+        let dir = test_support::unique_temp_dir("subtitle-options");
+        let config = SubtitleConfig::parse("true", "true", "en.*,de.*").unwrap();
+        download_video(
+            &fake.path,
+            "https://example.com/video",
+            Quality::High,
+            &dir,
+            &SponsorBlockConfig::default(),
+            &config,
+        )
+        .unwrap();
+        let args = fake.captured_args();
+        for flag in ["--write-subs", "--write-auto-subs", "--no-embed-subs"] {
+            assert!(args.contains(&flag.to_string()));
+        }
+        assert!(!args.contains(&"--embed-subs".to_string()));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--sub-langs", "en.*,de.*,-live_chat"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--convert-subs", "srt"])
+        );
+        fetch_thumbnail(&fake.path, "https://example.com/video", &dir).unwrap();
+        assert!(!fake.captured_args().contains(&"--write-subs".to_string()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn sponsorblock_policy_only_affects_downloads_and_reports_processed_duration() {
         use test_support::{FakeYtDlp, unique_temp_dir};
         for policy in ["", "default", "all", "sponsor,selfpromo"] {
@@ -800,6 +885,7 @@ mod tests {
                     Quality::High,
                     &dir,
                     &config,
+                    &SubtitleConfig::default(),
                 )
                 .unwrap(),
             );
@@ -842,6 +928,7 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
+            &SubtitleConfig::default(),
         )
         .unwrap();
 
@@ -873,6 +960,7 @@ mod tests {
                 Quality::High,
                 &staging_dir,
                 &SponsorBlockConfig::default(),
+                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -909,6 +997,7 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
+            &SubtitleConfig::default(),
         )
         .unwrap();
 
@@ -937,6 +1026,7 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
+            &SubtitleConfig::default(),
         )
         .unwrap();
 
@@ -964,6 +1054,7 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
+            &SubtitleConfig::default(),
         )
         .unwrap();
 
@@ -989,6 +1080,7 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
+            &SubtitleConfig::default(),
         );
 
         assert!(result.is_err());
@@ -1008,6 +1100,7 @@ mod tests {
                 Quality::High,
                 &output_dir,
                 &SponsorBlockConfig::default(),
+                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -1038,6 +1131,7 @@ mod tests {
                 Quality::High,
                 &staging_dir,
                 &SponsorBlockConfig::default(),
+                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -1079,6 +1173,7 @@ mod tests {
                 Quality::High,
                 &staging_dir,
                 &SponsorBlockConfig::default(),
+                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -1139,6 +1234,7 @@ mod tests {
                 Quality::High,
                 &staging_dir,
                 &SponsorBlockConfig::default(),
+                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -1160,6 +1256,7 @@ mod tests {
                 Quality::High,
                 &output_dir,
                 &SponsorBlockConfig::default(),
+                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -1181,6 +1278,7 @@ mod tests {
                 Quality::High,
                 &output_dir,
                 &SponsorBlockConfig::default(),
+                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -1205,6 +1303,7 @@ mod tests {
                 Quality::High,
                 &output_dir,
                 &SponsorBlockConfig::default(),
+                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -1227,6 +1326,7 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
+            &SubtitleConfig::default(),
         );
 
         assert!(result.is_err());
@@ -1246,6 +1346,7 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
+            &SubtitleConfig::default(),
         );
 
         assert_eq!(
@@ -1273,6 +1374,7 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
+            &SubtitleConfig::default(),
         );
 
         assert_eq!(
@@ -1409,6 +1511,7 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
+            &SubtitleConfig::default(),
         )
         .unwrap();
 
@@ -1441,6 +1544,7 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
+            &SubtitleConfig::default(),
         )
         .unwrap();
 

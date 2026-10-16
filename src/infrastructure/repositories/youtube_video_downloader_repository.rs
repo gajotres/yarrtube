@@ -1,5 +1,6 @@
 use crate::domain::shared::Quality;
 use crate::infrastructure::shared::sponsorblock::SponsorBlockConfig;
+use crate::infrastructure::shared::subtitles::SubtitleConfig;
 use crate::infrastructure::shared::ytdlp;
 pub use crate::infrastructure::shared::ytdlp::{
     DownloadAttempt, DownloadedVideo, FetchedThumbnail, ThumbnailFetch,
@@ -51,6 +52,7 @@ pub trait VideoDownloaderRepository: Send + Sync {
 pub struct YtDlpVideoDownloaderRepository {
     ytdlp_path: PathBuf,
     sponsorblock: SponsorBlockConfig,
+    subtitles: SubtitleConfig,
 }
 
 impl YtDlpVideoDownloaderRepository {
@@ -58,7 +60,13 @@ impl YtDlpVideoDownloaderRepository {
         Self {
             ytdlp_path,
             sponsorblock: SponsorBlockConfig::default(),
+            subtitles: SubtitleConfig::default(),
         }
+    }
+
+    pub fn with_subtitles(mut self, subtitles: SubtitleConfig) -> Self {
+        self.subtitles = subtitles;
+        self
     }
 
     pub fn with_sponsorblock(mut self, sponsorblock: SponsorBlockConfig) -> Self {
@@ -80,6 +88,7 @@ impl VideoDownloaderRepository for YtDlpVideoDownloaderRepository {
             quality,
             staging_dir,
             &self.sponsorblock,
+            &self.subtitles,
         )
     }
 

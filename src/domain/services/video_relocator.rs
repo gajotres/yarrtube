@@ -190,6 +190,10 @@ impl VideoRelocator {
         files: &RelocatedFiles,
         output_dir: &Path,
     ) -> anyhow::Result<()> {
+        if let Some(from) = &video.filename {
+            self.video_file_repository
+                .move_subtitles(&output_dir.join(from), &output_dir.join(&files.filename))?;
+        }
         let from = video.filename.iter().chain(&video.thumbnail_filename);
         let to = std::iter::once(&files.filename).chain(&files.thumbnail_filename);
         from.zip(to)
