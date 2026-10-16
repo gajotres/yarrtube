@@ -321,8 +321,13 @@ impl VideoDownloader {
         output_dir: &Path,
         files: &EpisodeFiles,
     ) -> anyhow::Result<()> {
+        let destination = output_dir.join(&files.filename);
+        // A redownload may have different cuts/languages; discard stale sidecars.
+        self.video_file_repository.delete_subtitles(&destination)?;
         self.video_file_repository
-            .move_file(&downloaded.media_path, &output_dir.join(&files.filename))?;
+            .move_subtitles(&downloaded.media_path, &destination)?;
+        self.video_file_repository
+            .move_file(&downloaded.media_path, &destination)?;
         match (&downloaded.thumbnail_path, &files.thumbnail_filename) {
             (Some(from), Some(to)) => self
                 .video_file_repository

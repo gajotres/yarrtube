@@ -6,6 +6,7 @@ use crate::domain::services::{
 use crate::domain::shared::Quality;
 use crate::domain::task::{ScheduledTask, Task};
 use crate::domain::video::VideoRecordId;
+use crate::domain::video::subtitle_sidecar::{subtitle_media_stem, subtitle_suffix};
 use crate::domain::video::{
     EpisodePaths, SHOW_NFO_FILENAME, SHOW_POSTER_FILENAME, Video, VideoStatus, is_episode_path,
     is_season_folder, nfo_path_for, owning_entry, resolve_output_dir,
@@ -406,6 +407,16 @@ impl ActualState {
 
     fn is_protected(&self, entry: &str) -> bool {
         self.protected_entries.contains(entry)
+            || self
+                .videos
+                .iter()
+                .filter(|video| video.status == VideoStatus::Downloaded)
+                .filter_map(|video| video.filename.as_deref())
+                .any(|media| subtitle_suffix(Path::new(media), Path::new(entry)).is_some())
+            || subtitle_media_stem(Path::new(entry)).is_some_and(|stem| {
+                self.numbered_episode_paths
+                    .contains(stem.to_string_lossy().as_ref())
+            })
             || is_season_folder(entry)
             || self.numbered_episode_paths.contains(
                 Path::new(entry)
@@ -489,6 +500,25 @@ mod tests {
     use crate::infrastructure::shared::ytdlp::FetchedThumbnail;
     use chrono::Duration;
     use std::sync::Mutex;
+
+    #[test]
+    fn protects_only_sidecars_of_known_or_in_flight_episodes() {
+        let actual = ActualState {
+            output_dir: PathBuf::from("/videos/show"),
+            files: vec![],
+            videos: vec![downloaded_video("Season 1/Known.mp4", None)],
+            downloads_in_flight: HashSet::new(),
+            broken_download_ids: HashSet::new(),
+            protected_entries: HashSet::from(["Season 1/Known.mp4".to_string()]),
+            numbered_episode_paths: HashSet::from(["Season 1/Downloading".to_string()]),
+        };
+        assert!(actual.is_protected("Season 1/Known.en.srt"));
+        assert!(actual.is_protected("Season 1/Downloading.de.srt"));
+        assert!(!actual.is_protected("Season 1/Orphan.en.srt"));
+        assert!(!actual.is_protected("Season 1/Known Extra.en.srt"));
+        assert!(!actual.is_protected("Season 2/Known.en.srt"));
+        assert!(!actual.is_protected("poster.en.srt"));
+    }
 
     #[test]
     fn it_should_redownload_videos_with_missing_file() {

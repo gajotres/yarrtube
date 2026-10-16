@@ -1,4 +1,5 @@
 use crate::domain::video::is_season_folder;
+use crate::domain::video::subtitle_sidecar::subtitle_suffix;
 use std::path::Path;
 
 /// yt-dlp's own in-progress-download marker extensions — never treated as
@@ -44,6 +45,38 @@ pub trait VideoFileRepository: Send + Sync {
     /// Removes `dir` if it is empty; a non-empty or missing `dir` is left
     /// alone, not an error.
     fn remove_if_empty(&self, dir: &Path) -> anyhow::Result<()>;
+
+    /// Rename sidecar subtitles to the destination episode stem, preserving language.
+    fn move_subtitles(&self, from: &Path, to: &Path) -> anyhow::Result<()> {
+        let Some(parent) = from.parent() else {
+            return Ok(());
+        };
+        let Some(stem) = to.file_stem().and_then(|stem| stem.to_str()) else {
+            return Ok(());
+        };
+        for entry in self.list(parent)? {
+            let sidecar = parent.join(&entry);
+            if let Some(suffix) = subtitle_suffix(from, &sidecar)
+                && self.file_exists(parent, &entry)
+            {
+                self.move_file(&sidecar, &to.with_file_name(format!("{stem}{suffix}")))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove only subtitles belonging to this exact media file.
+    fn delete_subtitles(&self, media: &Path) -> anyhow::Result<()> {
+        let Some(parent) = media.parent() else {
+            return Ok(());
+        };
+        for entry in self.list(parent)? {
+            if subtitle_suffix(media, &parent.join(&entry)).is_some() {
+                self.delete(parent, &entry)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 pub struct FilesystemVideoFileRepository;
@@ -320,6 +353,43 @@ impl VideoFileRepository for FakeVideoFileRepository {
 mod tests {
     use super::*;
     use crate::infrastructure::shared::ytdlp::test_support::unique_temp_dir;
+
+    #[test]
+    fn subtitle_sidecars_follow_media_names_and_delete_without_touching_other_episodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("staging");
+        let season = dir.path().join("Season 1");
+        std::fs::create_dir_all(&staging).unwrap();
+        for file in [
+            "id.en.srt",
+            "id.de.srt",
+            "id.en.srt.part",
+            "other.en.srt",
+            "id.jpg",
+        ] {
+            std::fs::write(staging.join(file), file).unwrap();
+        }
+        let repo = FilesystemVideoFileRepository;
+        let destination = season.join("S01E001 - A Video.mp4");
+        repo.move_subtitles(&staging.join("id.mp4"), &destination)
+            .unwrap();
+        for lang in ["en", "de"] {
+            let path = season.join(format!("S01E001 - A Video.{lang}.srt"));
+            assert!(path.is_file());
+            assert!(!staging.join(format!("id.{lang}.srt")).exists());
+        }
+        assert!(staging.join("id.en.srt.part").is_file());
+        assert!(staging.join("other.en.srt").is_file());
+        std::fs::write(season.join("S01E002 - Another Video.en.srt"), "other").unwrap();
+        repo.delete_subtitles(&destination).unwrap();
+        assert!(!season.join("S01E001 - A Video.en.srt").exists());
+        assert!(!season.join("S01E001 - A Video.de.srt").exists());
+        assert!(season.join("S01E002 - Another Video.en.srt").is_file());
+        // Missing files/directories are retry-safe.
+        repo.delete_subtitles(&destination).unwrap();
+        repo.move_subtitles(&dir.path().join("missing/id.mp4"), &destination)
+            .unwrap();
+    }
 
     #[test]
     fn it_should_delete_a_file_matching_the_exact_filename() {

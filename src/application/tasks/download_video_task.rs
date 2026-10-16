@@ -1579,7 +1579,10 @@ mod tests {
         let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
         let videos_root = unique_temp_dir("download-video-task-thumbnail-e2e");
         let output_dir = videos_root.join("playlists/my-playlist");
-        let fake_yt_dlp = FakeYtDlp::with_downloaded_files("yt1.mp4", &["yt1.mp4", "yt1.jpg"]);
+        let fake_yt_dlp = FakeYtDlp::with_downloaded_files(
+            "yt1.mp4",
+            &["yt1.mp4", "yt1.jpg", "yt1.en.srt", "yt1.de.srt"],
+        );
         let video = my_video();
         video_repository.save(&video).unwrap();
         SqliteChannelVideoRepository::new(db.database())
@@ -1613,6 +1616,7 @@ mod tests {
         let result = run(&task, &output_dir_payload(&video, &output_dir), false);
 
         assert_eq!(result, Ok(()));
+        let saved_id = video.id.clone();
         assert_eq!(
             video_repository.list().unwrap(),
             vec![
@@ -1630,6 +1634,18 @@ mod tests {
                         fixed_timestamp()
                     )
             ]
+        );
+        for language in ["en", "de"] {
+            assert!(
+                output_dir
+                    .join(format!(
+                        "Season 2023/S2023E111401 - My Video.{language}.srt"
+                    ))
+                    .is_file()
+            );
+        }
+        assert!(
+            !crate::domain::video::staging_dir(&videos_root.to_string_lossy(), &saved_id).exists()
         );
         std::fs::remove_dir_all(&videos_root).unwrap();
     }

@@ -143,6 +143,11 @@ pub(crate) fn build_infrastructure() -> Result<InfrastructureContainer> {
         videos_path: PathBuf::from(videos_path()),
         avatars_path: avatars_path(),
         ytdlp_path: target_path(),
+        subtitles: crate::infrastructure::shared::subtitles::SubtitleConfig::parse(
+            &std::env::var("YARRTUBE_WRITE_SUBS").unwrap_or_default(),
+            &std::env::var("YARRTUBE_WRITE_AUTO_SUBS").unwrap_or_default(),
+            &std::env::var("YARRTUBE_SUB_LANGS").unwrap_or_default(),
+        )?,
         sponsorblock: crate::infrastructure::shared::sponsorblock::SponsorBlockConfig::parse(
             &std::env::var("YARRTUBE_SPONSORBLOCK_REMOVE").unwrap_or_default(),
         )?,
@@ -1063,6 +1068,7 @@ mod tests {
             avatars_path: unique_temp_dir("serve-registry-avatars"),
             ytdlp_path: PathBuf::from("yt-dlp"),
             sponsorblock: Default::default(),
+            subtitles: Default::default(),
         })
         .unwrap()
     }
