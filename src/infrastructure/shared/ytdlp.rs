@@ -1056,11 +1056,13 @@ mod tests {
                 sabr_notice: None,
             }
         );
-        assert!(
-            fake.captured_args()
-                .windows(4)
-                .any(|args| args == ["--print", "%(timestamp)s", "--print", "%(upload_date)s"])
-        );
+        assert!(fake.captured_args().windows(4).any(|args| args
+            == [
+                "--print",
+                "after_move:%(timestamp)s",
+                "--print",
+                "after_move:%(upload_date)s"
+            ]));
         std::fs::remove_dir_all(&staging_dir).unwrap();
     }
 

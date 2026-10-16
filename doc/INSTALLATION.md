@@ -108,7 +108,8 @@ to remove every sponsored segment. Existing files are not reprocessed.
 
 Cuts use yt-dlp's default behaviour without forcing a full re-encode; minor
 artifacts near cut boundaries are possible. SponsorBlock lookup warnings are
-logged; cutting/download failures use the existing task retry mechanism.
+logged; SponsorBlock lookup, cutting, and download failures use the existing
+task retry mechanism rather than silently delivering an uncut video.
 
 ## Videos on disk
 
