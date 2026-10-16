@@ -79,10 +79,10 @@ Environment variables read by Yarrtube are listed below. Every variable except `
 | `YARRTUBE_RETRY_BASE_DELAY_SECONDS`   | `150`                 | Delay before retrying a failed task; it grows exponentially with each further retry                                                                                                                           |
 | `YARRTUBE_AVATARS_PATH`               | `/config/avatars`     | Directory channel avatars are stored in (inside the container)                                                                                                                                                |
 | `YARRTUBE_SPONSORBLOCK_REMOVE` | empty (disabled) | SponsorBlock removal categories: `default`, `all`, or explicit comma-separated categories (see below). |
-| `YARRTUBE_WRITE_SUBS` | `false` | Download creator-provided captions as external SRT files. |
-| `YARRTUBE_WRITE_AUTO_SUBS` | `false` | Download automatically generated captions. |
-| `YARRTUBE_EMBED_SUBS` | `true` | Embed downloaded, retimed subtitles with language/source titles; remove external SRT copies on success. |
-| `YARRTUBE_SUB_LANGS` | `en.*` | Comma-separated language codes/patterns; live chat excluded. |
+| `YARRTUBE_WRITE_SUBS` | `false` | Download creator-provided captions in the selected languages. Converted to SRT before optional embedding. |
+| `YARRTUBE_WRITE_AUTO_SUBS` | `false` | Download automatic captions and automatic translations in the selected languages. Creator captions take precedence for the same language when both switches are enabled. |
+| `YARRTUBE_EMBED_SUBS` | `true` | Embed downloaded captions after SponsorBlock timing correction, with titles such as `English-SRT` or `English-GENERATED-SRT`. Remove external SRTs after successful embedding; `false` keeps external SRTs only. |
+| `YARRTUBE_SUB_LANGS` | `en.*` | Comma-separated yt-dlp language codes/patterns. `en.*` selects English variants only; `en.*,de.*` selects English and German. Live chat is always excluded. |
 | `YTDLP_PATH`                          | `/app/bin/yt-dlp`     | Path to the managed `yt-dlp` binary (also the path bundled into the image at build time)                                                                                                                      |
 | `RUST_LOG`                            | `info`                | Log verbosity (e.g. `RUST_LOG=debug`)                                                                                                                                                                         |
 | `YARRTUBE_PLEX_URL`                   | —                     | Base URL of your Plex server (e.g. `http://192.168.1.10:32400`). With the token and `YARRTUBE_PLEX_VIDEOS_PATH`, enables the [Plex scan trigger](#plex)                                                       |
