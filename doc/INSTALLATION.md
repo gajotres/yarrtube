@@ -19,7 +19,7 @@ docker run -d \
   -p 8080:8080 \
   -v /path/on/host/config:/config \
   -v /path/on/host/videos:/videos \
-  ghcr.io/sergigp/yarrtube:latest
+  ghcr.io/gajotres/yarrtube:latest
 ```
 
 - `-v /path/on/host/videos:/videos` is where downloaded videos will show up
@@ -48,7 +48,8 @@ services:
   yarrtube:
     container_name: yarrtube
     mem_limit: 256m
-    image: ghcr.io/sergigp/yarrtube:latest
+    image: ghcr.io/gajotres/yarrtube:latest
+    pull_policy: always
     restart: always
     ports:
       - 8080:8080
@@ -174,6 +175,20 @@ and the scan trigger are covered step by step in [PLEX.md](PLEX.md).
 
 ## Updating
 
+This fork publishes `ghcr.io/gajotres/yarrtube:latest` after each successful
+main-branch push build (and release-tag builds). Main builds also publish a
+`sha-<short-commit>` tag for pinning or rollback. The former `sponsorblock` tag is
+no longer updated. Manual workflow runs publish `edge` for testing without
+moving `latest`.
+
+A registry tag moving does not update an existing container. Compose normally
+reuses cached non-`latest` images with its default `missing` pull policy. The
+`pull_policy: always` setting above makes deployments check the registry; it
+does not schedule automatic updates. A container restart does not pull an image.
+Pull and recreate the service after the image build completes. If your container
+manager stores its own stack environment, set `IMAGE_NAME_YARRTUBE` there to
+`ghcr.io/gajotres/yarrtube:latest` as well.
+
 > [!NOTE]
 > Updating from 0.8.x or older? 0.9.0 moved the library to a TV show layout
 > and changed the Plex settings. Follow
@@ -182,7 +197,7 @@ and the scan trigger are covered step by step in [PLEX.md](PLEX.md).
 With `docker run`:
 
 ```bash
-docker pull ghcr.io/sergigp/yarrtube:latest
+docker pull ghcr.io/gajotres/yarrtube:latest
 docker stop yarrtube && docker rm yarrtube
 # then re-run the `docker run` command above
 ```
