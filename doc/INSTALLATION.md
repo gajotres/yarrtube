@@ -49,7 +49,6 @@ services:
     container_name: yarrtube
     mem_limit: 256m
     image: ghcr.io/gajotres/yarrtube:latest
-    pull_policy: always
     restart: always
     ports:
       - 8080:8080
@@ -176,16 +175,18 @@ and the scan trigger are covered step by step in [PLEX.md](PLEX.md).
 ## Updating
 
 This fork publishes `ghcr.io/gajotres/yarrtube:latest` after each successful
-main-branch push build (and release-tag builds). Main builds also publish a
-`sha-<short-commit>` tag for pinning or rollback. The former `sponsorblock` tag is
-no longer updated. Manual workflow runs publish `edge` for testing without
-moving `latest`.
+main-branch push build (and release-tag builds). Pushing a Git release tag such
+as `v1.0.1` also publishes the versioned image tag `1.0.1` for pinning or rollback.
+Version numbers are assigned through Git release tags; ordinary main-branch
+builds only move `latest`. SHA image tags are not published. The former
+`sponsorblock` tag is no longer updated. Manual workflow runs publish `edge` for
+testing without moving `latest`.
 
-A registry tag moving does not update an existing container. Compose normally
-reuses cached non-`latest` images with its default `missing` pull policy. The
-`pull_policy: always` setting above makes deployments check the registry; it
-does not schedule automatic updates. A container restart does not pull an image.
-Pull and recreate the service after the image build completes. If your container
+A registry tag moving does not update an existing container. Compose's default
+`missing` pull policy checks the registry for `latest`, while cached versioned
+images can be reused. This does not schedule automatic updates. A container
+restart does not pull an image. Pull and recreate the service after the image
+build completes. If your container
 manager stores its own stack environment, set `IMAGE_NAME_YARRTUBE` there to
 `ghcr.io/gajotres/yarrtube:latest` as well.
 
