@@ -1,6 +1,10 @@
 use crate::domain::channel::ChannelHandle;
+#[cfg(test)]
+use crate::infrastructure::repositories::sqlite_channel_repository::ChannelRepository;
 use crate::infrastructure::shared::ytdlp;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::Arc;
 
 /// One of a channel's current videos, as discovered by a fresh listing —
 /// `position` is the recency rank within that listing (`0` = most recent).
@@ -59,6 +63,9 @@ impl ChannelVideosRepository for YtDlpChannelVideosRepository {
 pub struct FakeChannelVideosRepository {
     pub(crate) videos: std::sync::Mutex<Vec<ChannelVideoListing>>,
     pub(crate) fails: std::sync::Mutex<bool>,
+    /// Deletes the listed channel from this repository, as if a user deleted
+    /// it while the reconcile was running.
+    pub(crate) deletes_from: Option<Arc<dyn ChannelRepository>>,
 }
 
 #[cfg(test)]
@@ -67,6 +74,7 @@ impl FakeChannelVideosRepository {
         Self {
             videos: std::sync::Mutex::new(videos),
             fails: std::sync::Mutex::new(false),
+            deletes_from: None,
         }
     }
 
@@ -74,6 +82,14 @@ impl FakeChannelVideosRepository {
         Self {
             videos: std::sync::Mutex::new(Vec::new()),
             fails: std::sync::Mutex::new(true),
+            deletes_from: None,
+        }
+    }
+
+    pub fn deleting_the_channel_from(repository: Arc<dyn ChannelRepository>) -> Self {
+        Self {
+            deletes_from: Some(repository),
+            ..Self::default()
         }
     }
 }
@@ -82,9 +98,12 @@ impl FakeChannelVideosRepository {
 impl ChannelVideosRepository for FakeChannelVideosRepository {
     fn list_current_videos(
         &self,
-        _channel_id: &ChannelHandle,
+        channel_id: &ChannelHandle,
         limit: u32,
     ) -> anyhow::Result<Vec<ChannelVideoListing>> {
+        if let Some(repository) = &self.deletes_from {
+            repository.delete(channel_id)?;
+        }
         if *self.fails.lock().unwrap() {
             anyhow::bail!("yt-dlp failed to list channel videos");
         }

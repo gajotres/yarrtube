@@ -1,9 +1,11 @@
 use crate::domain::channel::ChannelDeleted;
 use crate::domain::channel::{Channel, ChannelHandle, DeleteChannelError};
 use crate::domain::event::DomainEvent;
+use crate::domain::task::Task;
 use crate::infrastructure::repositories::filesystem_channel_avatar_repository::ChannelAvatarRepository;
 use crate::infrastructure::repositories::sqlite_channel_repository::ChannelRepository;
 use crate::infrastructure::repositories::sqlite_channel_video_repository::ChannelVideoRepository;
+use crate::infrastructure::repositories::sqlite_task_repository::TaskRepository;
 use crate::infrastructure::repositories::sqlite_video_repository::VideoRepository;
 use crate::infrastructure::shared::domain_events::event_publisher::EventPublisher;
 use std::sync::Arc;
@@ -17,6 +19,7 @@ pub struct ChannelDeleter {
     channel_video_repository: Arc<dyn ChannelVideoRepository>,
     avatar_repository: Arc<dyn ChannelAvatarRepository>,
     event_publisher: Arc<dyn EventPublisher>,
+    task_repository: Arc<dyn TaskRepository>,
 }
 
 impl ChannelDeleter {
@@ -26,6 +29,7 @@ impl ChannelDeleter {
         channel_video_repository: Arc<dyn ChannelVideoRepository>,
         avatar_repository: Arc<dyn ChannelAvatarRepository>,
         event_publisher: Arc<dyn EventPublisher>,
+        task_repository: Arc<dyn TaskRepository>,
     ) -> Self {
         Self {
             repository,
@@ -33,6 +37,7 @@ impl ChannelDeleter {
             channel_video_repository,
             avatar_repository,
             event_publisher,
+            task_repository,
         }
     }
 }
@@ -48,6 +53,7 @@ impl ChannelDeleterApi for ChannelDeleter {
         let channel = self.find_channel(&id)?;
         self.delete_channel_videos(&id)?;
         self.delete_avatar(&channel)?;
+        self.remove_pending_reconciles(&id)?;
         self.delete_channel(&id)?;
         self.publish_channel_deleted(&id, &channel)?;
         info!(channel_id = %id, "deleted channel");
@@ -88,6 +94,25 @@ impl ChannelDeleter {
         self.avatar_repository
             .delete(avatar_filename)
             .map_err(DeleteChannelError::Repository)
+    }
+
+    /// Removes every pending reconcile of the channel, so none outlives it. A
+    /// database from before the one-pending-reconcile rule can hold several.
+    fn remove_pending_reconciles(&self, id: &ChannelHandle) -> Result<(), DeleteChannelError> {
+        let task = Task::ReconcileChannel {
+            channel_id: id.as_str().to_string(),
+        };
+        let Some(pending) = self
+            .task_repository
+            .find_pending(&task)
+            .map_err(DeleteChannelError::Repository)?
+        else {
+            return Ok(());
+        };
+        self.task_repository
+            .delete(pending.id)
+            .map_err(DeleteChannelError::Repository)?;
+        self.remove_pending_reconciles(id)
     }
 
     fn delete_channel(&self, id: &ChannelHandle) -> Result<(), DeleteChannelError> {

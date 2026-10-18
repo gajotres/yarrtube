@@ -38,7 +38,6 @@ pub struct PlaylistVideoReconciler {
     internal_video_reconciler: Arc<InternalVideoReconciler>,
     show_file_writer: Arc<ShowFileWriter>,
     clock: Arc<dyn Clock>,
-    reconcile_interval_seconds: i64,
 }
 
 impl PlaylistVideoReconciler {
@@ -53,7 +52,6 @@ impl PlaylistVideoReconciler {
         internal_video_reconciler: Arc<InternalVideoReconciler>,
         show_file_writer: Arc<ShowFileWriter>,
         clock: Arc<dyn Clock>,
-        reconcile_interval_seconds: i64,
     ) -> Self {
         Self {
             playlist_repository,
@@ -65,7 +63,6 @@ impl PlaylistVideoReconciler {
             internal_video_reconciler,
             show_file_writer,
             clock,
-            reconcile_interval_seconds,
         }
     }
 }
@@ -385,15 +382,23 @@ impl PlaylistVideoReconciler {
         })
     }
 
+    /// Re-reads the playlist so an interval changed, or a playlist deleted,
+    /// while the pass ran is honoured. A playlist keeps at most one pending
+    /// reconcile; the running pass is not pending, so it never blocks itself.
     fn schedule_next_reconcile(&self, id: &PlaylistId) -> anyhow::Result<()> {
-        let now = self.clock.now();
-        let next_run_at = now + chrono::Duration::seconds(self.reconcile_interval_seconds);
-        self.task_repository.schedule(
-            &Task::ReconcilePlaylist {
-                playlist_id: id.as_str().to_string(),
-            },
-            next_run_at,
-        )?;
+        let Some(playlist) = self.playlist_repository.find(id)? else {
+            info!(playlist_id = %id, "playlist deleted during reconcile, not scheduling the next one");
+            return Ok(());
+        };
+        let task = Task::ReconcilePlaylist {
+            playlist_id: id.as_str().to_string(),
+        };
+        if self.task_repository.find_pending(&task)?.is_some() {
+            info!(playlist_id = %id, "a reconcile of the playlist is already pending, not scheduling another");
+            return Ok(());
+        }
+        let next_run_at = self.clock.now() + playlist.reconcile_interval.duration();
+        self.task_repository.schedule(&task, next_run_at)?;
         info!(playlist_id = %id, next_run_at = %next_run_at, "scheduled next reconcile of playlist");
 
         Ok(())
