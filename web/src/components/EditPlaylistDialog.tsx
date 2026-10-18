@@ -1,0 +1,85 @@
+import { useState, type FormEvent } from 'react'
+import type { UpdatePlaylistRequest } from '@/api/client'
+import type { PlaylistListItem } from '@/api/types'
+import { intervalForm, intervalMinutes, type IntervalForm } from '@/lib/reconcileInterval'
+import { ReconcileIntervalField } from './ReconcileIntervalField'
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
+import { Button } from '@/components/ui/button'
+
+interface EditPlaylistDialogProps {
+  playlist: PlaylistListItem
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  /** Sends the changes; rejects to keep the dialog open with the error. */
+  onSave: (changes: UpdatePlaylistRequest) => Promise<void>
+}
+
+export function EditPlaylistDialog({
+  playlist,
+  open,
+  onOpenChange,
+  onSave,
+}: EditPlaylistDialogProps) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="gap-5 p-6 sm:max-w-md">
+        <DialogTitle>Edit {playlist.name} settings</DialogTitle>
+        <DialogDescription className="sr-only">
+          Change how often {playlist.name} is checked for new videos.
+        </DialogDescription>
+        {/* The form unmounts with the dialog, so every open starts from the
+            playlist's current settings. */}
+        <EditPlaylistForm
+          playlist={playlist}
+          onSave={onSave}
+          onClose={() => onOpenChange(false)}
+        />
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+interface EditPlaylistFormProps {
+  playlist: PlaylistListItem
+  onSave: (changes: UpdatePlaylistRequest) => Promise<void>
+  onClose: () => void
+}
+
+function EditPlaylistForm({ playlist, onSave, onClose }: EditPlaylistFormProps) {
+  const [interval, changeInterval] = useState<IntervalForm>(
+    intervalForm(playlist.reconcile_interval_minutes),
+  )
+
+  const [error, setError] = useState<Error | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const minutes = intervalMinutes(interval)
+    if (minutes === null) return
+    if (minutes === playlist.reconcile_interval_minutes) {
+      onClose()
+      return
+    }
+    setSubmitting(true)
+    setError(null)
+    try {
+      await onSave({ reconcile_interval_minutes: minutes })
+      onClose()
+    } catch (err) {
+      setError(err instanceof Error ? err : new Error(String(err)))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <form className="flex min-w-0 flex-col gap-5" onSubmit={handleSubmit}>
+      <ReconcileIntervalField id="edit-playlist-interval" value={interval} onChange={changeInterval} />
+      {error && <p className="text-sm text-destructive">{error.message}</p>}
+      <Button type="submit" disabled={submitting} className="self-start">
+        {submitting ? 'Saving…' : 'Save'}
+      </Button>
+    </form>
+  )
+}

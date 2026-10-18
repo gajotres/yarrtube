@@ -78,6 +78,7 @@ describe('mutations', () => {
       path: 'playlists/mix',
       quality: 'high',
       exclude_from_home: false,
+      reconcile_interval_minutes: 180,
     })
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
@@ -87,13 +88,20 @@ describe('mutations', () => {
       path: 'playlists/mix',
       quality: 'high',
       exclude_from_home: false,
+      reconcile_interval_minutes: 180,
     })
   })
 
   it('POSTs the channel creation payload as JSON', async () => {
     const fetchMock = mockApi({ 'POST /api/channels': { id: 'chan' } })
 
-    await createChannel({ channel: '@chan', quality: 'mid', video_limit: 3, path: 'channels/chan' })
+    await createChannel({
+      channel: '@chan',
+      quality: 'mid',
+      video_limit: 3,
+      path: 'channels/chan',
+      reconcile_interval_minutes: 180,
+    })
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(JSON.parse(init.body as string)).toEqual({
@@ -101,6 +109,7 @@ describe('mutations', () => {
       quality: 'mid',
       video_limit: 3,
       path: 'channels/chan',
+      reconcile_interval_minutes: 180,
     })
   })
 

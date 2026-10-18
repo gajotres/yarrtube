@@ -1,4 +1,4 @@
-use crate::application::http::{self, ApiServices, VideosRoot};
+use crate::application::http::{self, ApiServices, RunningVersion, VideosRoot};
 use crate::application::{subscribers, tasks};
 use crate::domain::services::{
     ChannelAvatarRestorer, ChannelCreator, ChannelDeleter, ChannelPreviewer, ChannelUpdater,
@@ -20,6 +20,7 @@ use crate::infrastructure::repositories::plex_library_repository::{
     HttpPlexLibraryRepository, PlexConfig, PlexLibraryRepository,
 };
 use crate::infrastructure::repositories::task_executor::{HandlerRegistry, TaskExecutor};
+use crate::infrastructure::shared::app_version::APP_VERSION;
 use crate::infrastructure::shared::web_assets::WebAssets;
 use crate::infrastructure::shared::{sqlite_connection, sqlite_migrations};
 use anyhow::{Context, Result};
@@ -40,7 +41,6 @@ use tracing_subscriber::filter::LevelFilter;
 
 const DEFAULT_PORT: u16 = 8080;
 const DEFAULT_DB_PATH: &str = "yarrtube.sqlite3";
-const DEFAULT_RECONCILE_INTERVAL_SECONDS: i64 = 3600;
 const DEFAULT_RETRY_BASE_DELAY_SECONDS: i64 = 150;
 const DEFAULT_VIDEOS_PATH: &str = "/videos";
 const DEFAULT_DOWNLOAD_CONCURRENCY: usize = 2;
@@ -181,13 +181,6 @@ fn db_path() -> PathBuf {
     std::env::var("YARRTUBE_DB_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_DB_PATH))
-}
-
-fn reconcile_interval_seconds() -> i64 {
-    std::env::var("YARRTUBE_RECONCILE_INTERVAL_SECONDS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_RECONCILE_INTERVAL_SECONDS)
 }
 
 fn retry_base_delay_seconds() -> i64 {
@@ -375,12 +368,17 @@ fn api_services(infrastructure: &InfrastructureContainer) -> ApiServices {
             infrastructure.video_repository.clone(),
             infrastructure.playlist_video_repository.clone(),
             infrastructure.event_publisher.clone(),
+            infrastructure.task_repository.clone(),
         ),
         playlist_previewer: PlaylistPreviewer::new(
             infrastructure.youtube_playlist_repository.clone(),
         ),
         playlist_searcher: PlaylistSearcher::new(infrastructure.playlist_repository.clone()),
-        playlist_updater: PlaylistUpdater::new(infrastructure.playlist_repository.clone()),
+        playlist_updater: PlaylistUpdater::new(
+            infrastructure.playlist_repository.clone(),
+            infrastructure.task_repository.clone(),
+            infrastructure.clock.clone(),
+        ),
         playlist_video_reconciler: playlist_video_reconciler(infrastructure),
         video_searcher: VideoSearcher::new(
             infrastructure.playlist_repository.clone(),
@@ -412,9 +410,14 @@ fn api_services(infrastructure: &InfrastructureContainer) -> ApiServices {
             infrastructure.channel_video_repository.clone(),
             infrastructure.channel_avatar_repository.clone(),
             infrastructure.event_publisher.clone(),
+            infrastructure.task_repository.clone(),
         ),
         channel_previewer: ChannelPreviewer::new(infrastructure.youtube_channel_repository.clone()),
-        channel_updater: ChannelUpdater::new(infrastructure.channel_repository.clone()),
+        channel_updater: ChannelUpdater::new(
+            infrastructure.channel_repository.clone(),
+            infrastructure.task_repository.clone(),
+            infrastructure.clock.clone(),
+        ),
         channel_view_searcher: ChannelViewSearcher::new(
             infrastructure.channel_repository.clone(),
             infrastructure.channel_video_repository.clone(),
@@ -429,6 +432,7 @@ fn api_services(infrastructure: &InfrastructureContainer) -> ApiServices {
             infrastructure.clock.clone(),
         ),
         videos_root: VideosRoot(videos_path()),
+        running_version: RunningVersion(APP_VERSION.to_string()),
     }
 }
 
@@ -499,7 +503,6 @@ fn playlist_video_reconciler(infrastructure: &InfrastructureContainer) -> Playli
         internal_video_reconciler(infrastructure),
         show_file_writer(infrastructure),
         infrastructure.clock.clone(),
-        reconcile_interval_seconds(),
     )
 }
 
@@ -519,7 +522,6 @@ fn channel_video_reconciler(infrastructure: &InfrastructureContainer) -> Channel
             infrastructure.channel_avatar_repository.clone(),
         )),
         infrastructure.clock.clone(),
-        reconcile_interval_seconds(),
     )
 }
 
