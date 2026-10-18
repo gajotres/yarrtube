@@ -41,7 +41,7 @@ mod tests {
     use crate::domain::services::ShowFileWriter;
     use crate::domain::services::ThumbnailFetcher;
     use crate::domain::services::VideoRelocator;
-    use crate::domain::shared::Quality;
+    use crate::domain::shared::{Quality, ReconcileInterval};
     use crate::domain::task::{ScheduledTask, TaskStatus};
     use crate::domain::video::Video;
     use crate::domain::video::{EpisodeNumber, VideoId, VideoRecordId, VideoStatus};
@@ -579,6 +579,114 @@ mod tests {
     }
 
     #[test]
+    fn it_should_schedule_the_next_reconcile_after_the_channels_interval() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.database(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        channel_repository
+            .insert(
+                &channel("@somechannel")
+                    .with_reconcile_interval(ReconcileInterval::new(30).unwrap()),
+            )
+            .unwrap();
+        let task = ReconcileChannelTask::new(channel_video_reconciler(
+            &db,
+            channel_repository,
+            Arc::new(SqliteVideoRepository::new(db.database())),
+            Arc::new(SqliteChannelVideoRepository::new(db.database())),
+            Arc::new(FakeChannelVideosRepository::with_videos(Vec::new())),
+            task_repository.clone(),
+            Arc::new(FakeVideoFileRepository::default()),
+        ));
+
+        let result = run(&task, &payload_for("@somechannel"));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            task_repository.list_non_completed().unwrap(),
+            vec![pending_task(
+                1,
+                &Task::ReconcileChannel {
+                    channel_id: "@somechannel".to_string(),
+                },
+                fixed_timestamp() + chrono::Duration::minutes(30),
+            )]
+        );
+    }
+
+    #[test]
+    fn it_should_not_schedule_the_next_reconcile_if_one_is_already_pending() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.database(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        channel_repository.insert(&channel("@somechannel")).unwrap();
+        let pending_reconcile = Task::ReconcileChannel {
+            channel_id: "@somechannel".to_string(),
+        };
+        task_repository
+            .schedule(
+                &pending_reconcile,
+                fixed_timestamp() + chrono::Duration::minutes(5),
+            )
+            .unwrap();
+        let task = ReconcileChannelTask::new(channel_video_reconciler(
+            &db,
+            channel_repository,
+            Arc::new(SqliteVideoRepository::new(db.database())),
+            Arc::new(SqliteChannelVideoRepository::new(db.database())),
+            Arc::new(FakeChannelVideosRepository::with_videos(Vec::new())),
+            task_repository.clone(),
+            Arc::new(FakeVideoFileRepository::default()),
+        ));
+
+        let result = run(&task, &payload_for("@somechannel"));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            task_repository.list_non_completed().unwrap(),
+            vec![pending_task(
+                1,
+                &pending_reconcile,
+                fixed_timestamp() + chrono::Duration::minutes(5),
+            )]
+        );
+    }
+
+    #[test]
+    fn it_should_not_schedule_the_next_reconcile_if_channel_deleted_during_the_pass() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.database(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        channel_repository.insert(&channel("@somechannel")).unwrap();
+        let task = ReconcileChannelTask::new(channel_video_reconciler(
+            &db,
+            channel_repository.clone(),
+            Arc::new(SqliteVideoRepository::new(db.database())),
+            Arc::new(SqliteChannelVideoRepository::new(db.database())),
+            Arc::new(FakeChannelVideosRepository::deleting_the_channel_from(
+                channel_repository.clone(),
+            )),
+            task_repository.clone(),
+            Arc::new(FakeVideoFileRepository::default()),
+        ));
+
+        let result = run(&task, &payload_for("@somechannel"));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(channel_repository.list().unwrap(), vec![]);
+        assert_eq!(task_repository.list_non_completed().unwrap(), vec![]);
+    }
+
+    #[test]
     fn it_should_rewrite_missing_show_files_on_a_recurring_reconcile() {
         let db = TestDatabase::new();
         let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
@@ -641,7 +749,6 @@ mod tests {
                 Arc::new(FakeChannelAvatarRepository::default()),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
-            3600,
         ));
 
         let result = run(&task, &payload_for("@somechannel"));
@@ -733,7 +840,6 @@ mod tests {
                 avatar_repository.clone(),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
-            3600,
         ));
 
         let result = run(&task, &payload_for("@somechannel"));
@@ -824,7 +930,6 @@ mod tests {
                 avatar_repository.clone(),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
-            3600,
         ));
 
         let result = run(&task, &payload_for("@somechannel"));
@@ -908,7 +1013,6 @@ mod tests {
                 avatar_repository.clone(),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
-            3600,
         ));
 
         let result = run(&task, &payload_for("@somechannel"));
@@ -1003,7 +1107,6 @@ mod tests {
                 avatar_repository.clone(),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
-            3600,
         ));
 
         let result = run(&task, &payload_for("@somechannel"));
@@ -1098,7 +1201,6 @@ mod tests {
                 avatar_repository.clone(),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
-            3600,
         ));
 
         let result = run(&task, &payload_for("@somechannel"));
@@ -1206,7 +1308,6 @@ mod tests {
                 Arc::new(FakeChannelAvatarRepository::default()),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
-            3600,
         ));
 
         let result = run(&task, &payload_for("@somechannel"));
@@ -1472,7 +1573,6 @@ mod tests {
                 Arc::new(FakeChannelAvatarRepository::default()),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
-            3600,
         ));
 
         let result = run(&task, &payload_for("@somechannel"));
@@ -1588,7 +1688,6 @@ mod tests {
                 Arc::new(FakeChannelAvatarRepository::default()),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
-            3600,
         ));
 
         let result = run(&task, &payload_for("@somechannel"));
@@ -1669,7 +1768,6 @@ mod tests {
                 Arc::new(FakeChannelAvatarRepository::default()),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
-            3600,
         ));
 
         let result = run(&task, &payload_for("@somechannel"));
@@ -1808,7 +1906,6 @@ mod tests {
                 Arc::new(FakeChannelAvatarRepository::default()),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
-            3600,
         )
     }
 
@@ -1869,7 +1966,6 @@ mod tests {
                 Arc::new(FakeChannelAvatarRepository::default()),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
-            3600,
         ))
     }
 
@@ -1918,6 +2014,7 @@ mod tests {
             "UC123",
             Quality::High,
             VideoLimit::new(10).unwrap(),
+            ReconcileInterval::default_interval(),
             PlaylistPath::new("creators/somechannel").unwrap(),
             None,
             fixed_timestamp(),
@@ -2022,7 +2119,7 @@ mod tests {
             &Task::ReconcileChannel {
                 channel_id: "@somechannel".to_string(),
             },
-            fixed_timestamp() + chrono::Duration::seconds(3600),
+            fixed_timestamp() + chrono::Duration::minutes(180),
         )
     }
 

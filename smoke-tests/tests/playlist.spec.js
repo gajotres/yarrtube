@@ -7,6 +7,7 @@ import {
 } from '../helpers/addDialog.js'
 import { waitForVideoStatus, assertVideoPlays } from '../helpers/video.js'
 import { syncItem, deleteItem, sectionRows, includeItemInHome } from '../helpers/sidebar.js'
+import { expectPendingSync } from '../helpers/tasks.js'
 
 const PLAYLIST_ID = process.env.SMOKE_PLAYLIST_ID
 const PLAYLIST_NAME = process.env.SMOKE_PLAYLIST_NAME ?? 'test'
@@ -97,6 +98,35 @@ test('playlist lifecycle: add, download, play, sync, duplicate error, delete', a
 
   // Sync from the sidebar completes without an error dialog/alert.
   await syncItem(page, { section: 'Playlists', name: PLAYLIST_NAME })
+
+  // Change how often the playlist is checked from its page header's "⋮"
+  // menu; reopening the dialog shows the saved value (covers PATCH
+  // /playlists/{id} with an interval).
+  await page.locator('h3:text-is("Playlists") ~ ul').getByRole('link', { name: PLAYLIST_NAME }).click()
+  const editPlaylist = async () => {
+    await page.getByRole('button', { name: /^More actions for / }).click()
+    await page.getByRole('menuitem', { name: 'Edit settings' }).click()
+    return page.getByRole('dialog', { name: `Edit ${PLAYLIST_NAME} settings` })
+  }
+  let editDialog = await editPlaylist()
+  await expect(editDialog.getByLabel('Check for new videos every')).toHaveValue('3')
+  await editDialog.getByLabel('Check for new videos every').fill('30')
+  await editDialog.getByRole('combobox', { name: 'Interval unit' }).click()
+  await page.getByRole('option', { name: 'minutes' }).click()
+  const intervalSaved = page.waitForResponse(
+    (response) => response.request().method() === 'PATCH' && response.url().includes('/playlists/'),
+  )
+  await editDialog.getByRole('button', { name: 'Save' }).click()
+  expect((await intervalSaved).status()).toBe(200)
+  await editDialog.waitFor({ state: 'hidden' })
+  editDialog = await editPlaylist()
+  await expect(editDialog.getByLabel('Check for new videos every')).toHaveValue('30')
+  await expect(editDialog.getByRole('combobox', { name: 'Interval unit' })).toHaveText('minutes')
+  await editDialog.getByRole('button', { name: 'Close' }).click()
+
+  // The shorter interval brought the playlist's next sync forward: it was
+  // due in 3 hours, now in about 30 minutes.
+  await expectPendingSync(page, { label: `Syncing playlist ${PLAYLIST_NAME}`, due: /^in (29|30)m$/ })
 
   // Playing past the watched threshold marks the video watched without
   // interrupting playback: once the list shows it watched, the player is

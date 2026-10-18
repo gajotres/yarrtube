@@ -7,6 +7,7 @@ import {
   fetchHomeVideos,
   fetchPlaylists,
   fetchTasks,
+  fetchVersion,
   fetchVideos,
   markVideoWatched,
   previewChannel,
@@ -14,9 +15,11 @@ import {
   updateChannel,
   updatePlaylist,
   type UpdateChannelRequest,
+  type UpdatePlaylistRequest,
 } from './client'
 import type {
   Announcement,
+  AppVersion,
   ChannelListItem,
   ChannelPreview,
   HomeVideos,
@@ -39,6 +42,7 @@ export const queryKeys = {
   recentVideos: ['videos', 'recent'] as const,
   tasks: ['tasks'] as const,
   announcements: ['announcements'] as const,
+  version: ['version'] as const,
   // Outside the `['playlists']` and `['channels']` prefixes so refetching the
   // library leaves them be.
   playlistPreview: (value: string) => ['playlist-preview', value] as const,
@@ -132,6 +136,17 @@ export function useAnnouncements(): UseQueryResult<Announcement[], Error> {
   })
 }
 
+/** Fetched once per page load: the running version only changes on a restart. */
+export function useVersion(): UseQueryResult<AppVersion, Error> {
+  return useQuery({
+    queryKey: queryKeys.version,
+    queryFn: fetchVersion,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    retry: false,
+  })
+}
+
 /**
  * Returns a function that refetches the channel and playlist lists (and,
  * by prefix, their video lists) after an action that changed them.
@@ -215,6 +230,24 @@ export function useUpdateChannelSettings(): (
   return useCallback(
     async (handle: string, changes: UpdateChannelRequest) => {
       await updateChannel(handle, changes)
+      await invalidateLibrary()
+    },
+    [invalidateLibrary],
+  )
+}
+
+/**
+ * Returns a function that changes a playlist's settings, then refetches the
+ * channel and playlist lists.
+ */
+export function useUpdatePlaylistSettings(): (
+  id: string,
+  changes: UpdatePlaylistRequest,
+) => Promise<void> {
+  const invalidateLibrary = useInvalidateLibrary()
+  return useCallback(
+    async (id: string, changes: UpdatePlaylistRequest) => {
+      await updatePlaylist(id, changes)
       await invalidateLibrary()
     },
     [invalidateLibrary],

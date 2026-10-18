@@ -72,7 +72,6 @@ Environment variables read by Yarrtube are listed below. Every variable except `
 | `PUID`                                | `0` (root)            | Numeric user ID the daemon runs as and that owns downloaded files                                                                                                                                             |
 | `PGID`                                | `0` (root)            | Numeric group ID the daemon runs as and that owns downloaded files                                                                                                                                            |
 | `YARRTUBE_PORT`                       | `8080`                | HTTP port to listen on                                                                                                                                                                                        |
-| `YARRTUBE_RECONCILE_INTERVAL_SECONDS` | `3600`                | How often each tracked playlist or channel is reconciled                                                                                                                                                      |
 | `YARRTUBE_DB_PATH`                    | `/config/yarrtube.db` | Path to the SQLite database (inside the container)                                                                                                                                                            |
 | `YARRTUBE_VIDEOS_PATH`                | `/videos`             | Root directory downloaded videos are saved under (inside the container)                                                                                                                                       |
 | `YARRTUBE_DOWNLOAD_CONCURRENCY`       | `2`                   | How many videos download at the same time. Higher values download faster but make YouTube more likely to throttle or bot-check you                                                                            |
@@ -88,6 +87,11 @@ Environment variables read by Yarrtube are listed below. Every variable except `
 | `YARRTUBE_PLEX_URL`                   | —                     | Base URL of your Plex server (e.g. `http://192.168.1.10:32400`). With the token and `YARRTUBE_PLEX_VIDEOS_PATH`, enables the [Plex scan trigger](#plex)                                                       |
 | `YARRTUBE_PLEX_TOKEN`                 | —                     | Plex authentication token (`X-Plex-Token`)                                                                                                                                                                    |
 | `YARRTUBE_PLEX_VIDEOS_PATH`           | —                     | Where the Plex server sees yarrtube's videos root (`YARRTUBE_VIDEOS_PATH`), e.g. the host path `/volume1/data/media/yarrtube` mounted at `/videos`. Plex is asked to scan a show's folder after each download |
+
+How often each channel and playlist is checked for new videos is not an
+environment variable: it is set per source in the web UI ("Check for new
+videos every" under "Advanced options" when adding it, or "Edit settings"
+afterwards), 3 hours by default.
 
 ## SponsorBlock
 
@@ -174,11 +178,13 @@ and the scan trigger are covered step by step in [PLEX.md](PLEX.md).
 
 ## Updating
 
-This fork publishes `ghcr.io/gajotres/yarrtube:latest` after each successful
-main-branch push build (and release-tag builds). Pushing a Git release tag such
-as `v1.0.1` also publishes the versioned image tag `1.0.1` for pinning or rollback.
-Version numbers are assigned through Git release tags; ordinary main-branch
-builds only move `latest`. SHA image tags are not published. The former
+After each push to `main` passes CI, this fork automatically creates the next
+release tag and publishes both `ghcr.io/gajotres/yarrtube:latest` and a versioned
+image tag, such as `1.0.1`, from the same multi-architecture image. The release
+version is also shown in the web UI. The release script uses `Cargo.toml` for a
+major/minor version increase, otherwise increments the latest release's patch
+number. Pushing a release tag manually also publishes that version and `latest`.
+SHA image tags are not published. The former
 `sponsorblock` tag is no longer updated. Manual workflow runs publish `edge` for
 testing without moving `latest`.
 

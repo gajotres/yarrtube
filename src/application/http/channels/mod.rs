@@ -15,7 +15,7 @@ use crate::domain::services::{
     ChannelVideoReconcilerApi, ChannelViewSearcher, ChannelViewSearcherApi, CreateChannelOutcome,
     VideoWatchStateUpdater, VideoWatchStateUpdaterApi,
 };
-use crate::domain::shared::Quality;
+use crate::domain::shared::{Quality, ReconcileInterval};
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -26,7 +26,8 @@ use dto::{
 
 const MISSING_VIDEO_LIMIT: &str = "Video limit must be a positive integer (missing)";
 const MISSING_PATH: &str = "Channel path must not be empty";
-const NOTHING_TO_UPDATE: &str = "Request must change the quality or the video limit";
+const NOTHING_TO_UPDATE: &str =
+    "Request must change the quality, the video limit or the reconcile interval";
 
 pub async fn create_channel(
     State(channel_creator): State<ChannelCreator>,
@@ -36,9 +37,16 @@ pub async fn create_channel(
     let quality = Quality::new(required(request.quality, MISSING_QUALITY)?)?;
     let video_limit = VideoLimit::new(required(request.video_limit, MISSING_VIDEO_LIMIT)?)?;
     let path = PlaylistPath::new(required(request.path, MISSING_PATH)?)?;
+    let reconcile_interval = request
+        .reconcile_interval_minutes
+        .map(ReconcileInterval::new)
+        .transpose()?
+        .unwrap_or_else(ReconcileInterval::default_interval);
 
-    let outcome =
-        run_blocking(move || channel_creator.create(id, quality, video_limit, path)).await?;
+    let outcome = run_blocking(move || {
+        channel_creator.create(id, quality, video_limit, reconcile_interval, path)
+    })
+    .await?;
 
     match outcome {
         Ok(CreateChannelOutcome::Created(channel)) => {
@@ -89,11 +97,19 @@ pub async fn update_channel(
     let id = ChannelHandle::new(handle)?;
     let quality = request.quality.map(Quality::new).transpose()?;
     let video_limit = request.video_limit.map(VideoLimit::new).transpose()?;
-    if quality.is_none() && video_limit.is_none() {
+    let reconcile_interval = request
+        .reconcile_interval_minutes
+        .map(ReconcileInterval::new)
+        .transpose()?;
+    if quality.is_none() && video_limit.is_none() && reconcile_interval.is_none() {
         return Err(ApiError::bad_request(NOTHING_TO_UPDATE));
     }
 
-    match run_blocking(move || channel_updater.update_settings(id, quality, video_limit)).await? {
+    match run_blocking(move || {
+        channel_updater.update_settings(id, quality, video_limit, reconcile_interval)
+    })
+    .await?
+    {
         Ok(channel) => Ok(Json(ChannelResponse::from(channel))),
         Err(e @ UpdateChannelError::NotFound(_)) => Err(ApiError::new(StatusCode::NOT_FOUND, e)),
         Err(e @ UpdateChannelError::Repository(_)) => Err(ApiError::internal(e)),
@@ -156,6 +172,7 @@ mod tests {
     use crate::domain::services::ShowFileWriter;
     use crate::domain::services::ThumbnailFetcher;
     use crate::domain::services::VideoRelocator;
+    use crate::domain::task::{ScheduledTask, Task, TaskStatus};
     use crate::domain::video::VideoId;
     use crate::domain::video::{PlaybackPosition, Video};
     use crate::infrastructure::repositories::filesystem_channel_avatar_repository::FakeChannelAvatarRepository;
@@ -217,6 +234,90 @@ mod tests {
         assert_eq!(
             channel_repository.list().unwrap(),
             vec![channel("@somechannel")]
+        );
+        assert_eq!(
+            event_repository.list_eligible().unwrap(),
+            vec![pending_event(1, channel_created("@somechannel"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_create_a_channel_with_the_default_interval() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        let event_repository = SqliteEventRepository::new(db.database());
+        let channel_creator = ChannelCreator::new(
+            channel_repository.clone(),
+            resolving(Some(resolved_channel())),
+            Arc::new(FakeChannelAvatarRepository::default()),
+            event_publisher(&db),
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
+
+        let request = CreateChannelRequest {
+            reconcile_interval_minutes: None,
+            ..create_request("@somechannel")
+        };
+        let response = create(channel_creator, request).await;
+
+        assert_eq!(
+            response,
+            Ok((
+                StatusCode::CREATED,
+                ChannelResponse {
+                    reconcile_interval_minutes: 180,
+                    ..some_channel_response()
+                }
+            ))
+        );
+        assert_eq!(
+            channel_repository.list().unwrap(),
+            vec![
+                channel("@somechannel")
+                    .with_reconcile_interval(ReconcileInterval::new(180).unwrap())
+            ]
+        );
+        assert_eq!(
+            event_repository.list_eligible().unwrap(),
+            vec![pending_event(1, channel_created("@somechannel"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_create_a_channel_with_its_interval() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        let event_repository = SqliteEventRepository::new(db.database());
+        let channel_creator = ChannelCreator::new(
+            channel_repository.clone(),
+            resolving(Some(resolved_channel())),
+            Arc::new(FakeChannelAvatarRepository::default()),
+            event_publisher(&db),
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
+
+        let request = CreateChannelRequest {
+            reconcile_interval_minutes: Some(30),
+            ..create_request("@somechannel")
+        };
+        let response = create(channel_creator, request).await;
+
+        assert_eq!(
+            response,
+            Ok((
+                StatusCode::CREATED,
+                ChannelResponse {
+                    reconcile_interval_minutes: 30,
+                    ..some_channel_response()
+                }
+            ))
+        );
+        assert_eq!(
+            channel_repository.list().unwrap(),
+            vec![
+                channel("@somechannel")
+                    .with_reconcile_interval(ReconcileInterval::new(30).unwrap())
+            ]
         );
         assert_eq!(
             event_repository.list_eligible().unwrap(),
@@ -402,6 +503,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn it_should_keep_the_interval_of_an_existing_channel_on_duplicate_create() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        let event_repository = SqliteEventRepository::new(db.database());
+        let existing =
+            channel("@somechannel").with_reconcile_interval(ReconcileInterval::new(60).unwrap());
+        channel_repository.insert(&existing).unwrap();
+        let channel_creator = ChannelCreator::new(
+            channel_repository.clone(),
+            resolving(Some(resolved_channel())),
+            Arc::new(FakeChannelAvatarRepository::default()),
+            event_publisher(&db),
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
+        let request = CreateChannelRequest {
+            reconcile_interval_minutes: Some(30),
+            ..create_request("@somechannel")
+        };
+
+        let response = create(channel_creator, request).await;
+
+        assert_eq!(
+            response,
+            Ok((
+                StatusCode::OK,
+                ChannelResponse {
+                    reconcile_interval_minutes: 60,
+                    ..some_channel_response()
+                }
+            ))
+        );
+        assert_eq!(channel_repository.list().unwrap(), vec![existing]);
+        assert_eq!(event_repository.list_eligible().unwrap(), vec![]);
+    }
+
+    #[tokio::test]
     async fn it_should_return_the_existing_channel_if_handle_differs_in_case() {
         let db = TestDatabase::new();
         let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
@@ -483,6 +620,23 @@ mod tests {
             response,
             Err(ApiError::bad_request(
                 "Channel handle must start with \"@\" (got \"somechannel\")"
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_fail_to_create_if_invalid_interval_provided() {
+        let request = CreateChannelRequest {
+            reconcile_interval_minutes: Some(0),
+            ..create_request("@somechannel")
+        };
+
+        let response = create(any_channel_creator(), request).await;
+
+        assert_eq!(
+            response,
+            Err(ApiError::bad_request(
+                "Reconcile interval must be at least 1 minute (got 0)"
             ))
         );
     }
@@ -703,6 +857,10 @@ mod tests {
             Arc::new(SqliteChannelVideoRepository::new(db.database())),
             avatar_repository.clone(),
             event_publisher(&db),
+            Arc::new(SqliteTaskRepository::new(
+                db.database(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
         );
 
         let response = delete(channel_deleter, "@somechannel").await;
@@ -710,6 +868,97 @@ mod tests {
         assert_eq!(response, Ok(StatusCode::NO_CONTENT));
         assert_eq!(channel_repository.list().unwrap(), vec![]);
         assert_eq!(avatar_repository.avatars(), vec![]);
+        assert_eq!(
+            event_repository.list_eligible().unwrap(),
+            vec![pending_event(1, channel_deleted("@somechannel"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_remove_the_pending_reconcile_of_a_deleted_channel() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.database(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let event_repository = SqliteEventRepository::new(db.database());
+        channel_repository.insert(&channel("@somechannel")).unwrap();
+        task_repository
+            .schedule(
+                &reconcile_task("@somechannel"),
+                fixed_timestamp() + chrono::Duration::hours(3),
+            )
+            .unwrap();
+        task_repository
+            .schedule(
+                &reconcile_task("@otherchannel"),
+                fixed_timestamp() + chrono::Duration::hours(3),
+            )
+            .unwrap();
+        let channel_deleter = ChannelDeleter::new(
+            channel_repository.clone(),
+            Arc::new(SqliteVideoRepository::new(db.database())),
+            Arc::new(SqliteChannelVideoRepository::new(db.database())),
+            Arc::new(FakeChannelAvatarRepository::default()),
+            event_publisher(&db),
+            task_repository.clone(),
+        );
+
+        let response = delete(channel_deleter, "@somechannel").await;
+
+        assert_eq!(response, Ok(StatusCode::NO_CONTENT));
+        assert_eq!(channel_repository.list().unwrap(), vec![]);
+        assert_eq!(
+            task_repository.list_non_completed().unwrap(),
+            vec![pending_task(
+                2,
+                &reconcile_task("@otherchannel"),
+                fixed_timestamp() + chrono::Duration::hours(3),
+            )]
+        );
+        assert_eq!(
+            event_repository.list_eligible().unwrap(),
+            vec![pending_event(1, channel_deleted("@somechannel"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_remove_every_pending_reconcile_of_a_deleted_channel() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.database(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let event_repository = SqliteEventRepository::new(db.database());
+        channel_repository.insert(&channel("@somechannel")).unwrap();
+        task_repository
+            .schedule(
+                &reconcile_task("@somechannel"),
+                fixed_timestamp() + chrono::Duration::hours(1),
+            )
+            .unwrap();
+        task_repository
+            .schedule(
+                &reconcile_task("@somechannel"),
+                fixed_timestamp() + chrono::Duration::hours(3),
+            )
+            .unwrap();
+        let channel_deleter = ChannelDeleter::new(
+            channel_repository.clone(),
+            Arc::new(SqliteVideoRepository::new(db.database())),
+            Arc::new(SqliteChannelVideoRepository::new(db.database())),
+            Arc::new(FakeChannelAvatarRepository::default()),
+            event_publisher(&db),
+            task_repository.clone(),
+        );
+
+        let response = delete(channel_deleter, "@somechannel").await;
+
+        assert_eq!(response, Ok(StatusCode::NO_CONTENT));
+        assert_eq!(channel_repository.list().unwrap(), vec![]);
+        assert_eq!(task_repository.list_non_completed().unwrap(), vec![]);
         assert_eq!(
             event_repository.list_eligible().unwrap(),
             vec![pending_event(1, channel_deleted("@somechannel"))]
@@ -753,6 +1002,10 @@ mod tests {
             channel_video_repository.clone(),
             Arc::new(FakeChannelAvatarRepository::default()),
             event_publisher(&db),
+            Arc::new(SqliteTaskRepository::new(
+                db.database(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
         );
 
         let response = delete(channel_deleter, "@somechannel").await;
@@ -797,6 +1050,10 @@ mod tests {
             Arc::new(SqliteChannelVideoRepository::new(db.database())),
             avatar_repository.clone(),
             event_publisher(&db),
+            Arc::new(SqliteTaskRepository::new(
+                db.database(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
         );
 
         let response = delete(channel_deleter, "@somechannel").await;
@@ -824,6 +1081,10 @@ mod tests {
             Arc::new(SqliteChannelVideoRepository::new(db.database())),
             Arc::new(FakeChannelAvatarRepository::default()),
             event_publisher(&db),
+            Arc::new(SqliteTaskRepository::new(
+                db.database(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
         );
 
         let response = delete(channel_deleter, "@missing").await;
@@ -856,7 +1117,14 @@ mod tests {
         let db = TestDatabase::new();
         let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
         channel_repository.insert(&channel("@somechannel")).unwrap();
-        let channel_updater = ChannelUpdater::new(channel_repository.clone());
+        let channel_updater = ChannelUpdater::new(
+            channel_repository.clone(),
+            Arc::new(SqliteTaskRepository::new(
+                db.database(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
 
         let request = UpdateChannelRequest {
             quality: Some("low".to_string()),
@@ -882,7 +1150,14 @@ mod tests {
         let db = TestDatabase::new();
         let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
         channel_repository.insert(&channel("@somechannel")).unwrap();
-        let channel_updater = ChannelUpdater::new(channel_repository.clone());
+        let channel_updater = ChannelUpdater::new(
+            channel_repository.clone(),
+            Arc::new(SqliteTaskRepository::new(
+                db.database(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
 
         let request = UpdateChannelRequest {
             video_limit: Some(20),
@@ -904,15 +1179,196 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn it_should_update_a_channels_interval() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        channel_repository.insert(&channel("@somechannel")).unwrap();
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.database(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let channel_updater = ChannelUpdater::new(
+            channel_repository.clone(),
+            task_repository.clone(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
+
+        let request = UpdateChannelRequest {
+            reconcile_interval_minutes: Some(60),
+            ..update_request()
+        };
+        let response = update(channel_updater, "@somechannel", request).await;
+
+        assert_eq!(
+            response,
+            Ok(ChannelResponse {
+                reconcile_interval_minutes: 60,
+                ..some_channel_response()
+            })
+        );
+        assert_eq!(
+            channel_repository.list().unwrap(),
+            vec![
+                channel("@somechannel")
+                    .with_reconcile_interval(ReconcileInterval::new(60).unwrap())
+            ]
+        );
+        assert_eq!(task_repository.list_non_completed().unwrap(), vec![]);
+    }
+
+    #[tokio::test]
+    async fn it_should_bring_the_next_reconcile_forward_if_interval_shortened() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        channel_repository.insert(&channel("@somechannel")).unwrap();
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.database(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        task_repository
+            .schedule(
+                &reconcile_task("@somechannel"),
+                fixed_timestamp() + chrono::Duration::hours(20),
+            )
+            .unwrap();
+        let channel_updater = ChannelUpdater::new(
+            channel_repository.clone(),
+            task_repository.clone(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
+
+        let request = UpdateChannelRequest {
+            reconcile_interval_minutes: Some(60),
+            ..update_request()
+        };
+        let response = update(channel_updater, "@somechannel", request).await;
+
+        assert_eq!(
+            response,
+            Ok(ChannelResponse {
+                reconcile_interval_minutes: 60,
+                ..some_channel_response()
+            })
+        );
+        assert_eq!(
+            task_repository.list_non_completed().unwrap(),
+            vec![pending_task(
+                1,
+                &reconcile_task("@somechannel"),
+                fixed_timestamp() + chrono::Duration::minutes(60),
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_stamp_the_brought_forward_reconcile_with_the_update_time() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        channel_repository.insert(&channel("@somechannel")).unwrap();
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.database(),
+            Arc::new(FixedClock(fixed_timestamp() - chrono::Duration::hours(1))),
+        ));
+        task_repository
+            .schedule(
+                &reconcile_task("@somechannel"),
+                fixed_timestamp() + chrono::Duration::hours(20),
+            )
+            .unwrap();
+        let channel_updater = ChannelUpdater::new(
+            channel_repository.clone(),
+            task_repository.clone(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
+
+        let request = UpdateChannelRequest {
+            reconcile_interval_minutes: Some(60),
+            ..update_request()
+        };
+        let response = update(channel_updater, "@somechannel", request).await;
+
+        assert_eq!(
+            response,
+            Ok(ChannelResponse {
+                reconcile_interval_minutes: 60,
+                ..some_channel_response()
+            })
+        );
+        assert_eq!(
+            task_repository.list_non_completed().unwrap(),
+            vec![ScheduledTask {
+                created_at: fixed_timestamp() - chrono::Duration::hours(1),
+                ..pending_task(
+                    1,
+                    &reconcile_task("@somechannel"),
+                    fixed_timestamp() + chrono::Duration::minutes(60),
+                )
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_keep_the_next_reconcile_if_interval_lengthened() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        channel_repository.insert(&channel("@somechannel")).unwrap();
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.database(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        task_repository
+            .schedule(
+                &reconcile_task("@somechannel"),
+                fixed_timestamp() + chrono::Duration::minutes(30),
+            )
+            .unwrap();
+        let channel_updater = ChannelUpdater::new(
+            channel_repository.clone(),
+            task_repository.clone(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
+
+        let request = UpdateChannelRequest {
+            reconcile_interval_minutes: Some(1440),
+            ..update_request()
+        };
+        let response = update(channel_updater, "@somechannel", request).await;
+
+        assert_eq!(
+            response,
+            Ok(ChannelResponse {
+                reconcile_interval_minutes: 1440,
+                ..some_channel_response()
+            })
+        );
+        assert_eq!(
+            task_repository.list_non_completed().unwrap(),
+            vec![pending_task(
+                1,
+                &reconcile_task("@somechannel"),
+                fixed_timestamp() + chrono::Duration::minutes(30),
+            )]
+        );
+    }
+
+    #[tokio::test]
     async fn it_should_update_both_settings_of_a_channel() {
         let db = TestDatabase::new();
         let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
         channel_repository.insert(&channel("@somechannel")).unwrap();
-        let channel_updater = ChannelUpdater::new(channel_repository.clone());
+        let channel_updater = ChannelUpdater::new(
+            channel_repository.clone(),
+            Arc::new(SqliteTaskRepository::new(
+                db.database(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
 
         let request = UpdateChannelRequest {
             quality: Some("mid".to_string()),
             video_limit: Some(3),
+            ..update_request()
         };
         let response = update(channel_updater, "@somechannel", request).await;
 
@@ -939,11 +1395,19 @@ mod tests {
         let db = TestDatabase::new();
         let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
         channel_repository.insert(&channel("@somechannel")).unwrap();
-        let channel_updater = ChannelUpdater::new(channel_repository.clone());
+        let channel_updater = ChannelUpdater::new(
+            channel_repository.clone(),
+            Arc::new(SqliteTaskRepository::new(
+                db.database(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
 
         let request = UpdateChannelRequest {
             quality: Some("high".to_string()),
             video_limit: Some(10),
+            ..update_request()
         };
         let response = update(channel_updater, "@somechannel", request).await;
 
@@ -959,7 +1423,14 @@ mod tests {
         let db = TestDatabase::new();
         let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
         channel_repository.insert(&channel("@somechannel")).unwrap();
-        let channel_updater = ChannelUpdater::new(channel_repository.clone());
+        let channel_updater = ChannelUpdater::new(
+            channel_repository.clone(),
+            Arc::new(SqliteTaskRepository::new(
+                db.database(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
 
         let request = UpdateChannelRequest {
             quality: Some("low".to_string()),
@@ -984,7 +1455,12 @@ mod tests {
     async fn it_should_fail_to_update_if_nothing_to_update() {
         let response = update(any_channel_updater(), "@somechannel", update_request()).await;
 
-        assert_eq!(response, Err(ApiError::bad_request(NOTHING_TO_UPDATE)));
+        assert_eq!(
+            response,
+            Err(ApiError::bad_request(
+                "Request must change the quality, the video limit or the reconcile interval"
+            ))
+        );
     }
 
     #[tokio::test]
@@ -1015,6 +1491,22 @@ mod tests {
             response,
             Err(ApiError::bad_request(
                 "Video limit must be between 1 and 1000 (got 1001)"
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_fail_to_update_if_invalid_interval_provided() {
+        let request = UpdateChannelRequest {
+            reconcile_interval_minutes: Some(0),
+            ..update_request()
+        };
+        let response = update(any_channel_updater(), "@somechannel", request).await;
+
+        assert_eq!(
+            response,
+            Err(ApiError::bad_request(
+                "Reconcile interval must be at least 1 minute (got 0)"
             ))
         );
     }
@@ -1107,6 +1599,33 @@ mod tests {
                     ..some_channel_list_item_response()
                 },
             ])
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_list_channels_with_their_interval() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        channel_repository
+            .insert(
+                &channel("@somechannel")
+                    .with_reconcile_interval(ReconcileInterval::new(30).unwrap()),
+            )
+            .unwrap();
+        let channel_view_searcher = ChannelViewSearcher::new(
+            channel_repository,
+            Arc::new(SqliteChannelVideoRepository::new(db.database())),
+            Arc::new(SqliteVideoRepository::new(db.database())),
+        );
+
+        let response = list(channel_view_searcher).await;
+
+        assert_eq!(
+            response,
+            Ok(vec![ChannelListItemResponse {
+                reconcile_interval_minutes: 30,
+                ..some_channel_list_item_response()
+            }])
         );
     }
 
@@ -1580,11 +2099,22 @@ mod tests {
             Arc::new(SqliteChannelVideoRepository::new(unused_connection())),
             Arc::new(FakeChannelAvatarRepository::default()),
             unused_event_publisher(),
+            Arc::new(SqliteTaskRepository::new(
+                unused_connection(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
         )
     }
 
     fn any_channel_updater() -> ChannelUpdater {
-        ChannelUpdater::new(Arc::new(SqliteChannelRepository::new(unused_connection())))
+        ChannelUpdater::new(
+            Arc::new(SqliteChannelRepository::new(unused_connection())),
+            Arc::new(SqliteTaskRepository::new(
+                unused_connection(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
+            Arc::new(FixedClock(fixed_timestamp())),
+        )
     }
 
     /// Builds a reconciler around the repositories a test seeds and asserts;
@@ -1643,7 +2173,6 @@ mod tests {
                 Arc::new(FakeChannelAvatarRepository::default()),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
-            3600,
         )
     }
 
@@ -1697,7 +2226,6 @@ mod tests {
                 Arc::new(FakeChannelAvatarRepository::default()),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
-            3600,
         )
     }
 
@@ -1756,6 +2284,26 @@ mod tests {
         DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap()
     }
 
+    fn reconcile_task(channel_handle: &str) -> Task {
+        Task::ReconcileChannel {
+            channel_id: channel_handle.to_string(),
+        }
+    }
+
+    fn pending_task(id: i64, task: &Task, run_at: DateTime<Utc>) -> ScheduledTask {
+        ScheduledTask {
+            id,
+            task_type: task.task_type().to_string(),
+            payload: task.payload().to_string(),
+            status: TaskStatus::Pending,
+            retries: 0,
+            run_at,
+            created_at: fixed_timestamp(),
+            updated_at: fixed_timestamp(),
+            last_error: None,
+        }
+    }
+
     fn fixed_timestamp() -> DateTime<Utc> {
         DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap()
     }
@@ -1790,6 +2338,7 @@ mod tests {
             "UC123",
             Quality::High,
             VideoLimit::new(10).unwrap(),
+            ReconcileInterval::default_interval(),
             PlaylistPath::new("creators/somechannel").unwrap(),
             None,
             fixed_timestamp(),
@@ -1891,6 +2440,7 @@ mod tests {
             quality: Some("high".to_string()),
             video_limit: Some(10),
             path: Some("creators/somechannel".to_string()),
+            reconcile_interval_minutes: None,
         }
     }
 
@@ -1912,6 +2462,7 @@ mod tests {
         UpdateChannelRequest {
             quality: None,
             video_limit: None,
+            reconcile_interval_minutes: None,
         }
     }
 
@@ -1922,6 +2473,7 @@ mod tests {
             youtube_channel_id: "UC123".to_string(),
             quality: "high".to_string(),
             video_limit: 10,
+            reconcile_interval_minutes: 180,
             path: "creators/somechannel".to_string(),
             avatar_filename: None,
             created_at: fixed_timestamp(),
@@ -1935,6 +2487,7 @@ mod tests {
             path: "creators/somechannel".to_string(),
             quality: "high".to_string(),
             video_limit: 10,
+            reconcile_interval_minutes: 180,
             avatar_filename: None,
             unwatched_count: 0,
         }
