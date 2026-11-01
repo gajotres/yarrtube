@@ -1,4 +1,5 @@
 use crate::domain::shared::Quality;
+use crate::domain::video::VideoChapter;
 use crate::domain::video_transcript::{CaptionSource, CaptionTrack, CaptionTracks};
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -80,6 +81,9 @@ pub struct DownloadedVideo {
     /// when no SABR signal was reported. Carries the reason text for logging;
     /// it never affects the recorded status.
     pub sabr_notice: Option<String>,
+    /// The chapters `yt-dlp` reported (`Some(vec![])` for none); `None` when
+    /// the printed chapters could not be read.
+    pub chapters: Option<Vec<VideoChapter>>,
 }
 
 /// The outcome of a `download_video` attempt: either a `DownloadedVideo`, or
@@ -116,9 +120,10 @@ const STAGED_OUTPUT_TEMPLATE: &str = "%(id)s.%(ext)s";
 /// Runs `<ytdlp_path> <args> <video_url>` inside `staging_dir` (created
 /// first), outside any show directory, so partial files never reach the
 /// library. This is a pure process-invocation layer with no YouTube API or
-/// XML knowledge. Asks `yt-dlp` to print its duration followed by the exact
-/// filename it saved via `--print %(duration)s --print after_move:filename`,
-/// in quiet mode so those are the only lines on stdout, filename last.
+/// XML knowledge. Asks `yt-dlp` to print its chapters, publish timestamp,
+/// upload date and duration followed by the exact filename it saved (`--print
+/// after_move:filename`), in quiet mode so those are the only lines on
+/// stdout, filename last; each is read by its position from the end.
 /// Returns `Ok(DownloadAttempt::Succeeded(..))` on a successful download,
 /// `Ok(DownloadAttempt::Failed { stderr })` for a clean `yt-dlp` failure
 /// (non-zero exit), carrying whatever `yt-dlp` wrote to its stderr. Returns
@@ -142,12 +147,16 @@ pub fn download_video(
         "--write-thumbnail".to_string(),
         "--convert-thumbnails".to_string(),
         "jpg".to_string(),
+        // Chapter markers in the mp4, for Plex, Kodi and Jellyfin.
+        "--embed-chapters".to_string(),
         // Note: unlike the thumbnail/diagnose/listing invocations, this one
         // deliberately keeps warnings on (no `--no-warnings`) so `yt-dlp`'s
         // SABR-only streaming warning reaches our captured stderr, where
         // `sabr_reason` can detect it. `--quiet` still gives us the clean
         // `--print` stdout. See the `log-sabr-detection` change.
         "--quiet".to_string(),
+        "--print".to_string(),
+        "%(chapters)j".to_string(),
         "--print".to_string(),
         "%(timestamp)s".to_string(),
         "--print".to_string(),
@@ -196,6 +205,7 @@ pub fn download_video(
     };
     let duration_seconds = line_before_last(&lines, 1).and_then(parse_duration_seconds);
     let published_at = parse_published_at(line_before_last(&lines, 3), line_before_last(&lines, 2));
+    let chapters = line_before_last(&lines, 4).and_then(parse_chapters);
 
     let media_path = staging_dir.join(filename);
     Ok(DownloadAttempt::Succeeded(DownloadedVideo {
@@ -204,7 +214,42 @@ pub fn download_video(
         duration_seconds,
         published_at,
         sabr_notice,
+        chapters,
     }))
+}
+
+/// Reads the video's chapters via `yt-dlp --print %(chapters)j`,
+/// downloading nothing; `vec![]` when the video has none. `Err` on any
+/// failure, clean or systemic, including a printed line that can't be read
+/// as chapters.
+pub fn fetch_chapters(ytdlp_path: &Path, video_url: &str) -> Result<Vec<VideoChapter>> {
+    let mut cmd = Command::new(ytdlp_path);
+    cmd.args([
+        "--skip-download",
+        "--quiet",
+        "--no-warnings",
+        "--print",
+        "%(chapters)j",
+    ])
+    .arg(video_url)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    match run(
+        &mut cmd,
+        || not_found_message(ytdlp_path),
+        |e| format!("Failed to run yt-dlp to fetch the chapters of {video_url}: {e}"),
+    )? {
+        RunOutcome::Success(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let line = stdout.lines().last().unwrap_or_default();
+            parse_chapters(line)
+                .ok_or_else(|| anyhow!("yt-dlp printed unreadable chapters for {video_url}"))
+        }
+        RunOutcome::CleanFailure { stderr_raw } => Err(anyhow!(
+            "yt-dlp failed to fetch the chapters of {video_url}: {}",
+            reason_excluding_warnings(&stderr_raw).unwrap_or_else(|| "no reason given".to_string())
+        )),
+    }
 }
 
 /// A thumbnail-only fetch's result: the staged thumbnail's path and the
@@ -769,6 +814,38 @@ fn staged_srt(staging_dir: &Path, key: &str) -> Result<Option<PathBuf>> {
         }))
 }
 
+/// One entry of `yt-dlp`'s `%(chapters)j`, times in (possibly fractional)
+/// seconds.
+#[derive(serde::Deserialize)]
+struct PrintedChapter {
+    start_time: f64,
+    end_time: f64,
+    title: String,
+}
+
+/// Parses `yt-dlp`'s `--print %(chapters)j` line, flooring times to whole
+/// seconds. `yt-dlp` prints `NA` (or `null`) for a video without chapters,
+/// read as none. `None` when the line can't be read as chapters, so the
+/// video's chapters stay unchecked rather than failing the download.
+fn parse_chapters(line: &str) -> Option<Vec<VideoChapter>> {
+    let trimmed = line.trim();
+    if trimmed.eq_ignore_ascii_case("na") || trimmed == "null" {
+        return Some(vec![]);
+    }
+    serde_json::from_str::<Vec<PrintedChapter>>(trimmed)
+        .ok()
+        .map(|chapters| {
+            chapters
+                .into_iter()
+                .map(|chapter| VideoChapter {
+                    start_seconds: chapter.start_time as i64,
+                    end_seconds: chapter.end_time as i64,
+                    title: chapter.title,
+                })
+                .collect()
+        })
+}
+
 /// The printed line `back` lines before the last one, when printed.
 fn line_before_last<'a>(lines: &[&'a str], back: usize) -> Option<&'a str> {
     lines
@@ -1051,6 +1128,7 @@ mod tests {
                 duration_seconds: None,
                 published_at: None,
                 sabr_notice: None,
+                chapters: None,
             })
         );
         std::fs::remove_dir_all(&output_dir).unwrap();
@@ -1212,6 +1290,7 @@ mod tests {
                 duration_seconds: Some(223),
                 published_at: None,
                 sabr_notice: None,
+                chapters: None,
             }
         );
         std::fs::remove_dir_all(&output_dir).unwrap();
@@ -1245,6 +1324,7 @@ mod tests {
                         .to_utc()
                 ),
                 sabr_notice: None,
+                chapters: None,
             }
         );
         assert!(
@@ -1253,6 +1333,186 @@ mod tests {
                 .any(|args| args == ["--print", "%(timestamp)s", "--print", "%(upload_date)s"])
         );
         std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_parse_the_printed_chapters_of_a_download() {
+        let fake = test_support::FakeYtDlp::with_stdout(
+            "[{\"start_time\": 0, \"title\": \"Game 1\", \"end_time\": 1037}, {\"start_time\": 1037, \"title\": \"Game 2\", \"end_time\": 2201}]\n1773568800\n20260315\n223\nyt1.mp4\n",
+        );
+        let staging_dir = test_support::unique_temp_dir("ytdlp-output-chapters");
+
+        let result = unwrap_succeeded(
+            download_video(
+                &fake.path,
+                "https://example.com/video",
+                Quality::High,
+                &staging_dir,
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            result,
+            DownloadedVideo {
+                media_path: staging_dir.join("yt1.mp4"),
+                thumbnail_path: None,
+                duration_seconds: Some(223),
+                published_at: Some(
+                    DateTime::parse_from_rfc3339("2026-03-15T10:00:00Z")
+                        .unwrap()
+                        .to_utc()
+                ),
+                sabr_notice: None,
+                chapters: Some(vec![
+                    VideoChapter {
+                        start_seconds: 0,
+                        end_seconds: 1037,
+                        title: "Game 1".to_string(),
+                    },
+                    VideoChapter {
+                        start_seconds: 1037,
+                        end_seconds: 2201,
+                        title: "Game 2".to_string(),
+                    },
+                ]),
+            }
+        );
+        assert!(
+            fake.captured_args()
+                .windows(4)
+                .any(|args| args == ["--print", "%(chapters)j", "--print", "%(timestamp)s"])
+        );
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_report_no_chapters_when_yt_dlp_prints_na() {
+        let fake = test_support::FakeYtDlp::with_stdout("NA\n1773568800\n20260315\n223\nyt1.mp4\n");
+        let staging_dir = test_support::unique_temp_dir("ytdlp-output-no-chapters");
+
+        let result = unwrap_succeeded(
+            download_video(
+                &fake.path,
+                "https://example.com/video",
+                Quality::High,
+                &staging_dir,
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            result,
+            DownloadedVideo {
+                media_path: staging_dir.join("yt1.mp4"),
+                thumbnail_path: None,
+                duration_seconds: Some(223),
+                published_at: Some(
+                    DateTime::parse_from_rfc3339("2026-03-15T10:00:00Z")
+                        .unwrap()
+                        .to_utc()
+                ),
+                sabr_notice: None,
+                chapters: Some(vec![]),
+            }
+        );
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_report_unreadable_chapters_as_unchecked() {
+        let fake = test_support::FakeYtDlp::with_stdout(
+            "not chapters\n1773568800\n20260315\n223\nyt1.mp4\n",
+        );
+        let staging_dir = test_support::unique_temp_dir("ytdlp-output-bad-chapters");
+
+        let result = unwrap_succeeded(
+            download_video(
+                &fake.path,
+                "https://example.com/video",
+                Quality::High,
+                &staging_dir,
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            result,
+            DownloadedVideo {
+                media_path: staging_dir.join("yt1.mp4"),
+                thumbnail_path: None,
+                duration_seconds: Some(223),
+                published_at: Some(
+                    DateTime::parse_from_rfc3339("2026-03-15T10:00:00Z")
+                        .unwrap()
+                        .to_utc()
+                ),
+                sabr_notice: None,
+                chapters: None,
+            }
+        );
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_pass_the_embed_chapters_flag_to_yt_dlp() {
+        let output_dir = test_support::unique_temp_dir("ytdlp-output-embed-chapters");
+        let fake = test_support::FakeYtDlp::with_exit_code(0);
+
+        download_video(
+            &fake.path,
+            "https://example.com/video",
+            Quality::High,
+            &output_dir,
+        )
+        .unwrap();
+
+        assert!(
+            fake.captured_args()
+                .contains(&"--embed-chapters".to_string())
+        );
+        std::fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_fetch_the_chapters_without_downloading() {
+        let fake = test_support::FakeYtDlp::with_stdout(
+            "[{\"start_time\": 0.0, \"title\": \"Intro\", \"end_time\": 61.5}, {\"start_time\": 61.5, \"title\": \"Main\", \"end_time\": 600.9}]\n",
+        );
+
+        let chapters = fetch_chapters(&fake.path, "https://example.com/video").unwrap();
+
+        assert_eq!(
+            chapters,
+            vec![
+                VideoChapter {
+                    start_seconds: 0,
+                    end_seconds: 61,
+                    title: "Intro".to_string(),
+                },
+                VideoChapter {
+                    start_seconds: 61,
+                    end_seconds: 600,
+                    title: "Main".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            fake.captured_args(),
+            vec![
+                "--skip-download",
+                "--quiet",
+                "--no-warnings",
+                "--print",
+                "%(chapters)j",
+                "https://example.com/video",
+            ]
+        );
     }
 
     #[test]
@@ -1504,6 +1764,23 @@ mod tests {
             Err("yt-dlp failed to probe captions for https://example.com/video: ERROR: [youtube] yt1: HTTP Error 429: Too Many Requests".to_string())
         );
         std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_fail_the_chapters_fetch_on_a_clean_failed_exit() {
+        let ytdlp = fake_ytdlp_writing_stderr(
+            "ytdlp-chapters-failing",
+            "ERROR: [youtube] yt1: Video unavailable",
+            1,
+        );
+
+        let result = fetch_chapters(&ytdlp, "https://example.com/video");
+
+        assert_eq!(
+            result.map_err(|e| e.to_string()),
+            Err("yt-dlp failed to fetch the chapters of https://example.com/video: ERROR: [youtube] yt1: Video unavailable".to_string())
+        );
     }
 
     #[test]
@@ -1945,6 +2222,7 @@ mod tests {
                 duration_seconds: None,
                 published_at: None,
                 sabr_notice: Some(SABR_WARNING.to_string()),
+                chapters: None,
             })
         );
         std::fs::remove_dir_all(&output_dir).unwrap();

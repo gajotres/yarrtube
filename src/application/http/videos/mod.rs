@@ -208,7 +208,7 @@ mod tests {
     use crate::domain::preferences::Preferences;
     use crate::domain::services::CategoryVideoCollector;
     use crate::domain::shared::{Quality, ReconcileInterval};
-    use crate::domain::video::{EpisodeNumber, Video, VideoRecordId};
+    use crate::domain::video::{EpisodeNumber, Video, VideoChapter, VideoRecordId};
     use crate::domain::video_category::VideoCategories;
     use crate::domain::video_metadata::VideoMetadata;
     use crate::infrastructure::repositories::filesystem_video_file_repository::FakeVideoFileRepository;
@@ -242,7 +242,9 @@ mod tests {
     use crate::infrastructure::shared::sqlite_connection::TestDatabase;
     use crate::infrastructure::shared::system_clock::FixedClock;
     use chrono::{DateTime, Duration, Utc};
-    use dto::{HomeCategorySectionResponse, HomeVideoResponse, HomeVideoSourceResponse};
+    use dto::{
+        ChapterResponse, HomeCategorySectionResponse, HomeVideoResponse, HomeVideoSourceResponse,
+    };
     use rusqlite::Connection;
     use std::ops::Range;
     use std::sync::Arc;
@@ -429,6 +431,45 @@ mod tests {
                 published_at: Some(published_timestamp()),
                 description: Some("A description\nwith two lines".to_string()),
                 channel_name: Some("Some Channel".to_string()),
+                ..pending_video_response("vid1", "My Video")
+            }])
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_include_the_chapters_when_listing_playlist_videos() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let playlist_video_repository = Arc::new(SqlitePlaylistVideoRepository::new(db.database()));
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.database()));
+        playlist_repository.insert(&playlist("PL1")).unwrap();
+        let video = Video::create(VideoId::new("vid1").unwrap(), "My Video", fixed_timestamp())
+            .with_chapters(game_chapters(), fixed_timestamp());
+        save_playlist_video(
+            video_repository.as_ref(),
+            playlist_video_repository.as_ref(),
+            "PL1",
+            &video,
+        );
+        let video_searcher = VideoSearcher::new(
+            playlist_repository,
+            playlist_video_repository,
+            Arc::new(SqliteChannelRepository::new(db.database())),
+            Arc::new(SqliteChannelVideoRepository::new(db.database())),
+            video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+            Arc::new(FixedClock(fixed_timestamp())),
+            Arc::new(SqliteCategoryRepository::new(db.database())),
+            category_video_collector(&db),
+            Arc::new(SqlitePreferencesRepository::new(db.database())),
+        );
+
+        let response = list_for_playlist(video_searcher, "PL1").await;
+
+        assert_eq!(
+            response,
+            Ok(vec![VideoResponse {
+                chapters: game_chapter_responses(),
                 ..pending_video_response("vid1", "My Video")
             }])
         );
@@ -744,6 +785,59 @@ mod tests {
             Ok(vec![
                 pending_video_response("vid_newest", "Newest"),
                 pending_video_response("vid_oldest", "Oldest"),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_list_unchecked_chapters_as_empty() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let channel_video_repository = Arc::new(SqliteChannelVideoRepository::new(db.database()));
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        channel_repository
+            .insert(&channel("@somechannel", None))
+            .unwrap();
+        let unchecked = Video::create(
+            VideoId::new("vid1").unwrap(),
+            "Unchecked",
+            fixed_timestamp(),
+        );
+        let without_chapters =
+            Video::create(VideoId::new("vid2").unwrap(), "Without", fixed_timestamp())
+                .with_chapters(vec![], fixed_timestamp());
+        [&unchecked, &without_chapters]
+            .into_iter()
+            .enumerate()
+            .for_each(|(position, video)| {
+                save_channel_video(
+                    video_repository.as_ref(),
+                    channel_video_repository.as_ref(),
+                    "@somechannel",
+                    video,
+                    position as i64,
+                )
+            });
+        let video_searcher = VideoSearcher::new(
+            Arc::new(SqlitePlaylistRepository::new(db.database())),
+            Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+            channel_repository,
+            channel_video_repository,
+            video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+            Arc::new(FixedClock(fixed_timestamp())),
+            Arc::new(SqliteCategoryRepository::new(db.database())),
+            category_video_collector(&db),
+            Arc::new(SqlitePreferencesRepository::new(db.database())),
+        );
+
+        let response = list_for_channel(video_searcher, "@somechannel").await;
+
+        assert_eq!(
+            response,
+            Ok(vec![
+                pending_video_response("vid1", "Unchecked"),
+                pending_video_response("vid2", "Without"),
             ])
         );
     }
@@ -5325,6 +5419,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn it_should_include_the_chapters_when_listing_category_videos() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let channel_video_repository = Arc::new(SqliteChannelVideoRepository::new(db.database()));
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        let category_repository = Arc::new(SqliteCategoryRepository::new(db.database()));
+        channel_repository
+            .insert(&channel("@somechannel", None))
+            .unwrap();
+        save_channel_video(
+            video_repository.as_ref(),
+            channel_video_repository.as_ref(),
+            "@somechannel",
+            &video_with_subtitles("vid1").with_chapters(game_chapters(), fixed_timestamp()),
+            0,
+        );
+        let chess = category_with_members(&[channel_member("@somechannel")]);
+        category_repository.insert(&chess).unwrap();
+        categorize_source(&db, &channel_member("@somechannel"), &[&chess]);
+        let video_searcher = VideoSearcher::new(
+            Arc::new(SqlitePlaylistRepository::new(db.database())),
+            Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+            channel_repository,
+            channel_video_repository,
+            video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+            Arc::new(FixedClock(fixed_timestamp())),
+            category_repository,
+            category_video_collector(&db),
+            Arc::new(SqlitePreferencesRepository::new(db.database())),
+        );
+
+        let response = list_for_category(video_searcher, chess.id.as_str()).await;
+
+        assert_eq!(
+            response,
+            Ok(vec![CategoryVideoResponse {
+                subtitle_language: Some("en".to_string()),
+                chapters: game_chapter_responses(),
+                ..category_video_in(
+                    category_video_response(
+                        "vid1",
+                        "My Video",
+                        1_700_000_000,
+                        channel_source(None)
+                    ),
+                    &[&chess]
+                )
+            }])
+        );
+    }
+
+    #[tokio::test]
     async fn it_should_list_category_videos_with_their_metadata() {
         let db = TestDatabase::new();
         let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
@@ -5688,6 +5835,36 @@ mod tests {
         }
     }
 
+    fn game_chapters() -> Vec<VideoChapter> {
+        vec![
+            VideoChapter {
+                start_seconds: 0,
+                end_seconds: 1037,
+                title: "Game 1".to_string(),
+            },
+            VideoChapter {
+                start_seconds: 1037,
+                end_seconds: 2201,
+                title: "Game 2".to_string(),
+            },
+        ]
+    }
+
+    fn game_chapter_responses() -> Vec<ChapterResponse> {
+        vec![
+            ChapterResponse {
+                start_seconds: 0,
+                end_seconds: 1037,
+                title: "Game 1".to_string(),
+            },
+            ChapterResponse {
+                start_seconds: 1037,
+                end_seconds: 2201,
+                title: "Game 2".to_string(),
+            },
+        ]
+    }
+
     fn pending_video_response(youtube_id: &str, title: &str) -> VideoResponse {
         VideoResponse {
             id: youtube_id.to_string(),
@@ -5706,6 +5883,7 @@ mod tests {
             description: None,
             channel_name: None,
             subtitle_language: None,
+            chapters: vec![],
         }
     }
 
@@ -5761,6 +5939,7 @@ mod tests {
             description: None,
             channel_name: None,
             subtitle_language: None,
+            chapters: vec![],
             source,
             category_ids: vec![],
         }

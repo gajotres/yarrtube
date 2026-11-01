@@ -1,5 +1,6 @@
 use crate::domain::video::{
-    CategoryVideoView, HomeCategorySection, HomeVideoView, HomeVideos, VideoSource, VideoView,
+    CategoryVideoView, HomeCategorySection, HomeVideoView, HomeVideos, VideoChapter, VideoSource,
+    VideoView,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,25 @@ pub struct VideoResponse {
     pub description: Option<String>,
     pub channel_name: Option<String>,
     pub subtitle_language: Option<String>,
+    pub chapters: Vec<ChapterResponse>,
+}
+
+/// One of a video's chapters, in whole seconds from the start of the video.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct ChapterResponse {
+    pub start_seconds: i64,
+    pub end_seconds: i64,
+    pub title: String,
+}
+
+impl From<VideoChapter> for ChapterResponse {
+    fn from(chapter: VideoChapter) -> Self {
+        Self {
+            start_seconds: chapter.start_seconds,
+            end_seconds: chapter.end_seconds,
+            title: chapter.title,
+        }
+    }
 }
 
 impl From<VideoView> for VideoResponse {
@@ -67,6 +87,12 @@ impl From<VideoView> for VideoResponse {
             published_at,
             description,
             channel_name,
+            chapters: video
+                .chapters
+                .unwrap_or_default()
+                .into_iter()
+                .map(ChapterResponse::from)
+                .collect(),
         }
     }
 }
@@ -169,6 +195,7 @@ pub struct CategoryVideoResponse {
     pub description: Option<String>,
     pub channel_name: Option<String>,
     pub subtitle_language: Option<String>,
+    pub chapters: Vec<ChapterResponse>,
     pub source: HomeVideoSourceResponse,
     pub category_ids: Vec<String>,
 }
@@ -197,6 +224,7 @@ impl From<CategoryVideoView> for CategoryVideoResponse {
             description: video.description,
             channel_name: video.channel_name,
             subtitle_language: video.subtitle_language,
+            chapters: video.chapters,
             source: HomeVideoSourceResponse::from(view.source),
             category_ids: view
                 .category_ids

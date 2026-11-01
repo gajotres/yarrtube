@@ -43,6 +43,9 @@ pub enum Task {
         video_id: String,
     },
     SyncPlexLabels,
+    FetchChapters {
+        video_id: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,6 +110,11 @@ struct SyncVideoPayload {
 #[derive(Debug, Deserialize)]
 struct SyncPlexLabelsPayload {}
 
+#[derive(Debug, Deserialize)]
+struct FetchChaptersPayload {
+    video_id: String,
+}
+
 impl Task {
     pub fn task_type(&self) -> &'static str {
         match self {
@@ -121,6 +129,7 @@ impl Task {
             Self::FetchSubtitles { .. } => "fetch_subtitles",
             Self::SyncVideo { .. } => "sync_video",
             Self::SyncPlexLabels => "sync_plex_labels",
+            Self::FetchChapters { .. } => "fetch_chapters",
         }
     }
 
@@ -163,6 +172,7 @@ impl Task {
             } => json!({ "video_id": video_id, "output_dir": output_dir }),
             Self::SyncVideo { video_id } => json!({ "video_id": video_id }),
             Self::SyncPlexLabels => json!({}),
+            Self::FetchChapters { video_id } => json!({ "video_id": video_id }),
         }
     }
 
@@ -270,13 +280,21 @@ impl Task {
         Ok(())
     }
 
+    /// Decodes a `fetch_chapters` task's raw JSON payload, as handed to a
+    /// `TaskHandler`, back into the video's surrogate ID.
+    pub fn decode_fetch_chapters_payload(payload: &str) -> Result<String, TaskError> {
+        let parsed: FetchChaptersPayload = serde_json::from_str(payload)
+            .map_err(|e| TaskError(format!("invalid fetch_chapters payload: {e}")))?;
+        Ok(parsed.video_id)
+    }
+
     /// The executor lane a task of `task_type` runs in. Unknown types fall
     /// into `Light`.
     pub fn lane_for(task_type: &str) -> TaskLane {
         match task_type {
             "download_video" => TaskLane::Download,
             "fetch_thumbnail" => TaskLane::Thumbnail,
-            "fetch_subtitles" => TaskLane::Subtitles,
+            "fetch_subtitles" | "fetch_chapters" => TaskLane::Subtitles,
             "sync_video" => TaskLane::VideoSync,
             "sync_plex_labels" => TaskLane::Plex,
             "update_ytdlp" => TaskLane::Exclusive,
@@ -285,7 +303,7 @@ impl Task {
     }
 
     /// `Some("video:<id>")` for `download_video`, `fetch_thumbnail`,
-    /// `fetch_subtitles` and `sync_video`: two tasks sharing a key never run
+    /// `fetch_subtitles`, `fetch_chapters` and `sync_video`: two tasks sharing a key never run
     /// at the same time, and a task with a key is not scheduled twice while
     /// one is pending (or running, see `dedupes_running`).
     pub fn exclusivity_key(task_type: &str, payload: &str) -> Option<String> {
@@ -300,6 +318,7 @@ impl Task {
                 .ok()
                 .map(|(video_id, _)| video_id),
             "sync_video" => Self::decode_sync_video_payload(payload).ok(),
+            "fetch_chapters" => Self::decode_fetch_chapters_payload(payload).ok(),
             _ => None,
         }?;
         Some(format!("video:{video_id}"))
@@ -670,6 +689,22 @@ mod tests {
         .collect();
 
         assert_eq!(dedupes, vec![true, true, true, false]);
+    }
+
+    #[test]
+    fn it_should_run_fetch_chapters_in_the_subtitles_lane_exclusive_per_video() {
+        let task = Task::FetchChapters {
+            video_id: "rec1".to_string(),
+        };
+
+        assert_eq!(
+            (
+                Task::lane_for(task.task_type()),
+                Task::exclusivity_key(task.task_type(), &task.payload().to_string()),
+                Task::dedupes_running(task.task_type()),
+            ),
+            (TaskLane::Subtitles, Some("video:rec1".to_string()), true)
+        );
     }
 
     #[test]
