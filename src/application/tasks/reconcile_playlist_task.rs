@@ -1880,18 +1880,23 @@ mod tests {
         Video::create(VideoId::new("vid1").unwrap(), "My Video", fixed_timestamp())
     }
 
-    /// Its chapters already checked, so a sync schedules no chapters fetch.
+    /// Its chapters and quality settled, so a sync schedules no chapters fetch or
+    /// quality check.
     fn downloaded_video(filename: &str, thumbnail_filename: Option<&str>) -> Video {
-        my_video()
-            .start_download(fixed_timestamp())
-            .mark_downloaded(
-                Quality::High,
-                filename,
-                thumbnail_filename.map(str::to_string),
-                None,
-                fixed_timestamp(),
-            )
-            .with_chapters(vec![], fixed_timestamp())
+        Video {
+            chapters_settled: true,
+            quality_settled: true,
+            ..my_video()
+                .start_download(fixed_timestamp())
+                .mark_downloaded(
+                    Quality::High,
+                    filename,
+                    thumbnail_filename.map(str::to_string),
+                    None,
+                    fixed_timestamp(),
+                )
+                .with_chapters(vec![], fixed_timestamp())
+        }
     }
 
     /// `my_video()` downloaded in the TV-show layout as the first episode of
@@ -1917,19 +1922,24 @@ mod tests {
     }
 
     /// A playlist video numbered `episode`, downloaded in the TV-show layout,
-    /// with its chapters already checked so a sync schedules no chapters fetch.
+    /// with its chapters and quality settled so a sync schedules no chapters
+    /// fetch or quality check.
     fn downloaded_playlist_episode(youtube_id: &str, title: &str, episode: u32) -> Video {
         let base = format!("Season 1/S01E{episode:03} - {title}");
-        playlist_episode(youtube_id, title, episode)
-            .start_download(fixed_timestamp())
-            .mark_downloaded(
-                Quality::High,
-                format!("{base}.mp4"),
-                Some(format!("{base}.jpg")),
-                None,
-                fixed_timestamp(),
-            )
-            .with_chapters(vec![], fixed_timestamp())
+        Video {
+            chapters_settled: true,
+            quality_settled: true,
+            ..playlist_episode(youtube_id, title, episode)
+                .start_download(fixed_timestamp())
+                .mark_downloaded(
+                    Quality::High,
+                    format!("{base}.mp4"),
+                    Some(format!("{base}.jpg")),
+                    None,
+                    fixed_timestamp(),
+                )
+                .with_chapters(vec![], fixed_timestamp())
+        }
     }
 
     fn playlist_item(video_id: &str, title: &str, position: i64) -> YoutubePlaylistItem {

@@ -49,21 +49,10 @@ fn output_retrying_busy(cmd: &mut Command) -> io::Result<std::process::Output> {
 /// into mp4 whenever it isn't already, independent of whether a merge
 /// happened, so every download consistently lands as `.mp4`.
 pub fn args_for_quality(quality: Quality) -> Vec<String> {
-    let format = match quality {
-        Quality::High => "bv+ba/b".to_string(),
-        Quality::Mid => "bv[height<=720]+ba/b[height<=720]".to_string(),
-        Quality::Low => "bv[height<=480]+ba/b[height<=480]".to_string(),
-    };
-    vec![
-        "-f".to_string(),
-        format,
-        "-S".to_string(),
-        "codec:h264:aac,ext:mp4:m4a".to_string(),
-        "--merge-output-format".to_string(),
-        "mp4".to_string(),
-        "--remux-video".to_string(),
-        "mp4".to_string(),
-    ]
+    format_selection_args(quality)
+        .into_iter()
+        .chain(["--merge-output-format", "mp4", "--remux-video", "mp4"].map(String::from))
+        .collect()
 }
 
 /// A video's `yt-dlp`-reported download result, staged outside its show:
@@ -84,6 +73,26 @@ pub struct DownloadedVideo {
     /// The chapters `yt-dlp` reported (`Some(vec![])` for none); `None` when
     /// the printed chapters could not be read.
     pub chapters: Option<Vec<VideoChapter>>,
+    /// The downloaded file's height in pixels, when `yt-dlp` printed one.
+    pub height: Option<u32>,
+}
+
+/// A video's chapters (`vec![]` for none) and its publish time, when known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChaptersProbe {
+    pub chapters: Vec<VideoChapter>,
+    pub published_at: Option<DateTime<Utc>>,
+}
+
+/// The height a quality tier would download now, and the video's publish
+/// time, when known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualityProbe {
+    pub height: Option<u32>,
+    pub published_at: Option<DateTime<Utc>>,
+    /// Whether `yt-dlp` reported YouTube's SABR-only streaming experiment:
+    /// the formats it saw may be worse than what the video offers.
+    pub degraded: bool,
 }
 
 /// The outcome of a `download_video` attempt: either a `DownloadedVideo`, or
@@ -156,6 +165,8 @@ pub fn download_video(
         // `--print` stdout. See the `log-sabr-detection` change.
         "--quiet".to_string(),
         "--print".to_string(),
+        "%(height)s".to_string(),
+        "--print".to_string(),
         "%(chapters)j".to_string(),
         "--print".to_string(),
         "%(timestamp)s".to_string(),
@@ -206,6 +217,7 @@ pub fn download_video(
     let duration_seconds = line_before_last(&lines, 1).and_then(parse_duration_seconds);
     let published_at = parse_published_at(line_before_last(&lines, 3), line_before_last(&lines, 2));
     let chapters = line_before_last(&lines, 4).and_then(parse_chapters);
+    let height = line_before_last(&lines, 5).and_then(|line| line.trim().parse().ok());
 
     let media_path = staging_dir.join(filename);
     Ok(DownloadAttempt::Succeeded(DownloadedVideo {
@@ -215,14 +227,15 @@ pub fn download_video(
         published_at,
         sabr_notice,
         chapters,
+        height,
     }))
 }
 
-/// Reads the video's chapters via `yt-dlp --print %(chapters)j`,
-/// downloading nothing; `vec![]` when the video has none. `Err` on any
-/// failure, clean or systemic, including a printed line that can't be read
-/// as chapters.
-pub fn fetch_chapters(ytdlp_path: &Path, video_url: &str) -> Result<Vec<VideoChapter>> {
+/// Reads the video's chapters and publish time via `yt-dlp --print
+/// %(chapters)j --print %(timestamp)s --print %(upload_date)s`, downloading
+/// nothing; `vec![]` when the video has none. `Err` on any failure, clean or
+/// systemic, including a printed line that can't be read as chapters.
+pub fn fetch_chapters(ytdlp_path: &Path, video_url: &str) -> Result<ChaptersProbe> {
     let mut cmd = Command::new(ytdlp_path);
     cmd.args([
         "--skip-download",
@@ -230,6 +243,10 @@ pub fn fetch_chapters(ytdlp_path: &Path, video_url: &str) -> Result<Vec<VideoCha
         "--no-warnings",
         "--print",
         "%(chapters)j",
+        "--print",
+        "%(timestamp)s",
+        "--print",
+        "%(upload_date)s",
     ])
     .arg(video_url)
     .stdout(Stdio::piped())
@@ -241,8 +258,13 @@ pub fn fetch_chapters(ytdlp_path: &Path, video_url: &str) -> Result<Vec<VideoCha
     )? {
         RunOutcome::Success(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let line = stdout.lines().last().unwrap_or_default();
-            parse_chapters(line)
+            let lines: Vec<&str> = stdout.lines().collect();
+            line_before_last(&lines, 2)
+                .and_then(parse_chapters)
+                .map(|chapters| ChaptersProbe {
+                    chapters,
+                    published_at: published_at_from_tail(&lines),
+                })
                 .ok_or_else(|| anyhow!("yt-dlp printed unreadable chapters for {video_url}"))
         }
         RunOutcome::CleanFailure { stderr_raw } => Err(anyhow!(
@@ -396,6 +418,47 @@ pub struct CaptionProbe {
 pub struct FetchedSubtitles {
     pub path: PathBuf,
     pub srt: String,
+}
+
+/// The height `quality`'s format selector picks for the video now, and its
+/// publish time, downloading nothing. Keeps warnings on (no
+/// `--no-warnings`) so the SABR-only streaming signal reaches stderr and
+/// marks the probe degraded. `Err` on any failure, clean or systemic.
+pub fn probe_quality(ytdlp_path: &Path, video_url: &str, quality: Quality) -> Result<QualityProbe> {
+    let mut cmd = Command::new(ytdlp_path);
+    cmd.args(format_selection_args(quality))
+        .args([
+            "--skip-download",
+            "--quiet",
+            "--print",
+            "%(height)s",
+            "--print",
+            "%(timestamp)s",
+            "--print",
+            "%(upload_date)s",
+        ])
+        .arg(video_url)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    match run(
+        &mut cmd,
+        || not_found_message(ytdlp_path),
+        |e| format!("Failed to run yt-dlp to probe the quality of {video_url}: {e}"),
+    )? {
+        RunOutcome::Success(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let lines: Vec<&str> = stdout.lines().collect();
+            Ok(QualityProbe {
+                height: line_before_last(&lines, 2).and_then(|line| line.trim().parse().ok()),
+                published_at: published_at_from_tail(&lines),
+                degraded: sabr_reason(&String::from_utf8_lossy(&output.stderr)).is_some(),
+            })
+        }
+        RunOutcome::CleanFailure { stderr_raw } => Err(anyhow!(
+            "yt-dlp failed to probe the quality of {video_url}: {}",
+            reason_excluding_warnings(&stderr_raw).unwrap_or_else(|| "no reason given".to_string())
+        )),
+    }
 }
 
 /// `-J --skip-download --write-subs` without `--no-warnings`: subtitle
@@ -855,6 +918,28 @@ fn line_before_last<'a>(lines: &[&'a str], back: usize) -> Option<&'a str> {
         .copied()
 }
 
+/// The `-f`/`-S` format selection a quality tier downloads with: its
+/// resolution cap, preferring mp4/h264/aac.
+fn format_selection_args(quality: Quality) -> Vec<String> {
+    let format = match quality {
+        Quality::High => "bv+ba/b",
+        Quality::Mid => "bv[height<=720]+ba/b[height<=720]",
+        Quality::Low => "bv[height<=480]+ba/b[height<=480]",
+    };
+    vec![
+        "-f".to_string(),
+        format.to_string(),
+        "-S".to_string(),
+        "codec:h264:aac,ext:mp4:m4a".to_string(),
+    ]
+}
+
+/// The publish time from the last two printed lines (timestamp, then
+/// upload date).
+fn published_at_from_tail(lines: &[&str]) -> Option<DateTime<Utc>> {
+    parse_published_at(line_before_last(lines, 1), lines.last().copied())
+}
+
 /// The publish time from `yt-dlp`'s printed timestamp, else from its
 /// printed upload date.
 fn parse_published_at(timestamp: Option<&str>, upload_date: Option<&str>) -> Option<DateTime<Utc>> {
@@ -1123,6 +1208,7 @@ mod tests {
         assert_eq!(
             result,
             DownloadAttempt::Succeeded(DownloadedVideo {
+                height: None,
                 media_path: output_dir.join(DEFAULT_PRINTED_FILENAME),
                 thumbnail_path: None,
                 duration_seconds: None,
@@ -1285,6 +1371,7 @@ mod tests {
         assert_eq!(
             result,
             DownloadedVideo {
+                height: None,
                 media_path: output_dir.join("My Video.mp4"),
                 thumbnail_path: None,
                 duration_seconds: Some(223),
@@ -1294,6 +1381,42 @@ mod tests {
             }
         );
         std::fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_report_the_downloaded_height() {
+        let fake = test_support::FakeYtDlp::with_stdout("1080\n[]\nNA\nNA\n223\nyt1.mp4\n");
+        let staging_dir = test_support::unique_temp_dir("ytdlp-output-height");
+
+        let result = unwrap_succeeded(
+            download_video(
+                &fake.path,
+                "https://example.com/video",
+                Quality::High,
+                &staging_dir,
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            result,
+            DownloadedVideo {
+                height: Some(1080),
+                media_path: staging_dir.join("yt1.mp4"),
+                thumbnail_path: None,
+                duration_seconds: Some(223),
+                published_at: None,
+                sabr_notice: None,
+                chapters: Some(vec![]),
+            }
+        );
+        assert!(
+            fake.captured_args()
+                .windows(2)
+                .any(|pair| pair == ["--print", "%(height)s"])
+        );
+        std::fs::remove_dir_all(&staging_dir).unwrap();
     }
 
     #[test]
@@ -1315,6 +1438,7 @@ mod tests {
         assert_eq!(
             result,
             DownloadedVideo {
+                height: None,
                 media_path: staging_dir.join("yt1.mp4"),
                 thumbnail_path: None,
                 duration_seconds: Some(223),
@@ -1356,6 +1480,7 @@ mod tests {
         assert_eq!(
             result,
             DownloadedVideo {
+                height: None,
                 media_path: staging_dir.join("yt1.mp4"),
                 thumbnail_path: None,
                 duration_seconds: Some(223),
@@ -1406,6 +1531,7 @@ mod tests {
         assert_eq!(
             result,
             DownloadedVideo {
+                height: None,
                 media_path: staging_dir.join("yt1.mp4"),
                 thumbnail_path: None,
                 duration_seconds: Some(223),
@@ -1442,6 +1568,7 @@ mod tests {
         assert_eq!(
             result,
             DownloadedVideo {
+                height: None,
                 media_path: staging_dir.join("yt1.mp4"),
                 thumbnail_path: None,
                 duration_seconds: Some(223),
@@ -1480,12 +1607,120 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn it_should_fetch_the_chapters_without_downloading() {
+    fn it_should_report_the_chapters_publish_time() {
         let fake = test_support::FakeYtDlp::with_stdout(
-            "[{\"start_time\": 0.0, \"title\": \"Intro\", \"end_time\": 61.5}, {\"start_time\": 61.5, \"title\": \"Main\", \"end_time\": 600.9}]\n",
+            "[{\"start_time\": 0.0, \"title\": \"Intro\", \"end_time\": 61.5}]\n1773568800\n20260315\n",
         );
 
-        let chapters = fetch_chapters(&fake.path, "https://example.com/video").unwrap();
+        let result = fetch_chapters(&fake.path, "https://example.com/video");
+
+        assert_eq!(
+            result.map_err(|e| e.to_string()),
+            Ok(ChaptersProbe {
+                chapters: vec![VideoChapter {
+                    start_seconds: 0,
+                    end_seconds: 61,
+                    title: "Intro".to_string(),
+                }],
+                published_at: Some(
+                    DateTime::parse_from_rfc3339("2026-03-15T10:00:00Z")
+                        .unwrap()
+                        .to_utc()
+                ),
+            })
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_probe_the_height_for_a_quality() {
+        let fake = test_support::FakeYtDlp::with_stdout("720\n1773568800\n20260315\n");
+
+        let result = probe_quality(&fake.path, "https://example.com/video", Quality::Mid);
+
+        assert_eq!(
+            result.map_err(|e| e.to_string()),
+            Ok(QualityProbe {
+                degraded: false,
+                height: Some(720),
+                published_at: Some(
+                    DateTime::parse_from_rfc3339("2026-03-15T10:00:00Z")
+                        .unwrap()
+                        .to_utc()
+                ),
+            })
+        );
+        assert_eq!(
+            fake.captured_args(),
+            vec![
+                "-f",
+                "bv[height<=720]+ba/b[height<=720]",
+                "-S",
+                "codec:h264:aac,ext:mp4:m4a",
+                "--skip-download",
+                "--quiet",
+                "--print",
+                "%(height)s",
+                "--print",
+                "%(timestamp)s",
+                "--print",
+                "%(upload_date)s",
+                "https://example.com/video",
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_report_a_degraded_quality_probe() {
+        let ytdlp = fake_ytdlp_writing_stdout_and_stderr(
+            "ytdlp-quality-sabr",
+            "360\n1773568800\n20260315\n",
+            &format!("{SABR_WARNING}\n"),
+        );
+
+        let result = probe_quality(&ytdlp, "https://example.com/video", Quality::High);
+
+        assert_eq!(
+            result.map_err(|e| e.to_string()),
+            Ok(QualityProbe {
+                height: Some(360),
+                published_at: Some(
+                    DateTime::parse_from_rfc3339("2026-03-15T10:00:00Z")
+                        .unwrap()
+                        .to_utc()
+                ),
+                degraded: true,
+            })
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_fail_a_quality_probe_on_a_clean_failure() {
+        let fake = test_support::FakeYtDlp::with_exit_code(1);
+
+        let result = probe_quality(&fake.path, "https://example.com/video", Quality::High);
+
+        assert_eq!(
+            result.map_err(|e| e.to_string()),
+            Err(
+                "yt-dlp failed to probe the quality of https://example.com/video: no reason given"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_fetch_the_chapters_without_downloading() {
+        let fake = test_support::FakeYtDlp::with_stdout(
+            "[{\"start_time\": 0.0, \"title\": \"Intro\", \"end_time\": 61.5}, {\"start_time\": 61.5, \"title\": \"Main\", \"end_time\": 600.9}]\nNA\nNA\n",
+        );
+
+        let chapters = fetch_chapters(&fake.path, "https://example.com/video")
+            .unwrap()
+            .chapters;
 
         assert_eq!(
             chapters,
@@ -1510,6 +1745,10 @@ mod tests {
                 "--no-warnings",
                 "--print",
                 "%(chapters)j",
+                "--print",
+                "%(timestamp)s",
+                "--print",
+                "%(upload_date)s",
                 "https://example.com/video",
             ]
         );
@@ -2217,6 +2456,7 @@ mod tests {
         assert_eq!(
             result,
             DownloadAttempt::Succeeded(DownloadedVideo {
+                height: None,
                 media_path: output_dir.join("My Video.mp4"),
                 thumbnail_path: None,
                 duration_seconds: None,

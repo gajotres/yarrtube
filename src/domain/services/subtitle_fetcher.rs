@@ -1,5 +1,7 @@
 use crate::domain::event::DomainEvent;
-use crate::domain::video::{EpisodePaths, Video, VideoSubtitlesFetched, subtitle_staging_dir};
+use crate::domain::video::{
+    EpisodePaths, LateDataOutcome, Video, VideoSubtitlesFetched, subtitle_staging_dir,
+};
 use crate::domain::video_transcript::{CaptionTrack, TranscriptText, VideoTranscript};
 use crate::infrastructure::repositories::filesystem_video_file_repository::VideoFileRepository;
 use crate::infrastructure::repositories::sqlite_video_repository::VideoRepository;
@@ -9,15 +11,10 @@ use crate::infrastructure::repositories::youtube_video_downloader_repository::{
 };
 use crate::infrastructure::shared::domain_events::event_publisher::EventPublisher;
 use crate::infrastructure::shared::system_clock::Clock;
-use chrono::Duration;
+use chrono::{DateTime, Utc};
 use std::path::Path;
 use std::sync::Arc;
 use tracing::warn;
-
-/// How long both since its publish time and since its first check without
-/// captions a video with no original-language captions waits before its
-/// subtitles are recorded Unavailable.
-const UNAVAILABLE_AFTER: Duration = Duration::days(7);
 
 /// Best-effort fetch of a downloaded video's original-language subtitles —
 /// see the `video-subtitles` capability. The fetch itself runs from the
@@ -61,12 +58,11 @@ pub trait SubtitleFetcherApi: Send + Sync {
     /// No-op unless `video` is subtitle-fetchable
     /// (`Video::is_subtitle_fetchable`). Otherwise probes its caption tracks,
     /// downloads the original-language one as `<episode stem>.<lang>.srt` in
-    /// `output_dir`, stores its transcript and records it Fetched; with no
-    /// original-language track and no yt-dlp warning, records the first such
-    /// check and records it Unavailable once both its publish time and that
-    /// first check are at least 7 days old. Best effort: logs and swallows
-    /// every failure, leaving the video Missing. Publishes
-    /// `VideoSubtitlesFetched` once Fetched.
+    /// `output_dir`, stores its transcript and records it Fetched; otherwise
+    /// records the check under the `late-video-data` policy (no track =
+    /// Incomplete, warning or any failure = Failed): Unavailable once
+    /// settled, Missing otherwise. Best effort: failures are logged, counted
+    /// and swallowed. Publishes `VideoSubtitlesFetched` once Fetched.
     fn fetch(&self, video: &Video, output_dir: &Path);
 }
 
@@ -77,6 +73,7 @@ impl SubtitleFetcherApi for SubtitleFetcher {
         }
         if let Err(e) = self.fetch_and_place(video, output_dir) {
             warn!(video_id = %video.id, error = %e, "failed to fetch video subtitles");
+            self.record_failed_fetch(video);
         }
         self.discard_staging(video);
     }
@@ -98,9 +95,9 @@ impl SubtitleFetcher {
             }
             None if !probe.warnings.is_empty() => {
                 Self::log_inconclusive(video, &probe);
-                Ok(())
+                self.record_check(video, LateDataOutcome::Failed, probe.published_at)
             }
-            None => self.mark_unavailable_if_long_missing(video, &probe),
+            None => self.record_check(video, LateDataOutcome::Incomplete, probe.published_at),
         }
     }
 
@@ -116,26 +113,30 @@ impl SubtitleFetcher {
         );
     }
 
-    /// Records the first check without captions, if none is recorded yet.
-    /// Captions often appear days after an upload, and a playlist added
-    /// today may hold old videos: only a video published and first checked
-    /// without captions at least `UNAVAILABLE_AFTER` ago is given up on,
-    /// any other stays Missing for a later reconcile pass to try again.
-    fn mark_unavailable_if_long_missing(
+    /// Records a check that found no selectable track (`Incomplete`) or was
+    /// inconclusive (`Failed`), dated by the video's publish time (its
+    /// record's creation time when none is known): Unavailable once the
+    /// `late-video-data` policy settles it, Missing otherwise.
+    fn record_check(
         &self,
         video: &Video,
-        probe: &CaptionProbe,
+        outcome: LateDataOutcome,
+        published_at: Option<DateTime<Utc>>,
     ) -> anyhow::Result<()> {
-        let now = self.clock.now();
-        let video = video.clone().mark_subtitles_first_missing(now);
-        let cutoff = now - UNAVAILABLE_AFTER;
-        let published_at = probe.published_at.unwrap_or(video.created_at);
-        let first_missing_at = video.subtitles_first_missing_at.unwrap_or(now);
-        if published_at > cutoff || first_missing_at > cutoff {
-            return self.video_repository.update_subtitles(&video);
-        }
         self.video_repository
-            .update_subtitles(&video.mark_subtitles_unavailable(now))
+            .update_subtitles(&video.clone().record_subtitles_check(
+                outcome,
+                published_at.unwrap_or(video.created_at),
+                self.clock.now(),
+            ))
+    }
+
+    /// Best effort, like the fetch itself: a failure to record the failed
+    /// fetch is only logged.
+    fn record_failed_fetch(&self, video: &Video) {
+        if let Err(e) = self.record_check(video, LateDataOutcome::Failed, None) {
+            warn!(video_id = %video.id, error = %e, "failed to record a failed subtitle fetch");
+        }
     }
 
     /// Downloads `track`, moves it next to the episode, stores its
@@ -171,7 +172,7 @@ impl SubtitleFetcher {
                 now,
             ))?;
         self.video_repository
-            .update_subtitles(&video.clone().with_subtitles(subtitle_filename, now))?;
+            .update_subtitles(&video.clone().mark_subtitles_fetched(subtitle_filename, now))?;
         self.publish_fetched(video, output_dir);
         Ok(())
     }

@@ -259,6 +259,7 @@ impl VideoDownloader {
         number: EpisodeNumber,
     ) -> anyhow::Result<Video> {
         let now = self.clock.now();
+        let published_at = downloaded.published_at.unwrap_or(video.created_at);
         let downloaded_video = video
             .mark_downloaded(
                 quality,
@@ -267,9 +268,18 @@ impl VideoDownloader {
                 downloaded.duration_seconds,
                 now,
             )
-            .with_episode_number(number, now);
+            .with_episode_number(number, now)
+            .record_downloaded_quality(
+                quality,
+                downloaded.height,
+                downloaded.sabr_notice.is_some(),
+                published_at,
+                now,
+            );
         let downloaded_video = match &downloaded.chapters {
-            Some(chapters) => downloaded_video.with_chapters(chapters.clone(), now),
+            Some(chapters) => {
+                downloaded_video.record_chapters_check(Some(chapters.clone()), published_at, now)
+            }
             None => downloaded_video,
         };
         let downloaded_video = self.save(downloaded_video)?;

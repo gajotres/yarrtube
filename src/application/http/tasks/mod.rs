@@ -27,8 +27,8 @@ mod tests {
     use crate::domain::playlist_video::PlaylistVideo;
     use crate::domain::shared::{Quality, ReconcileInterval};
     use crate::domain::task::Task;
+    use crate::domain::video::{LateDataChecks, VideoId, VideoRecordId};
     use crate::domain::video::{PlaybackPosition, SubtitleState, Video, VideoStatus};
-    use crate::domain::video::{VideoId, VideoRecordId};
     use crate::infrastructure::repositories::sqlite_channel_repository::{
         ChannelRepository, SqliteChannelRepository,
     };
@@ -500,6 +500,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn it_should_list_an_upgrade_quality_task_with_its_video_context() {
+        let db = TestDatabase::new();
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.database(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.database()));
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let playlist_video_repository = Arc::new(SqlitePlaylistVideoRepository::new(db.database()));
+        task_repository
+            .schedule(
+                &Task::UpgradeQuality {
+                    video_id: "rec1".to_string(),
+                    quality: "high".to_string(),
+                    output_dir: "/videos/My Playlist".to_string(),
+                },
+                fixed_timestamp(),
+            )
+            .unwrap();
+        playlist_repository
+            .insert(&playlist("PL1", "My Playlist"))
+            .unwrap();
+        video_repository.save(&video("rec1", "My Video")).unwrap();
+        playlist_video_repository
+            .save(&PlaylistVideo::create(
+                PlaylistId::new("PL1").unwrap(),
+                VideoRecordId::new("rec1").unwrap(),
+                0,
+                fixed_timestamp(),
+            ))
+            .unwrap();
+        let task_view_searcher = TaskViewSearcher::new(
+            task_repository,
+            playlist_repository,
+            Arc::new(SqliteChannelRepository::new(db.database())),
+            video_repository,
+            playlist_video_repository,
+            Arc::new(SqliteChannelVideoRepository::new(db.database())),
+        );
+
+        let response = list(task_view_searcher).await;
+
+        assert_eq!(
+            response,
+            Ok(vec![pending_task(
+                "upgrade_quality",
+                &[
+                    ("video_title", "My Video"),
+                    ("playlist_name", "My Playlist")
+                ]
+            )])
+        );
+    }
+
+    #[tokio::test]
     async fn it_should_list_a_video_sync_with_its_video_title_and_owner_name() {
         let db = TestDatabase::new();
         let task_repository = Arc::new(SqliteTaskRepository::new(
@@ -865,8 +920,13 @@ mod tests {
             episode_number: None,
             subtitle_state: SubtitleState::Missing,
             subtitle_filename: None,
-            subtitles_first_missing_at: None,
+            subtitle_checks: LateDataChecks::default(),
             chapters: None,
+            chapters_checks: LateDataChecks::default(),
+            chapters_settled: false,
+            downloaded_height: None,
+            quality_checks: LateDataChecks::default(),
+            quality_settled: false,
         }
     }
 
