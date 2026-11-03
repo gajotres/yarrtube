@@ -19,10 +19,25 @@ describe('SettingsMenu', () => {
     const items = (await screen.findAllByRole('menuitem')).map((item) => item.textContent)
     await user.click(screen.getByRole('menuitem', { name: 'Tasks' }))
 
-    expect(items).toEqual(['Tasks', 'Preferences', 'Report a bug'])
+    expect(items).toEqual(['Tasks', 'Preferences', 'AI', 'Report a bug'])
     expect(screen.getByRole('status', { name: 'Current route' })).toHaveTextContent(
       /^\/tasks$/,
     )
+  })
+
+  it('offers AI', async () => {
+    renderWithProviders(
+      <>
+        <SettingsMenu />
+        <RouteProbe />
+      </>,
+    )
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'AI' }))
+
+    expect(screen.getByRole('status', { name: 'Current route' })).toHaveTextContent(/^\/ai$/)
   })
 
   it('offers Preferences', async () => {

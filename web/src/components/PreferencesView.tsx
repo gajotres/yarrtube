@@ -1,17 +1,22 @@
 import { useState } from 'react'
-import { Check, CircleHelp } from 'lucide-react'
+import { Check } from 'lucide-react'
 import { usePreferences, useSavePreferences } from '@/api/queries'
-import type { Preferences } from '@/api/types'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { TooltipProvider } from '@/components/ui/tooltip'
+import { PreferenceHelp } from '@/components/PreferenceHelp'
 import { cn } from '@/lib/utils'
 import { VIEW_WIDTH } from '@/lib/viewWidth'
 import { errorMessage } from '@/lib/errorMessage'
 import { useSavedFlash } from '@/hooks/useSavedFlash'
 
 /** The preferences shown as switches here; the theme has its header toggle. */
-type PreferenceKey = Exclude<keyof Preferences, 'theme'>
+type PreferenceKey =
+  | 'categories_enabled'
+  | 'home_show_continue_watching'
+  | 'home_show_categories'
+  | 'home_show_quick_watches'
+  | 'home_show_latest'
 
 interface PreferenceGroup {
   title: string
@@ -66,37 +71,13 @@ const GROUPS: PreferenceGroup[] = [
   },
 ]
 
-/**
- * A "?" next to a preference whose tooltip explains it. It opens on hover and
- * focus, and also on click, since a tap never hovers.
- */
-function PreferenceHelp({ label, help }: { label: string; help: string }) {
-  const [open, setOpen] = useState(false)
-  return (
-    <Tooltip open={open} onOpenChange={setOpen}>
-      <TooltipTrigger asChild>
-        <button
-          type="button"
-          aria-label={`About ${label}`}
-          className="rounded-full text-muted-foreground hover:text-foreground"
-          onClick={() => setOpen(!open)}
-        >
-          <CircleHelp className="size-4" />
-        </button>
-      </TooltipTrigger>
-      <TooltipContent className="max-w-xs">{help}</TooltipContent>
-    </Tooltip>
-  )
-}
-
 /** The preferences view: a switch per preference, saved as soon as it is toggled. */
 export function PreferencesView() {
   const { data: preferences, error } = usePreferences()
   const savePreferences = useSavePreferences()
   const [saveError, setSaveError] = useState<string | null>(null)
   const saved = useSavedFlash()
-  // Each save sends every preference, so one at a time: a toggle while
-  // another saves would send that one's old value and undo it.
+  // One save at a time, so the saved values shown never race each other.
   const [saving, setSaving] = useState(false)
   const toggle = async (key: PreferenceKey, value: boolean) => {
     if (!preferences || saving) {
@@ -106,7 +87,7 @@ export function PreferencesView() {
     setSaveError(null)
     saved.clear()
     try {
-      await savePreferences({ ...preferences, [key]: value })
+      await savePreferences({ [key]: value })
       saved.flash()
     } catch (err) {
       setSaveError(errorMessage(err))

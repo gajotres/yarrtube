@@ -34,6 +34,40 @@ const DEFAULT_PREFERENCES = {
   home_show_quick_watches: true,
   home_show_latest: true,
   theme: 'light',
+  ai_enabled: false,
+  ollama_url: '',
+  summaries_enabled: false,
+  summaries_model: 'qwen3:4b',
+  summaries_context_length: 12288,
+  summaries_temperature: 0.3,
+  summaries_thinking: true,
+  summaries_prompt: null,
+}
+
+/** The display preferences the released image (PUT only) takes. */
+const DISPLAY_PREFERENCES = [
+  'categories_enabled',
+  'home_show_continue_watching',
+  'home_show_categories',
+  'home_show_quick_watches',
+  'home_show_latest',
+  'theme',
+]
+
+/**
+ * Puts every preference back to its default. The upgrade check seeds a
+ * released image from before `PATCH /api/preferences`, which answers it
+ * with 405: that one takes every display preference through `PUT`.
+ */
+async function resetPreferences(request) {
+  const response = await request.patch('/api/preferences', { data: DEFAULT_PREFERENCES })
+  if (response.status() !== 405) {
+    return response
+  }
+  const display = Object.fromEntries(
+    DISPLAY_PREFERENCES.map((name) => [name, DEFAULT_PREFERENCES[name]]),
+  )
+  return request.put('/api/preferences', { data: display })
 }
 
 export const test = base.extend({
@@ -65,8 +99,8 @@ export const test = base.extend({
 
   defaultPreferences: [
     async ({ request }, use) => {
-      const response = await request.put('/api/preferences', { data: DEFAULT_PREFERENCES })
-      expect(response.ok(), 'PUT /api/preferences').toBeTruthy()
+      const response = await resetPreferences(request)
+      expect(response.ok(), 'resetting the preferences').toBeTruthy()
       await use()
     },
     { auto: true },
