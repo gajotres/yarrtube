@@ -1,4 +1,4 @@
-use crate::domain::category::{Category, CategoryView, CategoryViews};
+use crate::domain::category::{Category, CategoryMember, CategoryView, CategoryViews};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -7,6 +7,13 @@ pub struct CreateCategoryRequest {
     pub name: Option<String>,
     #[serde(default)]
     pub color: Option<String>,
+    /// Blank creates the category without one.
+    #[serde(default)]
+    pub ai_prompt: Option<String>,
+    #[serde(default)]
+    pub channels: Vec<String>,
+    #[serde(default)]
+    pub playlists: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,8 +55,22 @@ impl From<Category> for CategoryResponse {
                 .ai_prompt
                 .as_ref()
                 .map(|prompt| prompt.as_str().to_string()),
-            channels: Vec::new(),
-            playlists: Vec::new(),
+            channels: category
+                .members
+                .iter()
+                .filter_map(|member| match member {
+                    CategoryMember::Channel(handle) => Some(handle.as_str().to_string()),
+                    CategoryMember::Playlist(_) => None,
+                })
+                .collect(),
+            playlists: category
+                .members
+                .iter()
+                .filter_map(|member| match member {
+                    CategoryMember::Channel(_) => None,
+                    CategoryMember::Playlist(id) => Some(id.as_str().to_string()),
+                })
+                .collect(),
         }
     }
 }

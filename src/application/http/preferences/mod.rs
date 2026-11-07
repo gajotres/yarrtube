@@ -65,6 +65,15 @@ fn preferences_change(request: UpdatePreferencesRequest) -> Result<PreferencesCh
             .categorization_model
             .map(CategorizationModel::new)
             .transpose()?,
+        categorization_context_length: request
+            .categorization_context_length
+            .map(ContextLength::new)
+            .transpose()?,
+        categorization_temperature: request
+            .categorization_temperature
+            .map(Temperature::new)
+            .transpose()?,
+        categorization_thinking: request.categorization_thinking,
         categorization_prompt: request
             .categorization_prompt
             .map(|prompt| prompt.map(CategorizationPrompt::new).transpose())
@@ -235,11 +244,49 @@ mod tests {
             Ok(PreferencesResponse {
                 categorization_enabled: false,
                 categorization_model: "qwen3:4b".to_string(),
-                categorization_prompt: include_str!("../../../../prompts/categorization/v1.md")
+                categorization_prompt: include_str!("../../../../prompts/categorization/v2.md")
                     .to_string(),
                 categorization_prompt_is_default: true,
                 ..all_on_response()
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_ship_the_categorization_prompt_v2() {
+        let db = TestDatabase::new();
+        let repository = Arc::new(SqlitePreferencesRepository::new(db.database()));
+        let preferences_searcher = PreferencesSearcher::new(repository);
+
+        let response = get(preferences_searcher).await;
+
+        assert_eq!(
+            response.map(|preferences| (
+                preferences.categorization_prompt,
+                preferences.categorization_prompt_is_default
+            )),
+            Ok((
+                include_str!("../../../../prompts/categorization/v2.md").to_string(),
+                true
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_return_the_categorization_generation_defaults_if_nothing_saved() {
+        let db = TestDatabase::new();
+        let repository = Arc::new(SqlitePreferencesRepository::new(db.database()));
+        let preferences_searcher = PreferencesSearcher::new(repository);
+
+        let response = get(preferences_searcher).await;
+
+        assert_eq!(
+            response.map(|preferences| (
+                preferences.categorization_context_length,
+                preferences.categorization_temperature,
+                preferences.categorization_thinking
+            )),
+            Ok((4096, 0.0, true))
         );
     }
 
@@ -274,9 +321,82 @@ mod tests {
                     enabled: true,
                     model: CategorizationModel::new("gemma3:4b").unwrap(),
                     prompt: Some(CategorizationPrompt::new("Answer yes or no.").unwrap()),
+                    ..CategorizationSettings::default()
                 },
                 ..Preferences::default()
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_save_the_categorization_generation_settings() {
+        let db = TestDatabase::new();
+        let repository = Arc::new(SqlitePreferencesRepository::new(db.database()));
+        let preferences_updater = preferences_updater(&db, repository.clone());
+        let request = UpdatePreferencesRequest {
+            categorization_context_length: Some(8192),
+            categorization_temperature: Some(0.5),
+            categorization_thinking: Some(false),
+            ..UpdatePreferencesRequest::default()
+        };
+
+        let response = update(preferences_updater, request).await;
+
+        assert_eq!(
+            response,
+            Ok(PreferencesResponse {
+                categorization_enabled: false,
+                categorization_context_length: 8192,
+                categorization_temperature: 0.5,
+                categorization_thinking: false,
+                ..all_on_response()
+            })
+        );
+        assert_eq!(
+            repository.find().unwrap(),
+            Some(Preferences {
+                categorization: CategorizationSettings {
+                    context_length: ContextLength::new(8192).unwrap(),
+                    temperature: Temperature::new(0.5).unwrap(),
+                    thinking: false,
+                    ..CategorizationSettings::default()
+                },
+                ..Preferences::default()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_fail_if_the_categorization_context_length_is_out_of_range() {
+        let request = UpdatePreferencesRequest {
+            categorization_context_length: Some(512),
+            ..UpdatePreferencesRequest::default()
+        };
+
+        let response = update(any_preferences_updater(), request).await;
+
+        assert_eq!(
+            response,
+            Err(ApiError::bad_request(
+                "Context length must be between 1024 and 131072 (got 512)"
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_fail_if_the_categorization_temperature_is_out_of_range() {
+        let request = UpdatePreferencesRequest {
+            categorization_temperature: Some(2.5),
+            ..UpdatePreferencesRequest::default()
+        };
+
+        let response = update(any_preferences_updater(), request).await;
+
+        assert_eq!(
+            response,
+            Err(ApiError::bad_request(
+                "Temperature must be between 0 and 2 (got 2.5)"
+            ))
         );
     }
 

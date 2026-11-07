@@ -12,6 +12,9 @@ export interface AiSettingsForm {
   summaries_prompt: string
   categorization_enabled: boolean
   categorization_model: string
+  categorization_context_length: string
+  categorization_temperature: string
+  categorization_thinking: boolean
   categorization_prompt: string
 }
 
@@ -28,21 +31,30 @@ export function formFrom(preferences: Preferences): AiSettingsForm {
     summaries_prompt: preferences.summaries_prompt,
     categorization_enabled: preferences.categorization_enabled,
     categorization_model: preferences.categorization_model,
+    categorization_context_length: String(preferences.categorization_context_length),
+    categorization_temperature: String(preferences.categorization_temperature),
+    categorization_thinking: preferences.categorization_thinking,
     categorization_prompt: preferences.categorization_prompt,
   }
 }
 
 /**
- * The fields of `form` that differ from `saved`, as a patch; without
- * `summaries_thinking` when the model can't think (`thinking: false`). A
- * number field that doesn't hold one (empty included) is `NaN`, for the
+ * The fields of `form` that differ from `saved`, as a patch; without a
+ * section's thinking when its model can't think (`summariesThinking` or
+ * `categorizationThinking` false). A number field that doesn't hold one (empty included) is `NaN`, for the
  * caller to refuse: JSON would send it as `null`, which the daemon reads as
  * unchanged.
  */
 export function changedFields(
   saved: Preferences,
   form: AiSettingsForm,
-  { thinking }: { thinking: boolean } = { thinking: true },
+  {
+    summariesThinking,
+    categorizationThinking,
+  }: { summariesThinking: boolean; categorizationThinking: boolean } = {
+    summariesThinking: true,
+    categorizationThinking: true,
+  },
 ): PreferencesPatch {
   const current: PreferencesPatch = {
     ai_enabled: form.ai_enabled,
@@ -51,10 +63,15 @@ export function changedFields(
     summaries_model: form.summaries_model,
     summaries_context_length: toNumber(form.summaries_context_length),
     summaries_temperature: toNumber(form.summaries_temperature),
-    summaries_thinking: thinking ? form.summaries_thinking : saved.summaries_thinking,
+    summaries_thinking: summariesThinking ? form.summaries_thinking : saved.summaries_thinking,
     summaries_prompt: form.summaries_prompt,
     categorization_enabled: form.categorization_enabled,
     categorization_model: form.categorization_model,
+    categorization_context_length: toNumber(form.categorization_context_length),
+    categorization_temperature: toNumber(form.categorization_temperature),
+    categorization_thinking: categorizationThinking
+      ? form.categorization_thinking
+      : saved.categorization_thinking,
     categorization_prompt: form.categorization_prompt,
   }
   const before: PreferencesPatch = { ...saved, ollama_url: saved.ollama_url ?? '' }
@@ -67,9 +84,12 @@ export function changedFields(
 
 /** Whether `patch` has a number field that isn't one. */
 export function hasInvalidNumber(patch: PreferencesPatch): boolean {
-  return [patch.summaries_context_length, patch.summaries_temperature].some((value) =>
-    Number.isNaN(value),
-  )
+  return [
+    patch.summaries_context_length,
+    patch.summaries_temperature,
+    patch.categorization_context_length,
+    patch.categorization_temperature,
+  ].some((value) => Number.isNaN(value))
 }
 
 function toNumber(text: string): number {

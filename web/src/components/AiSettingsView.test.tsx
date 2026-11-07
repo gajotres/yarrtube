@@ -61,6 +61,25 @@ describe('AiSettingsView', () => {
     expect(screen.queryByRole('button', { name: /reset/i })).not.toBeInTheDocument()
   })
 
+  it('shows the categorization generation settings under its Advanced', async () => {
+    mockApi({
+      'GET /api/preferences': aPreferences({ ai_enabled: true, categorization_enabled: true }),
+    })
+    renderWithProviders(<AiSettingsView />)
+    const user = userEvent.setup()
+
+    await user.click(
+      await screen.findByRole('button', { name: 'Advanced categorization settings' }),
+    )
+
+    expect(screen.getByRole('spinbutton', { name: 'Categorization context length' })).toHaveValue(4096)
+    expect(screen.getByRole('spinbutton', { name: 'Categorization temperature' })).toHaveValue(0)
+    expect(screen.getByRole('switch', { name: 'Categorization thinking' })).toBeChecked()
+    expect(screen.getByRole('textbox', { name: 'Categorization prompt' })).toHaveValue(
+      aPreferences().categorization_prompt,
+    )
+  })
+
   it('saves only the changed categorization fields', async () => {
     const saved = aPreferences({ ai_enabled: true, ollama_url: 'http://mac.local:11434' })
     const fetchMock = mockApi({
@@ -83,6 +102,27 @@ describe('AiSettingsView', () => {
 
     expect(await screen.findByText('Saved')).toBeInTheDocument()
     expect(patchBodies(fetchMock)).toEqual([{ categorization_enabled: true, categorization_model: 'gemma3:4b' }])
+  })
+
+  it('saves only the changed categorization advanced setting', async () => {
+    const fetchMock = mockApi({
+      'GET /api/preferences': { ...aiOn(), categorization_enabled: true },
+      'GET /api/ollama?url=http%3A%2F%2Fmac.local%3A11434': anOllamaServer(),
+      'PATCH /api/preferences': aiOn(),
+    })
+    renderWithProviders(<AiSettingsView />)
+    const user = userEvent.setup()
+
+    await user.click(
+      await screen.findByRole('button', { name: 'Advanced categorization settings' }),
+    )
+    const contextLength = screen.getByRole('spinbutton', { name: 'Categorization context length' })
+    await user.clear(contextLength)
+    await user.type(contextLength, '8192')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await screen.findByText('Saved')
+    expect(patchBodies(fetchMock)).toEqual([{ categorization_context_length: 8192 }])
   })
 
   it('resets a saved categorization prompt to the default', async () => {
@@ -269,6 +309,26 @@ describe('AiSettingsView', () => {
     expect(patchBodies(fetchMock)).toEqual([])
   })
 
+  it('refuses to save an emptied categorization number', async () => {
+    const fetchMock = mockApi({
+      'GET /api/preferences': { ...aiOn(), categorization_enabled: true },
+      'GET /api/ollama?url=http%3A%2F%2Fmac.local%3A11434': anOllamaServer(),
+    })
+    renderWithProviders(<AiSettingsView />)
+    const user = userEvent.setup()
+
+    await user.click(
+      await screen.findByRole('button', { name: 'Advanced categorization settings' }),
+    )
+    await user.clear(screen.getByRole('spinbutton', { name: 'Categorization temperature' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Context length and temperature must be numbers',
+    )
+    expect(patchBodies(fetchMock)).toEqual([])
+  })
+
   it('tests the connection to the typed URL', async () => {
     mockApi({
       'GET /api/preferences': aPreferences(),
@@ -432,6 +492,35 @@ describe('AiSettingsView', () => {
     await user.click(screen.getByRole('button', { name: 'Save' }))
     await screen.findByText('Saved')
     expect(patchBodies(fetchMock)).toEqual([{ summaries_model: 'gemma3:4b' }])
+  })
+
+  it('decides thinking section by section', async () => {
+    const fetchMock = mockApi({
+      'GET /api/preferences': { ...aiOn(), categorization_enabled: true },
+      'GET /api/ollama?url=http%3A%2F%2Fmac.local%3A11434': anOllamaServer(),
+      'PATCH /api/preferences': aiOn(),
+    })
+    renderWithProviders(<AiSettingsView />)
+    await openAdvanced()
+    const user = userEvent.setup()
+    await user.click(
+      await screen.findByRole('button', { name: 'Advanced categorization settings' }),
+    )
+
+    await user.click(await screen.findByRole('switch', { name: 'Categorization thinking' }))
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Categorization model' }),
+      'gemma3:4b',
+    )
+
+    expect(screen.getByRole('switch', { name: 'Thinking' })).toBeChecked()
+    expect(
+      screen.queryByRole('switch', { name: 'Categorization thinking' }),
+    ).not.toBeInTheDocument()
+    expect(screen.getByText("gemma3:4b doesn't support thinking")).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await screen.findByText('Saved')
+    expect(patchBodies(fetchMock)).toEqual([{ categorization_model: 'gemma3:4b' }])
   })
 
   it('offers thinking while the models are unknown', async () => {

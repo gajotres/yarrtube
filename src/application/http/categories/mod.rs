@@ -13,7 +13,7 @@ use crate::domain::playlist::PlaylistId;
 use crate::domain::services::{
     CategoryCreator, CategoryCreatorApi, CategoryDeleter, CategoryDeleterApi, CategoryUpdate,
     CategoryUpdater, CategoryUpdaterApi, CategoryViewSearcher, CategoryViewSearcherApi,
-    VideoWatchStateUpdater, VideoWatchStateUpdaterApi,
+    NewCategory, VideoWatchStateUpdater, VideoWatchStateUpdaterApi,
 };
 use axum::Json;
 use axum::extract::{Path, State};
@@ -32,10 +32,21 @@ pub async fn create_category(
 ) -> Result<(StatusCode, Json<CategoryResponse>), ApiError> {
     let name = CategoryName::new(required(request.name, MISSING_CATEGORY_NAME)?)?;
     let color = request.color.map(CategoryColor::new).transpose()?;
+    let category = NewCategory {
+        name,
+        color,
+        ai_prompt: request
+            .ai_prompt
+            .map(CategoryPrompt::new)
+            .transpose()?
+            .flatten(),
+        members: members_from(request.channels, request.playlists)?,
+    };
 
-    match run_blocking(move || category_creator.create(name, color)).await? {
+    match run_blocking(move || category_creator.create(category)).await? {
         Ok(category) => Ok((StatusCode::CREATED, Json(CategoryResponse::from(category)))),
         Err(e @ CreateCategoryError::NameTaken(_)) => Err(ApiError::new(StatusCode::CONFLICT, e)),
+        Err(e @ CreateCategoryError::MemberNotTracked(_)) => Err(ApiError::bad_request(e)),
         Err(e @ CreateCategoryError::Repository(_)) => Err(ApiError::internal(e)),
     }
 }
@@ -95,7 +106,7 @@ pub async fn set_category_members(
     Json(request): Json<SetCategoryMembersRequest>,
 ) -> Result<StatusCode, ApiError> {
     let id = CategoryId::new(id)?;
-    let members = members_from(request)?;
+    let members = members_from(request.channels, request.playlists)?;
 
     run_blocking(move || category_updater.set_members(&id, members))
         .await?
@@ -118,13 +129,14 @@ pub async fn mark_category_watched(
 }
 
 /// The requested channels, then the requested playlists, as members.
-fn members_from(request: SetCategoryMembersRequest) -> Result<Vec<CategoryMember>, ApiError> {
-    let channels = request
-        .channels
+fn members_from(
+    channels: Vec<String>,
+    playlists: Vec<String>,
+) -> Result<Vec<CategoryMember>, ApiError> {
+    let channels = channels
         .into_iter()
         .map(|handle| ChannelHandle::new(handle).map(CategoryMember::Channel));
-    let playlists = request
-        .playlists
+    let playlists = playlists
         .into_iter()
         .map(|id| PlaylistId::new(id).map(CategoryMember::Playlist));
     Ok(channels.chain(playlists).collect::<Result<_, _>>()?)
@@ -191,8 +203,7 @@ mod tests {
     async fn it_should_create_a_category() {
         let db = TestDatabase::new();
         let repository = Arc::new(SqliteCategoryRepository::new(db.database()));
-        let category_creator =
-            CategoryCreator::new(repository.clone(), Arc::new(FixedClock(fixed_timestamp())));
+        let category_creator = category_creator(&db, repository.clone());
 
         let response = create(category_creator, create_request("  Chess  ")).await;
 
@@ -212,8 +223,7 @@ mod tests {
     async fn it_should_create_a_category_with_a_color() {
         let db = TestDatabase::new();
         let repository = Arc::new(SqliteCategoryRepository::new(db.database()));
-        let category_creator =
-            CategoryCreator::new(repository.clone(), Arc::new(FixedClock(fixed_timestamp())));
+        let category_creator = category_creator(&db, repository.clone());
 
         let response = create(
             category_creator,
@@ -246,11 +256,252 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn it_should_create_a_category_with_a_prompt() {
+        let db = TestDatabase::new();
+        let repository = Arc::new(SqliteCategoryRepository::new(db.database()));
+        let category_creator = category_creator(&db, repository.clone());
+
+        let response = create(
+            category_creator,
+            CreateCategoryRequest {
+                ai_prompt: Some("  Chess games  ".to_string()),
+                ..create_request("Chess")
+            },
+        )
+        .await;
+
+        let stored = repository.list().unwrap();
+        let id = stored.first().map(|category| category.id.clone());
+        assert_eq!(
+            response,
+            Ok((
+                StatusCode::CREATED,
+                CategoryResponse {
+                    ai_prompt: Some("Chess games".to_string()),
+                    ..category_response(id.as_ref(), "Chess", &[], &[])
+                }
+            ))
+        );
+        assert_eq!(
+            stored,
+            vec![Category {
+                ai_prompt: CategoryPrompt::new("Chess games").unwrap(),
+                ..category(id, "Chess")
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_create_a_category_with_members() {
+        let db = TestDatabase::new();
+        let repository = Arc::new(SqliteCategoryRepository::new(db.database()));
+        SqliteChannelRepository::new(db.database())
+            .insert(&channel("@Hikaru"))
+            .unwrap();
+        SqlitePlaylistRepository::new(db.database())
+            .insert(&playlist("PLendgames"))
+            .unwrap();
+        let category_creator = category_creator(&db, repository.clone());
+
+        let response = create(
+            category_creator,
+            CreateCategoryRequest {
+                channels: vec!["@Hikaru".to_string(), "@Hikaru".to_string()],
+                playlists: vec!["PLendgames".to_string()],
+                ..create_request("Chess")
+            },
+        )
+        .await;
+
+        let stored = repository.list().unwrap();
+        let id = stored.first().map(|category| category.id.clone());
+        assert_eq!(
+            response,
+            Ok((
+                StatusCode::CREATED,
+                category_response(id.as_ref(), "Chess", &["@Hikaru"], &["PLendgames"])
+            ))
+        );
+        assert_eq!(
+            stored,
+            vec![Category {
+                members: vec![channel_member("@Hikaru"), playlist_member("PLendgames")],
+                ..category(id, "Chess")
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_put_the_videos_of_its_members_in_a_created_category() {
+        let db = TestDatabase::new();
+        let repository = Arc::new(SqliteCategoryRepository::new(db.database()));
+        let video_repository = SqliteVideoRepository::new(db.database());
+        let channel_video_repository = SqliteChannelVideoRepository::new(db.database());
+        let video_categories_repository =
+            Arc::new(SqliteVideoCategoriesRepository::new(db.database()));
+        let event_repository = SqliteEventRepository::new(db.database());
+        SqliteChannelRepository::new(db.database())
+            .insert(&channel("@Hikaru"))
+            .unwrap();
+        let video = downloaded_video("vid1");
+        save_channel_video(
+            &video_repository,
+            &channel_video_repository,
+            "@Hikaru",
+            &video,
+        );
+        let video_category_assigner = VideoCategoryAssigner::new(
+            video_categories_repository.clone(),
+            repository.clone(),
+            Arc::new(SqliteChannelVideoRepository::new(db.database())),
+            Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+            Arc::new(SqliteEventPublisher::new(
+                db.database(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
+            Arc::new(CategoryLock::default()),
+        );
+        let category_creator = CategoryCreator::new(
+            repository.clone(),
+            Arc::new(SqliteChannelRepository::new(db.database())),
+            Arc::new(SqlitePlaylistRepository::new(db.database())),
+            video_category_assigner,
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
+
+        let response = create(
+            category_creator,
+            CreateCategoryRequest {
+                channels: vec!["@Hikaru".to_string()],
+                ..create_request("Chess")
+            },
+        )
+        .await;
+
+        let stored = repository.list().unwrap();
+        let id = stored
+            .first()
+            .map(|category| category.id.clone())
+            .unwrap_or_else(CategoryId::new_generated);
+        assert_eq!(
+            response,
+            Ok((
+                StatusCode::CREATED,
+                category_response(Some(&id), "Chess", &["@Hikaru"], &[])
+            ))
+        );
+        assert_eq!(
+            video_categories_repository
+                .find_many(std::slice::from_ref(&video.id))
+                .unwrap(),
+            vec![VideoCategories::new(video.id.clone(), vec![id])]
+        );
+        assert_eq!(
+            event_repository.list_eligible().unwrap(),
+            vec![categories_changed_event(1, &[&video])]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_create_a_category_without_a_prompt_if_blank() {
+        let db = TestDatabase::new();
+        let repository = Arc::new(SqliteCategoryRepository::new(db.database()));
+        let category_creator = category_creator(&db, repository.clone());
+
+        let response = create(
+            category_creator,
+            CreateCategoryRequest {
+                ai_prompt: Some(String::new()),
+                ..create_request("Chess")
+            },
+        )
+        .await;
+
+        let stored = repository.list().unwrap();
+        let id = stored.first().map(|category| category.id.clone());
+        assert_eq!(
+            response,
+            Ok((
+                StatusCode::CREATED,
+                category_response(id.as_ref(), "Chess", &[], &[])
+            ))
+        );
+        assert_eq!(stored, vec![category(id, "Chess")]);
+    }
+
+    #[tokio::test]
+    async fn it_should_fail_to_create_a_category_with_an_untracked_member() {
+        let db = TestDatabase::new();
+        let repository = Arc::new(SqliteCategoryRepository::new(db.database()));
+        let category_creator = category_creator(&db, repository.clone());
+
+        let response = create(
+            category_creator,
+            CreateCategoryRequest {
+                channels: vec!["@Ghost".to_string()],
+                ..create_request("Chess")
+            },
+        )
+        .await;
+
+        assert_eq!(
+            response,
+            Err(ApiError::bad_request("channel @Ghost is not tracked"))
+        );
+        assert_eq!(repository.list().unwrap(), vec![]);
+    }
+
+    #[tokio::test]
+    async fn it_should_fail_to_create_a_category_with_an_untracked_playlist() {
+        let db = TestDatabase::new();
+        let repository = Arc::new(SqliteCategoryRepository::new(db.database()));
+        let category_creator = category_creator(&db, repository.clone());
+
+        let response = create(
+            category_creator,
+            CreateCategoryRequest {
+                playlists: vec!["PLghost".to_string()],
+                ..create_request("Chess")
+            },
+        )
+        .await;
+
+        assert_eq!(
+            response,
+            Err(ApiError::bad_request("playlist PLghost is not tracked"))
+        );
+        assert_eq!(repository.list().unwrap(), vec![]);
+    }
+
+    #[tokio::test]
+    async fn it_should_fail_to_create_a_category_if_the_prompt_is_too_long() {
+        let db = TestDatabase::new();
+        let repository = Arc::new(SqliteCategoryRepository::new(db.database()));
+        let category_creator = category_creator(&db, repository.clone());
+
+        let response = create(
+            category_creator,
+            CreateCategoryRequest {
+                ai_prompt: Some("a".repeat(2001)),
+                ..create_request("Chess")
+            },
+        )
+        .await;
+
+        assert_eq!(
+            response,
+            Err(ApiError::bad_request(
+                "Category AI prompt must be at most 2000 characters (got 2001)"
+            ))
+        );
+        assert_eq!(repository.list().unwrap(), vec![]);
+    }
+
+    #[tokio::test]
     async fn it_should_create_the_first_category_with_the_first_palette_color() {
         let db = TestDatabase::new();
         let repository = Arc::new(SqliteCategoryRepository::new(db.database()));
-        let category_creator =
-            CategoryCreator::new(repository.clone(), Arc::new(FixedClock(fixed_timestamp())));
+        let category_creator = category_creator(&db, repository.clone());
 
         let response = create(category_creator, create_request("Chess")).await;
 
@@ -294,8 +545,7 @@ mod tests {
                 };
                 repository.insert(&existing).unwrap();
             });
-            let category_creator =
-                CategoryCreator::new(repository, Arc::new(FixedClock(fixed_timestamp())));
+            let category_creator = category_creator(&db, repository);
 
             let response = create(category_creator, create_request("Chess")).await;
 
@@ -335,7 +585,7 @@ mod tests {
             any_category_creator(),
             CreateCategoryRequest {
                 name: None,
-                color: None,
+                ..create_request("")
             },
         )
         .await;
@@ -364,8 +614,7 @@ mod tests {
         let repository = Arc::new(SqliteCategoryRepository::new(db.database()));
         let chess = category(None, "Chess");
         repository.insert(&chess).unwrap();
-        let category_creator =
-            CategoryCreator::new(repository.clone(), Arc::new(FixedClock(fixed_timestamp())));
+        let category_creator = category_creator(&db, repository.clone());
 
         let response = create(category_creator, create_request("chess")).await;
 
@@ -2207,6 +2456,22 @@ mod tests {
     fn any_category_creator() -> CategoryCreator {
         CategoryCreator::new(
             Arc::new(SqliteCategoryRepository::new(unused_connection())),
+            Arc::new(SqliteChannelRepository::new(unused_connection())),
+            Arc::new(SqlitePlaylistRepository::new(unused_connection())),
+            video_category_assigner(unused_connection()),
+            Arc::new(FixedClock(fixed_timestamp())),
+        )
+    }
+
+    fn category_creator(
+        db: &TestDatabase,
+        repository: Arc<SqliteCategoryRepository>,
+    ) -> CategoryCreator {
+        CategoryCreator::new(
+            repository,
+            Arc::new(SqliteChannelRepository::new(db.database())),
+            Arc::new(SqlitePlaylistRepository::new(db.database())),
+            video_category_assigner(db.database()),
             Arc::new(FixedClock(fixed_timestamp())),
         )
     }
@@ -2235,6 +2500,9 @@ mod tests {
         CreateCategoryRequest {
             name: Some(name.to_string()),
             color: None,
+            ai_prompt: None,
+            channels: Vec::new(),
+            playlists: Vec::new(),
         }
     }
 

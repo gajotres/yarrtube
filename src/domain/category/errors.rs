@@ -6,6 +6,7 @@ use std::fmt;
 #[derive(Debug)]
 pub enum CreateCategoryError {
     NameTaken(CategoryName),
+    MemberNotTracked(CategoryMember),
     Repository(anyhow::Error),
 }
 
@@ -13,6 +14,7 @@ impl fmt::Display for CreateCategoryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NameTaken(name) => write!(f, "a category named \"{name}\" already exists"),
+            Self::MemberNotTracked(member) => write!(f, "{member} is not tracked"),
             Self::Repository(e) => write!(f, "{e}"),
         }
     }

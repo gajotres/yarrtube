@@ -1,21 +1,28 @@
+import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { act, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { Route, Routes as RouterRoutes } from 'react-router-dom'
 import type { Category } from '@/api/types'
 import { queryKeys } from '@/api/queries'
-import { CategorySettingsDialog } from './CategorySettingsDialog'
+import { CategoryDetail } from './CategoryDetail'
+import { CategoryDialog } from './CategoryDialog'
 import {
   aCategory,
+  aCategoryList,
   aChannel,
+  aCreatedCategory,
   aPlaylist,
   aPreferences,
   mockApi,
   renderWithProviders,
   type Routes,
 } from '@/test/helpers'
+import { RouteProbe } from '@/test/RouteProbe'
 
-function renderDialog(category: Category, routes: Routes) {
+function renderDialog(category: Category | undefined, routes: Routes) {
   const fetchMock = mockApi({
+    'GET /api/categories': aCategoryList(),
     'GET /api/channels': [],
     'GET /api/playlists': [],
     'GET /api/preferences': aPreferences(),
@@ -23,12 +30,46 @@ function renderDialog(category: Category, routes: Routes) {
   })
   const onOpenChange = vi.fn()
   const { rerender, queryClient } = renderWithProviders(
-    <CategorySettingsDialog category={category} open onOpenChange={onOpenChange} />,
+    <CategoryDialog category={category} open onOpenChange={onOpenChange} />,
   )
   /** Delivers `refetched` to the open dialog, as a library refetch does. */
   const refetch = (refetched: Category) =>
-    rerender(<CategorySettingsDialog category={refetched} open onOpenChange={onOpenChange} />)
+    rerender(<CategoryDialog category={refetched} open onOpenChange={onOpenChange} />)
   return { fetchMock, onOpenChange, refetch, queryClient }
+}
+
+/** The dialog to add a category, beside the category view it navigates to. */
+function renderCreating(routes: Routes) {
+  const fetchMock = mockApi({
+    'GET /api/categories': aCategoryList(),
+    'GET /api/channels': [],
+    'GET /api/playlists': [],
+    'GET /api/preferences': aPreferences(),
+    ...routes,
+  })
+  const onOpenChange = vi.fn()
+  const Creating = () => {
+    const [open, setOpen] = useState(true)
+    return (
+      <CategoryDialog
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next)
+          onOpenChange(next)
+        }}
+      />
+    )
+  }
+  renderWithProviders(
+    <>
+      <Creating />
+      <RouterRoutes>
+        <Route path="/categories/:id" element={<CategoryDetail />} />
+      </RouterRoutes>
+      <RouteProbe />
+    </>,
+  )
+  return { fetchMock, onOpenChange }
 }
 
 /** Each chip of a group as its name and whether it's pressed. */
@@ -58,6 +99,12 @@ function bodies(fetchMock: ReturnType<typeof mockApi>, method: string): unknown[
     .map(([, init]) => JSON.parse((init as RequestInit).body as string))
 }
 
+function inDocumentOrder(elements: HTMLElement[]): HTMLElement[] {
+  return [...elements].sort((a, b) =>
+    a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1,
+  )
+}
+
 const library = {
   'GET /api/channels': [
     aChannel({ id: '@hikaru', name: 'Hikaru', avatar_filename: 'hikaru.jpg' }),
@@ -66,7 +113,243 @@ const library = {
   'GET /api/playlists': [aPlaylist({ id: 'PLend', name: 'Endgame course' })],
 }
 
-describe('CategorySettingsDialog', () => {
+describe('CategoryDialog', () => {
+  it('asks for the name, color, prompt and chips when creating, with the next free color', async () => {
+    renderDialog(undefined, {
+      ...library,
+      'GET /api/preferences': categorizationOn,
+      'GET /api/categories': aCategoryList([
+        aCategory({ name: 'Cooking', color: '#f59e0b' }),
+        aCategory({ name: 'Sports', color: '#ef4444' }),
+      ]),
+    })
+
+    expect(screen.getByRole('dialog', { name: 'Add category' })).toBeVisible()
+    await waitFor(() => expect(screen.getByRole('radio', { name: 'Orange' })).toBeChecked())
+    const name = screen.getByRole('textbox', { name: 'Name' })
+    const color = screen.getByRole('radio', { name: 'Orange' })
+    const prompt = await screen.findByRole('textbox', { name: 'AI prompt' })
+    const chip = await screen.findByRole('button', { name: 'Hikaru' })
+    expect(name).toHaveFocus()
+    expect(name).toHaveValue('')
+    expect(prompt).toHaveValue('')
+    expect(prompt).toHaveAttribute('rows', '6')
+    expect(chip).toHaveAttribute('aria-pressed', 'false')
+    expect(inDocumentOrder([chip, prompt, color, name])).toEqual([name, color, prompt, chip])
+    expect(screen.getByRole('radio', { name: /^In this category/ })).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /^Not in this category/ })).toBeInTheDocument()
+  })
+
+  it('creates everything in one request and opens the category with no dialog open', async () => {
+    const { fetchMock } = renderCreating({
+      ...library,
+      'GET /api/preferences': categorizationOn,
+      'POST /api/categories': aCreatedCategory({ id: 'chess', name: 'Chess' }),
+      'GET /api/categories': aCategoryList([
+        aCategory({ id: 'chess', name: 'Chess', channels: ['@hikaru'] }),
+      ]),
+      'GET /api/categories/chess/videos': [],
+    })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByRole('textbox', { name: 'Name' }), '  Chess ')
+    await user.click(screen.getByRole('radio', { name: 'Violet' }))
+    await user.type(await screen.findByRole('textbox', { name: 'AI prompt' }), ' Chess games ')
+    await user.click(await screen.findByRole('button', { name: 'Hikaru' }))
+    await user.click(screen.getByRole('button', { name: 'Create' }))
+
+    await waitFor(() =>
+      expect(screen.getByRole('status', { name: 'Current route', hidden: true })).toHaveTextContent(
+        '/categories/chess',
+      ),
+    )
+    expect(bodies(fetchMock, 'POST')).toEqual([
+      {
+        name: 'Chess',
+        color: '#8b5cf6',
+        ai_prompt: 'Chess games',
+        channels: ['@hikaru'],
+        playlists: [],
+      },
+    ])
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  })
+
+  it('creates without a prompt field while categorization is off', async () => {
+    const { fetchMock } = renderCreating({
+      ...library,
+      'POST /api/categories': aCreatedCategory({ id: 'chess', name: 'Chess' }),
+      'GET /api/categories/chess/videos': [],
+    })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByRole('textbox', { name: 'Name' }), 'Chess')
+    await user.click(await screen.findByRole('button', { name: 'Hikaru' }))
+    await user.click(screen.getByRole('button', { name: 'Create' }))
+
+    await waitFor(() => expect(bodies(fetchMock, 'POST')).toHaveLength(1))
+    expect(screen.queryByRole('textbox', { name: 'AI prompt' })).not.toBeInTheDocument()
+    expect(bodies(fetchMock, 'POST')).toEqual([
+      { name: 'Chess', color: '#f59e0b', channels: ['@hikaru'], playlists: [] },
+    ])
+  })
+
+  it('needs a name to create, and keeps everything when creating fails', async () => {
+    const { onOpenChange } = renderCreating({
+      ...library,
+      'GET /api/preferences': categorizationOn,
+      'POST /api/categories': { status: 409, error: 'a category named "Chess" already exists' },
+    })
+    const user = userEvent.setup()
+    const name = screen.getByRole('textbox', { name: 'Name' })
+    const create = screen.getByRole('button', { name: 'Create' })
+
+    expect(create).toBeDisabled()
+    await user.type(name, '   ')
+    expect(create).toBeDisabled()
+
+    await user.type(name, 'Chess')
+    await user.type(await screen.findByRole('textbox', { name: 'AI prompt' }), 'Chess games')
+    await user.click(await screen.findByRole('button', { name: 'Hikaru' }))
+    await user.click(create)
+
+    expect(await screen.findByText('a category named "Chess" already exists')).toBeInTheDocument()
+    expect(onOpenChange).not.toHaveBeenCalled()
+    expect(name).toHaveValue('   Chess')
+    expect(screen.getByRole('textbox', { name: 'AI prompt' })).toHaveValue('Chess games')
+    expect(screen.getByRole('button', { name: 'Hikaru' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('neither creates nor closes on Enter in the color picker', async () => {
+    const { fetchMock, onOpenChange } = renderCreating(library)
+    const user = userEvent.setup()
+
+    await user.type(screen.getByRole('textbox', { name: 'Name' }), 'Chess')
+    await user.click(screen.getByRole('radio', { name: 'Violet' }))
+    await user.keyboard('{Enter}')
+    await user.click(screen.getByRole('radio', { name: 'Custom' }))
+    await user.click(screen.getByRole('slider', { name: 'Hue' }))
+    await user.keyboard('{Enter}')
+
+    expect(onOpenChange).not.toHaveBeenCalled()
+    expect(bodies(fetchMock, 'POST')).toEqual([])
+  })
+
+  it('closes an untouched new category without asking', async () => {
+    const { onOpenChange } = renderCreating({})
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+    expect(screen.queryByText("This category won't be created.")).not.toBeInTheDocument()
+  })
+
+  it('asks before discarding a new category', async () => {
+    const { fetchMock, onOpenChange } = renderCreating({})
+    const user = userEvent.setup()
+
+    await user.type(screen.getByRole('textbox', { name: 'Name' }), 'Chess')
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    expect(await screen.findByText("This category won't be created.")).toBeInTheDocument()
+    expect(onOpenChange).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: 'Discard' }))
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+    expect(bodies(fetchMock, 'POST')).toEqual([])
+  })
+
+  it('prefills the name and color, and saves them in one update without the members', async () => {
+    const violetChess = { ...chess, color: '#8b5cf6' }
+    const { fetchMock, onOpenChange } = renderDialog(violetChess, {
+      'PATCH /api/categories/chess': () => null,
+    })
+    const user = userEvent.setup()
+    const name = screen.getByRole('textbox', { name: 'Name' })
+
+    expect(name).toHaveValue('Chess')
+    expect(name).toHaveFocus()
+    expect(screen.getByRole('radio', { name: 'Violet' })).toBeChecked()
+    await user.clear(name)
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+    await user.type(name, 'Board games')
+    await user.click(screen.getByRole('radio', { name: 'Teal' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    expect(bodies(fetchMock, 'PATCH')).toEqual([{ name: 'Board games', color: '#14b8a6' }])
+    expect(bodies(fetchMock, 'PUT')).toEqual([])
+  })
+
+  it('stays open without sending the members when the name is taken', async () => {
+    const { fetchMock, onOpenChange } = renderDialog(chess, {
+      ...library,
+      'PATCH /api/categories/chess': {
+        status: 409,
+        error: 'a category named "Cooking" already exists',
+      },
+    })
+    const user = userEvent.setup()
+    const name = screen.getByRole('textbox', { name: 'Name' })
+
+    await user.clear(name)
+    await user.type(name, 'Cooking')
+    await user.click(await screen.findByRole('button', { name: 'GothamChess' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(await screen.findByText('a category named "Cooking" already exists')).toBeInTheDocument()
+    expect(onOpenChange).not.toHaveBeenCalled()
+    expect(name).toHaveValue('Cooking')
+    expect(bodies(fetchMock, 'PUT')).toEqual([])
+  })
+
+  it('saves on Enter in the name, but neither toggles nor saves on Enter with several matches', async () => {
+    const { fetchMock, onOpenChange } = renderDialog(chess, {
+      ...library,
+      'PATCH /api/categories/chess': () => null,
+    })
+    const user = userEvent.setup()
+    const name = screen.getByRole('textbox', { name: 'Name' })
+    const search = screen.getByRole('searchbox', { name: 'Search channels and playlists' })
+
+    await screen.findByRole('button', { name: 'GothamChess' })
+    await user.type(name, ' club')
+    await user.type(search, 'h{Enter}')
+
+    expect(onOpenChange).not.toHaveBeenCalled()
+    expect(bodies(fetchMock, 'PATCH')).toEqual([])
+    expect(await chipsOf('Channels')).toEqual([
+      ['GothamChess', false],
+      ['Hikaru', true],
+    ])
+
+    await user.type(name, '{Enter}')
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    expect(bodies(fetchMock, 'PATCH')).toEqual([{ name: 'Chess club' }])
+  })
+
+  it('keeps the dialog and what was staged when closing the prompt guide', async () => {
+    const { onOpenChange } = renderDialog(chess, {
+      ...library,
+      'GET /api/preferences': categorizationOn,
+    })
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: 'GothamChess' }))
+    await user.click(screen.getByRole('button', { name: 'About AI prompt' }))
+    const guide = await screen.findByRole('region', { name: 'AI prompt guide' })
+    await user.keyboard('{Escape}')
+
+    await waitFor(() => expect(guide).not.toBeInTheDocument())
+    expect(onOpenChange).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog', { name: 'Discard changes?' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'GothamChess' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+  })
+
   it('shows channels and playlists as chips pressed by membership', async () => {
     renderDialog(chess, library)
 
@@ -139,10 +422,11 @@ describe('CategorySettingsDialog', () => {
     })
     const user = userEvent.setup()
     const search = screen.getByRole('searchbox', { name: 'Search channels and playlists' })
-    const focusedOnOpen = search === document.activeElement
 
     await screen.findByRole('button', { name: 'Vsauce' })
-    const filters = screen.getAllByRole('radio').map((filter) => filter.textContent)
+    const filters = within(screen.getByLabelText('Show'))
+      .getAllByRole('radio')
+      .map((filter) => filter.textContent)
     await user.type(search, 'VER')
     const searched = shownChips()
     await user.click(screen.getByRole('radio', { name: /^Not in Science/ }))
@@ -153,7 +437,6 @@ describe('CategorySettingsDialog', () => {
     await user.clear(search)
     await user.type(search, 'hik{Enter}')
 
-    expect(focusedOnOpen).toBe(true)
     expect(filters).toEqual(['All', 'In Science1', 'Not in Science3'])
     expect({ searched, searchedOut, searchedIn }).toEqual({
       searched: ['Veritasium', 'Overview'],
@@ -402,7 +685,7 @@ describe('CategorySettingsDialog', () => {
     expect(bodies(fetchMock, 'PATCH')).toEqual([{ ai_prompt: pasted }])
   })
 
-  it('says the prompt was saved when only the sources failed, and retries the sources', async () => {
+  it('says the other changes were saved when only the sources failed, and retries the sources', async () => {
     let failures = 1
     const { fetchMock, onOpenChange } = renderDialog(chess, {
       ...library,
@@ -418,7 +701,9 @@ describe('CategorySettingsDialog', () => {
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
     expect(
-      await screen.findByText("The AI prompt was saved, but the sources weren't: database is locked"),
+      await screen.findByText(
+        "Your other changes were saved, but the sources weren't: database is locked",
+      ),
     ).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
@@ -427,7 +712,7 @@ describe('CategorySettingsDialog', () => {
     expect(bodies(fetchMock, 'PUT')).toHaveLength(2)
   })
 
-  it('says the prompt stays saved when discarding after only the sources failed', async () => {
+  it('says the other changes stay saved when discarding after only the sources failed', async () => {
     const { onOpenChange } = renderDialog(chess, {
       ...library,
       'GET /api/preferences': categorizationOn,
@@ -444,7 +729,7 @@ describe('CategorySettingsDialog', () => {
 
     const confirm = await screen.findByRole('dialog', { name: 'Discard changes?' })
     expect(confirm).toHaveTextContent(
-      "The AI prompt is already saved. Your changes to the sources in Chess won't be saved.",
+      "Your other changes are already saved. Your changes to the sources in Chess won't be saved.",
     )
     expect(onOpenChange).not.toHaveBeenCalled()
   })
