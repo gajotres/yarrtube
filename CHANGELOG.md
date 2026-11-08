@@ -3,26 +3,62 @@
 All notable changes to yarrtube are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.10.2] - 2026-11-08
 
-### Breaking
+### Fork release
 
-- `YARRTUBE_RECONCILE_INTERVAL_SECONDS` is removed, and a value set there is
-  not carried over. Every channel and playlist now has its own check
-  interval, 3 hours by default (the env variable defaulted to 1 hour).
-- `PATCH /api/playlists/{id}`: `exclude_from_home` is now optional. A request
-  that changes neither it nor `reconcile_interval_minutes` is rejected as
-  nothing to update.
+- Sync upstream through `1a621d1`, including categories and Plex smart playlists,
+  AI summaries and categorization with Ollama, chapter navigation, late-data
+  rechecks, improved downloads, and the redesigned web interface.
+- Preserve configurable SponsorBlock removal, selected creator/automatic captions,
+  full language track titles, embedding, subtitle retiming and download diagnostics.
+- Keep upstream transcripts for AI without recreating embedded SRT sidecars or
+  overwriting selected, retimed captions. Read height and chapter metadata after
+  processing, alongside the fork's subtitle metadata.
+- Publish numbered images and `latest` after CI passes, then create a GitHub
+  release. SHA image tags and explicit pull policies remain disabled.
 
-### Added
+## [0.10.0] - 2026-10-30
 
-- Set how often each channel and playlist is checked for new videos, from
-  1 minute to 24 hours: under "Advanced options" when adding it, or from
-  "Edit settings" afterwards (playlists gain an "Edit settings" dialog).
-  A shorter interval brings the next check forward right away.
-- The web UI header shows the running version (e.g. `v0.9.3`) next to the
-  logo, and `GET /api/version` reports it, so you can tell when an
-  automatically released image has been picked up.
+Categories, subtitles and a redesigned web UI.
+
+### Highlights
+
+- **Categories.** Group channels and playlists by topic ("Science", "Kids")
+  and watch each one as a single feed: its own page you can play as one
+  queue, "More about Science" rows on Home, and colors throughout the UI.
+  See [Categories](doc/CATEGORIES.md).
+- **Smart playlists in Plex.** Each category becomes a Plex playlist of
+  its unwatched episodes, newest first, across all its shows. Kept
+  in sync automatically.
+- **Subtitles.** Every download gets its captions as an `.srt` next to it,
+  picked up by Plex and playable in the web UI player.
+- **A redesigned web UI.** New Home with Continue watching, category rows
+  and Quick watches; global search (⌘K / Ctrl+K); watch state on every
+  thumbnail; foldable sidebar; a Preferences page to show only the
+  sections you want.
+
+### Also new
+
+- Set how often each channel and playlist is checked, from 1 minute to 24
+  hours.
+- Move a playlist or channel to a new folder, Plex follows it.
+- Unwatched counts on playlists.
+- The running version shows in the header.
+
+### Fixed
+
+- Downloads now get the quality you chose, instead of sometimes falling
+  back to 360p.
+- Marking a video watched while it downloads no longer gets lost.
+
+### Upgrade notes
+
+- `YARRTUBE_RECONCILE_INTERVAL_SECONDS` is gone: each channel and playlist
+  now has its own interval (3 hours by default), editable in the web UI.
+- `:latest` now moves only on stable releases. To get every change as it's
+  merged, use `:edge`. See [Image tags](doc/INSTALLATION.md#image-tags).
+- API: `PATCH /api/playlists/{id}` no longer requires `exclude_from_home`.
 
 ## [0.9.0] - 2026-10-13
 
@@ -55,7 +91,7 @@ Existing libraries need a one-time migration. Read
   ([b0a6358], @jason-s13r)
 - The image builds with podman. ([491c8ff], @jason-s13r)
 
-[Unreleased]: https://github.com/sergigp/yarrtube/compare/v0.9.0...HEAD
+[0.10.0]: https://github.com/sergigp/yarrtube/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/sergigp/yarrtube/compare/v0.8.0...v0.9.0
 [33a1416]: https://github.com/sergigp/yarrtube/commit/33a1416
 [d4b84eb]: https://github.com/sergigp/yarrtube/commit/d4b84eb

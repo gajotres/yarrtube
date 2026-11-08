@@ -1,4 +1,7 @@
-use crate::domain::video::{HomeVideoView, HomeVideos, VideoSource, VideoView};
+use crate::domain::video::{
+    CategoryVideoView, HomeCategorySection, HomeVideoView, HomeVideos, VideoChapter, VideoSource,
+    VideoView,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +23,8 @@ pub struct RecordProgressResponse {
 #[derive(Debug, Serialize, PartialEq)]
 pub struct VideoResponse {
     pub id: String,
+    /// This stored copy's id; `id` is the YouTube video's.
+    pub record_id: String,
     pub title: String,
     pub status: String,
     pub quality: Option<String>,
@@ -32,25 +37,46 @@ pub struct VideoResponse {
     pub position_seconds: i64,
     pub synced_at: Option<DateTime<Utc>>,
     pub published_at: Option<DateTime<Utc>>,
-    pub description: Option<String>,
     pub channel_name: Option<String>,
+    pub subtitle_language: Option<String>,
+    pub chapters: Vec<ChapterResponse>,
+    pub summary: Option<String>,
+}
+
+/// One of a video's chapters, in whole seconds from the start of the video.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct ChapterResponse {
+    pub start_seconds: i64,
+    pub end_seconds: i64,
+    pub title: String,
+}
+
+impl From<VideoChapter> for ChapterResponse {
+    fn from(chapter: VideoChapter) -> Self {
+        Self {
+            start_seconds: chapter.start_seconds,
+            end_seconds: chapter.end_seconds,
+            title: chapter.title,
+        }
+    }
 }
 
 impl From<VideoView> for VideoResponse {
     fn from(view: VideoView) -> Self {
         let video = view.video;
-        let (published_at, description, channel_name) = match view.metadata {
-            Some(metadata) => (
-                Some(metadata.published_at),
-                Some(metadata.plot),
-                Some(metadata.studio),
-            ),
-            None => (None, None, None),
+        let summary = view
+            .summary
+            .map(|summary| summary.text.as_str().to_string());
+        let (published_at, channel_name) = match view.metadata {
+            Some(metadata) => (Some(metadata.published_at), Some(metadata.studio)),
+            None => (None, None),
         };
         Self {
+            subtitle_language: video.subtitle_language(),
             watched: video.is_watched(),
             position_seconds: video.playback_position.seconds(),
             id: video.youtube_id.as_str().to_string(),
+            record_id: video.id.as_str().to_string(),
             title: video.title,
             status: video.status.as_str().to_string(),
             quality: video.quality.map(|q| q.as_str().to_string()),
@@ -61,13 +87,19 @@ impl From<VideoView> for VideoResponse {
             updated_at: video.updated_at,
             synced_at: video.synced_at,
             published_at,
-            description,
             channel_name,
+            chapters: video
+                .chapters
+                .unwrap_or_default()
+                .into_iter()
+                .map(ChapterResponse::from)
+                .collect(),
+            summary,
         }
     }
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct HomeVideoSourceResponse {
     pub kind: String,
     pub id: String,
@@ -76,21 +108,36 @@ pub struct HomeVideoSourceResponse {
     pub avatar_filename: Option<String>,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Deserialize)]
+pub struct SearchVideosQuery {
+    #[serde(default)]
+    pub q: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SearchVideosResponse {
+    pub videos: Vec<HomeVideoResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct HomeVideoResponse {
     pub id: String,
+    /// This stored copy's id; `id` is the YouTube video's.
+    pub record_id: String,
     pub title: String,
     pub thumbnail_filename: Option<String>,
     pub duration_seconds: Option<i64>,
     pub watched: bool,
     pub position_seconds: i64,
+    pub published_at: Option<DateTime<Utc>>,
     pub source: HomeVideoSourceResponse,
+    pub category_ids: Vec<String>,
 }
 
-impl From<HomeVideoView> for HomeVideoResponse {
-    fn from(view: HomeVideoView) -> Self {
-        let source = match view.source {
-            VideoSource::Playlist { id, name, path } => HomeVideoSourceResponse {
+impl From<VideoSource> for HomeVideoSourceResponse {
+    fn from(source: VideoSource) -> Self {
+        match source {
+            VideoSource::Playlist { id, name, path } => Self {
                 kind: "playlist".to_string(),
                 id: id.as_str().to_string(),
                 name: name.as_str().to_string(),
@@ -102,22 +149,97 @@ impl From<HomeVideoView> for HomeVideoResponse {
                 name,
                 path,
                 avatar_filename,
-            } => HomeVideoSourceResponse {
+            } => Self {
                 kind: "channel".to_string(),
                 id: handle.as_str().to_string(),
                 name,
                 path: path.as_str().to_string(),
                 avatar_filename,
             },
-        };
+        }
+    }
+}
+
+impl From<HomeVideoView> for HomeVideoResponse {
+    fn from(view: HomeVideoView) -> Self {
+        let source = HomeVideoSourceResponse::from(view.source);
         Self {
             id: view.youtube_id.as_str().to_string(),
+            record_id: view.record_id.as_str().to_string(),
             title: view.title,
             thumbnail_filename: view.thumbnail_filename,
             duration_seconds: view.duration_seconds,
             watched: view.watched,
             position_seconds: view.position_seconds,
+            published_at: view.published_at,
             source,
+            category_ids: view
+                .category_ids
+                .iter()
+                .map(|id| id.as_str().to_string())
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct CategoryVideoResponse {
+    pub id: String,
+    /// This stored copy's id; `id` is the YouTube video's.
+    pub record_id: String,
+    pub title: String,
+    pub status: String,
+    pub quality: Option<String>,
+    pub filename: Option<String>,
+    pub thumbnail_filename: Option<String>,
+    pub duration_seconds: Option<i64>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub watched: bool,
+    pub position_seconds: i64,
+    pub synced_at: Option<DateTime<Utc>>,
+    pub published_at: Option<DateTime<Utc>>,
+    pub channel_name: Option<String>,
+    pub subtitle_language: Option<String>,
+    pub chapters: Vec<ChapterResponse>,
+    pub summary: Option<String>,
+    pub source: HomeVideoSourceResponse,
+    pub category_ids: Vec<String>,
+}
+
+impl From<CategoryVideoView> for CategoryVideoResponse {
+    fn from(view: CategoryVideoView) -> Self {
+        // The same fields, mapped the same way, as a source's video listing.
+        let video = VideoResponse::from(VideoView {
+            video: view.video,
+            metadata: view.metadata,
+            summary: view.summary,
+        });
+        Self {
+            id: video.id,
+            record_id: video.record_id,
+            title: video.title,
+            status: video.status,
+            quality: video.quality,
+            filename: video.filename,
+            thumbnail_filename: video.thumbnail_filename,
+            duration_seconds: video.duration_seconds,
+            created_at: video.created_at,
+            updated_at: video.updated_at,
+            watched: video.watched,
+            position_seconds: video.position_seconds,
+            synced_at: video.synced_at,
+            published_at: video.published_at,
+            channel_name: video.channel_name,
+            subtitle_language: video.subtitle_language,
+            chapters: video.chapters,
+            summary: video.summary,
+            source: HomeVideoSourceResponse::from(view.source),
+            category_ids: view
+                .category_ids
+                .iter()
+                .map(|id| id.as_str().to_string())
+                .collect(),
         }
     }
 }
@@ -125,6 +247,7 @@ impl From<HomeVideoView> for HomeVideoResponse {
 #[derive(Debug, Serialize, PartialEq)]
 pub struct HomeResponse {
     pub continue_watching: Vec<HomeVideoResponse>,
+    pub categories: Vec<HomeCategorySectionResponse>,
     pub quick_watches: Vec<HomeVideoResponse>,
     pub latest: Vec<HomeVideoResponse>,
 }
@@ -133,8 +256,28 @@ impl From<HomeVideos> for HomeResponse {
     fn from(home: HomeVideos) -> Self {
         Self {
             continue_watching: cards(home.continue_watching),
+            categories: home.categories.into_iter().map(Into::into).collect(),
             quick_watches: cards(home.quick_watches),
             latest: cards(home.latest),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct HomeCategorySectionResponse {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub videos: Vec<HomeVideoResponse>,
+}
+
+impl From<HomeCategorySection> for HomeCategorySectionResponse {
+    fn from(section: HomeCategorySection) -> Self {
+        Self {
+            id: section.id.as_str().to_string(),
+            name: section.name.as_str().to_string(),
+            color: section.color.as_str().to_string(),
+            videos: cards(section.videos),
         }
     }
 }

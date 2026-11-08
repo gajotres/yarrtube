@@ -1,5 +1,14 @@
 import { useState, type ReactNode } from 'react'
-import { CheckCheck, EllipsisVertical, Eye, EyeOff, SlidersHorizontal, Trash2 } from 'lucide-react'
+import {
+  Bell,
+  BellOff,
+  CheckCheck,
+  EllipsisVertical,
+  Eye,
+  EyeOff,
+  SlidersHorizontal,
+  Trash2,
+} from 'lucide-react'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -9,6 +18,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { errorMessage } from '@/lib/errorMessage'
 import { homeSettingAction } from '@/lib/homeSetting'
+import { unwatchedCountSettingAction } from '@/lib/unwatchedCountSetting'
 import { cn } from '@/lib/utils'
 
 interface EntryActionsMenuProps {
@@ -20,11 +30,14 @@ interface EntryActionsMenuProps {
   leadingItems?: ReactNode
   /** Replaces the trigger's default vertical "⋮" icon. */
   triggerIcon?: ReactNode
-  /** Channels only: marks every downloaded video watched. */
+  /** Marks every downloaded video watched. */
   onMarkWatched?: (() => Promise<void>) | undefined
   /** Playlists only: the current setting; undefined hides the home item. */
   excludedFromHome?: boolean | undefined
   onSetExcludedFromHome?: ((excluded: boolean) => Promise<void>) | undefined
+  /** Playlists only: the current setting; undefined hides the item. */
+  unwatchedCountHidden?: boolean | undefined
+  onSetUnwatchedCountHidden?: ((hidden: boolean) => Promise<void>) | undefined
   /** Opens the edit channel or playlist dialog, which the caller owns. */
   onEditRequest?: (() => void) | undefined
   /** Asks for confirmation; the caller owns the confirm dialog. */
@@ -33,9 +46,9 @@ interface EntryActionsMenuProps {
 }
 
 /**
- * A "⋮" menu of actions on one channel or playlist, shared by its sidebar row
- * and its page header. It alerts when marking watched or changing the home
- * setting fails, leaving the entry as it was.
+ * A "⋮" menu of actions on one sidebar row (channel, playlist or category).
+ * It alerts when marking watched or changing the home
+ * or unwatched count setting fails, leaving the entry as it was.
  */
 export function EntryActionsMenu({
   name,
@@ -45,14 +58,22 @@ export function EntryActionsMenu({
   onMarkWatched,
   excludedFromHome,
   onSetExcludedFromHome,
+  unwatchedCountHidden,
+  onSetUnwatchedCountHidden,
   onEditRequest,
   onDeleteRequest,
   className,
 }: EntryActionsMenuProps) {
   const [markingWatched, setMarkingWatched] = useState(false)
   const offersHomeItem = excludedFromHome !== undefined && onSetExcludedFromHome !== undefined
+  const offersUnwatchedCountItem =
+    unwatchedCountHidden !== undefined && onSetUnwatchedCountHidden !== undefined
   const hasItemsAboveDelete =
-    Boolean(leadingItems) || Boolean(onMarkWatched) || offersHomeItem || Boolean(onEditRequest)
+    Boolean(leadingItems) ||
+    Boolean(onMarkWatched) ||
+    offersHomeItem ||
+    offersUnwatchedCountItem ||
+    Boolean(onEditRequest)
 
   return (
     // Non-modal so opening the delete confirmation from it doesn't leave the
@@ -101,6 +122,22 @@ export function EntryActionsMenu({
           >
             {excludedFromHome ? <Eye /> : <EyeOff />}
             {excludedFromHome ? 'Include in home' : 'Exclude from home'}
+          </DropdownMenuItem>
+        )}
+        {offersUnwatchedCountItem && (
+          <DropdownMenuItem
+            onSelect={async () => {
+              try {
+                await onSetUnwatchedCountHidden(!unwatchedCountHidden)
+              } catch (err) {
+                window.alert(
+                  `Failed to ${unwatchedCountSettingAction(!unwatchedCountHidden, name)}: ${errorMessage(err)}`,
+                )
+              }
+            }}
+          >
+            {unwatchedCountHidden ? <Bell /> : <BellOff />}
+            {unwatchedCountHidden ? 'Show unwatched count' : 'Hide unwatched count'}
           </DropdownMenuItem>
         )}
         {onEditRequest && (

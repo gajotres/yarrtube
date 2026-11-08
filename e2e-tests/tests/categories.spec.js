@@ -1,0 +1,270 @@
+import { test, expect } from '../helpers/fixtures.js'
+import { openAddChannelDialog, fillChannel } from '../helpers/addDialog.js'
+import { addChannel } from '../helpers/seed.js'
+import { CHANNEL } from '../helpers/fakeYoutube.js'
+import { assertVideoPlays } from '../helpers/video.js'
+import { expectImageLoaded } from '../helpers/media.js'
+import {
+  expectDrawerClosed,
+  openDrawer,
+  sectionHeading,
+  sectionRows,
+} from '../helpers/sidebar.js'
+
+const CHANNEL_HANDLE = CHANNEL.handle
+
+// Deleting the open category can refetch its videos before the view leaves it.
+test.use({
+  expectedApiErrors: [{ method: 'GET', path: /^\/api\/categories\/[^/]+\/videos$/, status: 404 }],
+})
+
+test('category on mobile: add from the drawer, edit settings full screen, then add from the heading @mobile', async ({ page }) => {
+  await page.goto('/')
+
+  const dialog = page.getByRole('dialog')
+  const addCategory = page.getByRole('button', { name: 'Add category', exact: true })
+
+  await test.step('the add row closes the drawer before its dialog opens', async () => {
+    await openDrawer(page)
+    await expect(addCategory).toHaveText('Add category')
+    await addCategory.tap()
+    await expectDrawerClosed(page)
+    await expect(dialog).toContainText('Add category')
+  })
+
+  await test.step('the dialog fills the screen, and creating lands on the category', async () => {
+    await expect(dialog).toContainText('No channels or playlists to add yet.')
+    const { width, height } = page.viewportSize()
+    const box = await dialog.boundingBox()
+    expect([box.x, box.y, box.width, box.height].map(Math.round)).toEqual([0, 0, width, height])
+    await dialog.getByLabel('Name').fill('Chess')
+    await dialog.getByRole('button', { name: 'Create', exact: true }).click()
+    await expect(page).toHaveURL(/\/categories\/[^?]+$/)
+    await dialog.waitFor({ state: 'hidden' })
+  })
+
+  await test.step('its category settings dialog is full screen too', async () => {
+    await page.getByRole('button', { name: 'Add channels and playlists' }).click()
+    await expect(dialog).toContainText('Edit Chess settings')
+    const { width, height } = page.viewportSize()
+    const box = await dialog.boundingBox()
+    expect([box.x, box.y, box.width, box.height].map(Math.round)).toEqual([0, 0, width, height])
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await dialog.waitFor({ state: 'hidden' })
+  })
+
+  await test.step('with a category, the heading "+" adds the next one', async () => {
+    await openDrawer(page)
+    await expect(sectionRows(page, 'Categories')).toHaveText(['Chess'])
+    // The "+" is an icon: its name comes from its label, it has no text.
+    await expect(addCategory).toHaveText('')
+    await addCategory.tap()
+    await expectDrawerClosed(page)
+    await expect(dialog).toContainText('Add category')
+  })
+})
+
+test('category lifecycle: create, edit settings, rename, assign from the add channel dialog, view, mark watched, delete', async ({ page }) => {
+  await page.goto('/')
+
+  const dialog = page.getByRole('dialog')
+  const categoryRows = sectionRows(page, 'Categories')
+  const summary = page.locator('main').getByText(/^\d+ sources? · /)
+  const openCategorySettings = async (name) => {
+    await page.getByRole('button', { name: 'Edit settings' }).click()
+    await expect(dialog).toContainText(`Edit ${name} settings`)
+  }
+
+  await test.step('create it from the sidebar, landing on its view', async () => {
+    await page.getByRole('button', { name: 'Add category', exact: true }).click()
+    await expect(dialog.getByLabel('Name')).toBeFocused()
+    await dialog.getByLabel('Name').fill('Chess')
+    await dialog.getByRole('button', { name: 'Create', exact: true }).click()
+    await expect(page).toHaveURL(/\/categories\/[^?]+$/)
+    await dialog.waitFor({ state: 'hidden' })
+    await expect(categoryRows).toHaveText(['Chess'])
+  })
+
+  await test.step('rename it in place', async () => {
+    await page.getByRole('button', { name: 'Rename', exact: true }).click()
+    const name = page.getByRole('textbox', { name: 'Name', exact: true })
+    await name.fill('Board games')
+    await name.press('Enter')
+    await expect(page.getByRole('heading', { name: 'Board games', exact: true })).toBeVisible()
+    await expect(categoryRows).toHaveText([/^Board games/])
+  })
+
+  const channelName = await test.step('assign a new channel to it from the add channel dialog', async () => {
+    await openAddChannelDialog(page)
+    await fillChannel(page, { handle: CHANNEL_HANDLE, videoLimit: 1 })
+    const categoryChip = dialog.getByRole('button', { name: 'Board games', exact: true })
+    await categoryChip.click()
+    await expect(categoryChip).toHaveAttribute('aria-pressed', 'true')
+    await dialog.getByRole('button', { name: /^Create Channel/ }).click()
+    await dialog.waitFor({ state: 'hidden' })
+    const [{ name }] = await (await page.request.get('/api/channels')).json()
+    await expect(summary).toHaveText(/^1 source · /)
+    return name
+  })
+
+  await test.step('remove it and add it back with the chips', async () => {
+    await openCategorySettings('Board games')
+    const chip = dialog.getByRole('button', { name: channelName, exact: true })
+    await expect(chip).toHaveAttribute('aria-pressed', 'true')
+    await chip.click()
+    await expect(dialog).toContainText('−1 removed')
+    await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+    await dialog.waitFor({ state: 'hidden' })
+    await expect(page.getByRole('region', { name: 'Nothing in Board games yet' })).toBeVisible()
+
+    await page.getByRole('button', { name: 'Add channels and playlists' }).click()
+    const search = dialog.getByRole('searchbox', { name: 'Search channels and playlists' })
+    await search.fill(channelName)
+    await search.press('Enter')
+    await expect(dialog.getByRole('button', { name: channelName, exact: true })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    await expect(dialog).toContainText('+1 added')
+    await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+    await dialog.waitFor({ state: 'hidden' })
+    await expect(summary).toHaveText(/^1 source · /)
+  })
+
+  await test.step('wait for the channel video and mark it all watched', async () => {
+    // The video card shows once the channel's download finishes.
+    const cards = page.locator('main ul li')
+    await expect(cards).toHaveCount(1, { timeout: 30_000 })
+    // The sidebar refetches its badges on an interval, not when a download ends.
+    await page.reload()
+    await expect(categoryRows.getByLabel('1 unwatched')).toBeVisible()
+    const marked = page.waitForResponse(
+      (response) => response.url().endsWith('/watched') && response.request().method() === 'POST',
+    )
+    await page.locator('main').getByRole('button', { name: /^More actions for / }).click()
+    await page.getByRole('menuitem', { name: 'Mark all watched' }).click()
+    expect((await marked).status()).toBe(204)
+    await expect(cards.getByRole('img', { name: 'Watched' })).toBeVisible()
+    await expect(categoryRows.getByLabel(/ unwatched$/)).toHaveCount(0)
+  })
+
+  await test.step('let the channel finish fetching its subtitles', async () => {
+    // Deleting the channel while it still writes its folder would leave files
+    // behind for the next spec tracking the same channel.
+    await expect
+      .poll(
+        async () => {
+          const response = await page.request.get(
+            `/api/channels/${encodeURIComponent(CHANNEL_HANDLE)}/videos`,
+          )
+          return (await response.json()).map((video) => video.subtitle_language !== null)
+        },
+        { timeout: 15_000 },
+      )
+      .toEqual([true])
+  })
+
+  await test.step('fold it with its heading', async () => {
+    await sectionHeading(page, 'Categories').click()
+    await expect(categoryRows).toHaveCount(0)
+    await sectionHeading(page, 'Categories').click()
+    await expect(categoryRows).toHaveText([/^Board games/])
+  })
+
+  await test.step('delete it from its actions menu, keeping its channel', async () => {
+    await page.getByRole('button', { name: 'More actions for Board games' }).click()
+    await page.getByRole('menuitem', { name: 'Delete', exact: true }).click()
+    await expect(dialog).toContainText(
+      '"Board games" holds 1 channels and playlists. None of them, nor any video, will be deleted.',
+    )
+    await dialog.getByRole('button', { name: 'Delete', exact: true }).click()
+    await dialog.waitFor({ state: 'hidden' })
+    await expect(categoryRows).toHaveCount(0)
+    await expect(page).toHaveURL(/\/$/)
+    await expect(sectionRows(page, 'Channels')).toHaveCount(1)
+  })
+})
+
+test.describe('with a downloaded channel in a category', () => {
+  let seeded
+  let categoryId
+  test.beforeEach(async ({ request }) => {
+    seeded = await addChannel(request, CHANNEL, { videoLimit: 1 })
+    const category = await request.post('/api/categories', { data: { name: 'Watch later' } })
+    expect(category.ok(), await category.text()).toBeTruthy()
+    categoryId = (await category.json()).id
+    const members = await request.put(`/api/categories/${categoryId}/members`, {
+      data: { channels: [seeded.handle], playlists: [] },
+    })
+    expect(members.ok(), await members.text()).toBeTruthy()
+  })
+
+  test('category dialog: create with a prompt and a source in one request, then recolor', async ({
+    page,
+    request,
+    daemon,
+  }) => {
+    const preferences = await request.patch('/api/preferences', {
+      data: { ollama_url: daemon.ollamaUrl, ai_enabled: true, categorization_enabled: true },
+    })
+    expect(preferences.ok(), await preferences.text()).toBeTruthy()
+    const [{ name: channelName }] = await (await request.get('/api/channels')).json()
+    const dialog = page.getByRole('dialog', { name: 'Add category' })
+
+    await page.goto('/')
+    await page.getByRole('button', { name: 'Add category', exact: true }).click()
+    await dialog.getByLabel('Name').fill('Chess')
+    await dialog.getByRole('radio', { name: 'Violet' }).check()
+    await dialog.getByRole('textbox', { name: 'AI prompt' }).fill('Chess games')
+    await dialog.getByRole('button', { name: 'About AI prompt' }).click()
+    await expect(page.getByRole('region', { name: 'AI prompt guide' })).toContainText('Belongs:')
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('region', { name: 'AI prompt guide' })).toHaveCount(0)
+    await dialog.getByRole('button', { name: channelName, exact: true }).click()
+    const created = page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/api/categories') && response.request().method() === 'POST',
+    )
+    await dialog.getByRole('button', { name: 'Create', exact: true }).click()
+
+    const response = await created
+    expect(response.status()).toBe(201)
+    expect(await response.json()).toMatchObject({
+      name: 'Chess',
+      color: '#8b5cf6',
+      ai_prompt: 'Chess games',
+      channels: [seeded.handle],
+      playlists: [],
+    })
+    await dialog.waitFor({ state: 'hidden' })
+    await expect(page.locator('main').getByText(/^1 source · /)).toBeVisible()
+
+    await page.getByRole('button', { name: 'Edit settings' }).click()
+    const settings = page.getByRole('dialog', { name: 'Edit Chess settings' })
+    await settings.getByRole('radio', { name: 'Teal' }).check()
+    await settings.getByRole('button', { name: 'Save', exact: true }).click()
+    await settings.waitFor({ state: 'hidden' })
+    const { categories } = await (await request.get('/api/categories')).json()
+    expect(categories.find((category) => category.name === 'Chess').color).toBe('#14b8a6')
+  })
+
+  test('category card plays its video in the category, queued with the category', async ({
+    page,
+  }) => {
+    const [{ id, title }] = seeded.videos
+    await page.goto(`/categories/${encodeURIComponent(categoryId)}`)
+
+    const card = page.locator('main li').filter({ hasText: title })
+    await expectImageLoaded(card.locator('img').first())
+
+    await page.locator('main').getByRole('link', { name: title, exact: true }).first().click()
+
+    await expect(page).toHaveURL(
+      new RegExp(`/categories/${encodeURIComponent(categoryId)}\\?video=${id}$`),
+    )
+    await expect(page.getByRole('heading', { name: 'Watch later', exact: true })).toBeVisible()
+    await expect(page.locator('main h3').first()).toHaveText(title)
+    await expect(page.locator('video')).toHaveAttribute('src', new RegExp(`^/media/${seeded.path}/`))
+    await assertVideoPlays(page)
+  })
+})

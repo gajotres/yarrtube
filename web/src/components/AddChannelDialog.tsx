@@ -1,9 +1,16 @@
 import { useState, type FormEvent } from 'react'
 import { createChannel } from '@/api/client'
-import { useChannelPreview, useChannels, useInvalidateLibrary } from '@/api/queries'
+import {
+  useCategoriesShown,
+  useChannelPreview,
+  useChannels,
+  useInvalidateLibrary,
+} from '@/api/queries'
 import type { ChannelListItem, ChannelPreview } from '@/api/types'
 import { useLookup, type Lookup } from '@/hooks/useLookup'
 import { useSaveLocation, type LocationValue } from '@/hooks/useSaveLocation'
+import { useSaveSourceCategories } from '@/hooks/useSaveSourceCategories'
+import { errorMessage } from '@/lib/errorMessage'
 import { deriveChannelPathSegment } from '@/lib/channelHandle'
 import { DEFAULT_INTERVAL_FORM, intervalMinutes, type IntervalForm } from '@/lib/reconcileInterval'
 import { channelNoticeLead } from '@/lib/noticeLead'
@@ -11,6 +18,8 @@ import { DestinationNotice, DestinationPath } from './DestinationNotice'
 import { lookupNotice } from './lookupNotice'
 import { FolderNameField } from './FolderNameField'
 import { ReconcileIntervalField } from './ReconcileIntervalField'
+import { SourceAiSection } from './SourceAiSection'
+import { CategoryPicker } from './CategoryPicker'
 import { SaveToField } from './SaveToField'
 import { Thumbnail } from './Thumbnail'
 import { VideoQualityField } from './VideoQualityField'
@@ -94,7 +103,12 @@ function AddChannelForm({ onClose }: { onClose: () => void }) {
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [error, setError] = useState<Error | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [categoryIds, setCategoryIds] = useState<string[]>([])
+  const [summariesEnabled, setSummariesEnabled] = useState(false)
+  const [categorizationEnabled, setCategorizationEnabled] = useState(false)
   const invalidateLibrary = useInvalidateLibrary()
+  const saveSourceCategories = useSaveSourceCategories()
+  const withCategories = useCategoriesShown()
   const entered = form.channel.trim()
   const channels = useChannels()
   const lookup = useLookup(entered, useChannelPreview, channels.data, sameHandle)
@@ -117,15 +131,26 @@ function AddChannelForm({ onClose }: { onClose: () => void }) {
     setSubmitting(true)
     setError(null)
     try {
-      await createChannel({
+      const channel = await createChannel({
         channel: form.channel,
         quality: form.quality,
         video_limit: Number(form.video_limit),
         path: location.value.path,
         reconcile_interval_minutes: reconcileIntervalMinutes,
+        summaries_enabled: summariesEnabled,
+        categorization_enabled: categorizationEnabled,
       })
       location.remember()
       invalidateLibrary()
+      if (withCategories) {
+        try {
+          await saveSourceCategories({ kind: 'channel', id: channel.id }, categoryIds)
+        } catch (err) {
+          throw new Error(
+            `The channel was added, but its categories were not saved: ${errorMessage(err)}`,
+          )
+        }
+      }
       onClose()
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)))
@@ -153,6 +178,21 @@ function AddChannelForm({ onClose }: { onClose: () => void }) {
       {entered && (
         <ChannelNotice lookup={lookup} videoLimit={form.video_limit} location={location.value} />
       )}
+
+      {withCategories && <CategoryPicker value={categoryIds} onChange={setCategoryIds} />}
+
+      <SourceAiSection
+        idPrefix="add-channel"
+        summaries={{
+          checked: summariesEnabled,
+          onChange: setSummariesEnabled,
+        }}
+        categorization={{
+          checked: categorizationEnabled,
+          onChange: setCategorizationEnabled,
+        }}
+        onNavigateAway={onClose}
+      />
 
       <div className="min-w-0 border-t border-border pt-4">
         <button
@@ -194,7 +234,11 @@ function AddChannelForm({ onClose }: { onClose: () => void }) {
         </div>
       </div>
 
-      {error && <p className="text-sm text-destructive">{error.message}</p>}
+      {error && (
+        <p role="alert" className="text-sm text-destructive">
+          {error.message}
+        </p>
+      )}
       <Button type="submit" disabled={!canSubmit} className="self-start">
         {submitting ? 'Creating…' : 'Create Channel'}
       </Button>

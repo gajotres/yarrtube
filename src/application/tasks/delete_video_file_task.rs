@@ -19,12 +19,12 @@ impl DeleteVideoFileTask {
 
 impl TaskHandler for DeleteVideoFileTask {
     fn handle(&self, payload: &str, _is_last_attempt: bool) -> anyhow::Result<()> {
-        let (filename, thumbnail_filename, output_dir) =
-            Task::decode_delete_video_file_payload(payload)?;
+        let payload = Task::decode_delete_video_file_payload(payload)?;
         self.video_file_deleter.delete_video_file(
-            filename,
-            thumbnail_filename,
-            Path::new(&output_dir),
+            payload.filename,
+            payload.thumbnail_filename,
+            payload.subtitle_filename,
+            Path::new(&payload.output_dir),
         )
     }
 }
@@ -183,6 +183,60 @@ mod tests {
     }
 
     #[test]
+    fn it_should_delete_an_episodes_subtitle_file() {
+        let video_file_repository = Arc::new(FakeVideoFileRepository::default());
+        let task = DeleteVideoFileTask::new(VideoFileDeleter::new(
+            video_file_repository.clone(),
+            "/videos",
+        ));
+
+        let result = run(
+            &task,
+            &Task::DeleteVideoFile {
+                filename: Some("Season 2026/S2026E031501 - My Video.mp4".to_string()),
+                thumbnail_filename: None,
+                subtitle_filename: Some("Season 2026/S2026E031501 - My Video.en.srt".to_string()),
+                output_dir: "/videos/my-playlist".to_string(),
+            }
+            .payload()
+            .to_string(),
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            *video_file_repository.deleted_calls.lock().unwrap(),
+            vec![
+                deleted("Season 2026/S2026E031501 - My Video.mp4"),
+                deleted("Season 2026/S2026E031501 - My Video.nfo"),
+                deleted("Season 2026/S2026E031501 - My Video.en.srt"),
+            ]
+        );
+    }
+
+    #[test]
+    fn it_should_decode_a_payload_queued_without_a_subtitle_filename() {
+        let video_file_repository = Arc::new(FakeVideoFileRepository::default());
+        let task = DeleteVideoFileTask::new(VideoFileDeleter::new(
+            video_file_repository.clone(),
+            "/videos",
+        ));
+
+        let result = run(
+            &task,
+            r#"{"filename": "Season 2026/S2026E031501 - My Video.mp4", "thumbnail_filename": null, "output_dir": "/videos/my-playlist"}"#,
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            *video_file_repository.deleted_calls.lock().unwrap(),
+            vec![
+                deleted("Season 2026/S2026E031501 - My Video.mp4"),
+                deleted("Season 2026/S2026E031501 - My Video.nfo"),
+            ]
+        );
+    }
+
+    #[test]
     fn it_should_delete_a_legacy_per_video_folder() {
         let video_file_repository = Arc::new(FakeVideoFileRepository::default());
         let task = DeleteVideoFileTask::new(VideoFileDeleter::new(
@@ -206,6 +260,7 @@ mod tests {
         Task::DeleteVideoFile {
             filename: filename.map(str::to_string),
             thumbnail_filename: thumbnail_filename.map(str::to_string),
+            subtitle_filename: None,
             output_dir: "/videos/my-playlist".to_string(),
         }
         .payload()

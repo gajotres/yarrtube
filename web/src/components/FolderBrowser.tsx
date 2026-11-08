@@ -9,6 +9,8 @@ interface FolderBrowserProps {
   root: string
   occupied: Map<string, string>
   stagedFrom: string | null
+  /** What the listing says of a folder that doesn't exist yet. */
+  stagedNote?: string
   onNavigate: (path: string) => void
   onStage: (path: string) => void
   onClose: () => void
@@ -56,6 +58,7 @@ export function FolderBrowser({
   root,
   occupied,
   stagedFrom,
+  stagedNote = 'Does not exist yet — created on the first download.',
   onNavigate,
   onStage,
   onClose,
@@ -116,6 +119,10 @@ export function FolderBrowser({
       setNewFolderError('Folder name must not contain "/".')
       return
     }
+    if (name === '.' || name === '..') {
+      setNewFolderError('Folder name must not be "." or "..".')
+      return
+    }
 
     const next = join(parent, name)
     if (entries.includes(name)) {
@@ -160,7 +167,7 @@ export function FolderBrowser({
         <p className="text-xs text-destructive">{listingError.message}</p>
       ) : entries.length === 0 ? (
         <p className="px-1 py-0.5 text-xs text-muted-foreground">
-          {staged ? 'Does not exist yet — created on the first download.' : 'No subfolders here.'}
+          {staged ? stagedNote : 'No subfolders here.'}
         </p>
       ) : (
         <ul className="flex max-h-40 min-w-0 flex-col overflow-y-auto">

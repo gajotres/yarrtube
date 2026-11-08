@@ -1,7 +1,15 @@
 import { useState } from 'react'
-import { Activity, Download, RotateCw, Trash2, Wrench, type LucideIcon } from 'lucide-react'
+import {
+  Activity,
+  Download,
+  RotateCw,
+  Sparkles,
+  Trash2,
+  Wrench,
+  type LucideIcon,
+} from 'lucide-react'
 import { reconcileChannel, reconcilePlaylist } from '@/api/client'
-import { useInvalidateTasks, useTasks } from '@/api/queries'
+import { useAiEnabled, useInvalidateTasks, useTasks } from '@/api/queries'
 import { formatRelativeTime } from '@/lib/formatDateTime'
 import {
   describeTask,
@@ -12,7 +20,7 @@ import {
   taskCategory,
   taskKind,
   TASK_SEARCH_THRESHOLD,
-  TASK_TABS,
+  taskTabs,
   type SyncTarget,
   type TaskKind,
   type TaskTab,
@@ -28,10 +36,8 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { VIEW_WIDTH } from '@/lib/viewWidth'
 import { cn } from '@/lib/utils'
-
-// The view keeps to a readable width, centred beside the sidebar.
-const VIEW_WIDTH = 'mx-auto w-full max-w-3xl'
 
 const CATEGORY_BADGE_VARIANT: Record<string, 'default' | 'outline' | 'secondary'> = {
   running: 'default',
@@ -43,6 +49,7 @@ const TAB_LABELS: Record<TaskTab, string> = {
   active: 'Active',
   downloads: 'Downloads',
   syncs: 'Syncs',
+  ai: 'AI',
   other: 'Other',
 }
 
@@ -50,6 +57,7 @@ const TAB_ICON: Record<TaskTab, LucideIcon> = {
   active: Activity,
   downloads: Download,
   syncs: RotateCw,
+  ai: Sparkles,
   other: Wrench,
 }
 
@@ -57,28 +65,45 @@ const KIND_ICON: Record<TaskKind, LucideIcon> = {
   download: Download,
   sync: RotateCw,
   delete: Trash2,
+  ai: Sparkles,
   maintenance: Wrench,
 }
 
+/**
+ * The tasks view: a "Tasks" heading over the task tabs, at a readable width
+ * and aligned to the left like the other views.
+ */
 export function TasksView() {
+  return (
+    <div className={VIEW_WIDTH}>
+      <h2 className="mb-4 truncate font-heading text-lg font-semibold text-foreground md:mb-6 md:text-xl">
+        Tasks
+      </h2>
+      <TaskTabs />
+    </div>
+  )
+}
+
+function TaskTabs() {
   const { data: tasks, error } = useTasks()
+  const aiEnabled = useAiEnabled()
   const [tab, setTab] = useState<TaskTab>('active')
   const [search, setSearch] = useState('')
 
   if (error) {
-    return <p className={cn(VIEW_WIDTH, 'text-sm text-destructive')}>Failed to load tasks: {error.message}</p>
+    return <p className="text-sm text-destructive">Failed to load tasks: {error.message}</p>
   }
 
   if (!tasks) {
-    return <p className={cn(VIEW_WIDTH, 'text-sm text-muted-foreground')}>Loading tasks…</p>
+    return <p className="text-sm text-muted-foreground">Loading tasks…</p>
   }
 
   if (tasks.length === 0) {
-    return <p className={cn(VIEW_WIDTH, 'text-sm text-muted-foreground')}>No pending or in-progress tasks.</p>
+    return <p className="text-sm text-muted-foreground">No pending or in-progress tasks.</p>
   }
 
-  const counts = tabCounts(tasks)
-  const tabTasks = tasksForTab(tasks, tab)
+  const counts = tabCounts(tasks, aiEnabled)
+  const tabTasks = tasksForTab(tasks, tab, aiEnabled)
   const showSearch = tabTasks.length > TASK_SEARCH_THRESHOLD
   const query = showSearch ? search.trim() : ''
   const rows = query ? tabTasks.filter((task) => matchesTask(task, query)) : tabTasks
@@ -86,7 +111,7 @@ export function TasksView() {
   return (
     <TooltipProvider>
       <Tabs
-        className={VIEW_WIDTH}
+        className="w-full"
         value={tab}
         onValueChange={(value) => {
           setTab(value as TaskTab)
@@ -94,7 +119,7 @@ export function TasksView() {
         }}
       >
         <TabsList variant="line">
-          {TASK_TABS.map((value) => {
+          {taskTabs(aiEnabled).map((value) => {
             const TabIcon = TAB_ICON[value]
             return (
               <TabsTrigger key={value} value={value}>

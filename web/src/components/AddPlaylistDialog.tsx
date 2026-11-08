@@ -1,16 +1,25 @@
 import { useState, type FormEvent } from 'react'
 import { createPlaylist } from '@/api/client'
-import { useInvalidateLibrary, usePlaylistPreview, usePlaylists } from '@/api/queries'
+import {
+  useCategoriesShown,
+  useInvalidateLibrary,
+  usePlaylistPreview,
+  usePlaylists,
+} from '@/api/queries'
 import type { PlaylistListItem, PlaylistPreview } from '@/api/types'
 import { useLookup, type Lookup } from '@/hooks/useLookup'
 import { useSaveLocation, type LocationValue } from '@/hooks/useSaveLocation'
+import { useSaveSourceCategories } from '@/hooks/useSaveSourceCategories'
+import { errorMessage } from '@/lib/errorMessage'
 import { playlistNoticeLead } from '@/lib/noticeLead'
 import { DEFAULT_INTERVAL_FORM, intervalMinutes, type IntervalForm } from '@/lib/reconcileInterval'
 import { DestinationNotice, DestinationPath } from './DestinationNotice'
 import { lookupNotice } from './lookupNotice'
 import { FolderNameField } from './FolderNameField'
 import { ReconcileIntervalField } from './ReconcileIntervalField'
+import { SourceAiSection } from './SourceAiSection'
 import { SaveToField } from './SaveToField'
+import { CategoryPicker } from './CategoryPicker'
 import { VideoQualityField } from './VideoQualityField'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
@@ -85,7 +94,12 @@ function AddPlaylistForm({ onClose }: { onClose: () => void }) {
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [error, setError] = useState<Error | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [categoryIds, setCategoryIds] = useState<string[]>([])
+  const [summariesEnabled, setSummariesEnabled] = useState(false)
+  const [categorizationEnabled, setCategorizationEnabled] = useState(false)
   const invalidateLibrary = useInvalidateLibrary()
+  const saveSourceCategories = useSaveSourceCategories()
+  const withCategories = useCategoriesShown()
   const entered = form.playlist.trim()
   const playlists = usePlaylists()
   const lookup = useLookup(entered, usePlaylistPreview, playlists.data, sameId)
@@ -108,15 +122,26 @@ function AddPlaylistForm({ onClose }: { onClose: () => void }) {
     setSubmitting(true)
     setError(null)
     try {
-      await createPlaylist({
+      const playlist = await createPlaylist({
         playlist: form.playlist,
         path: location.value.path,
         quality: form.quality,
         exclude_from_home: excludeFromHome,
         reconcile_interval_minutes: reconcileIntervalMinutes,
+        summaries_enabled: summariesEnabled,
+        categorization_enabled: categorizationEnabled,
       })
       location.remember()
       invalidateLibrary()
+      if (withCategories) {
+        try {
+          await saveSourceCategories({ kind: 'playlist', id: playlist.id }, categoryIds)
+        } catch (err) {
+          throw new Error(
+            `The playlist was added, but its categories were not saved: ${errorMessage(err)}`,
+          )
+        }
+      }
       onClose()
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)))
@@ -141,6 +166,21 @@ function AddPlaylistForm({ onClose }: { onClose: () => void }) {
       <SaveToField location={location} />
 
       {entered && <PlaylistNotice lookup={lookup} location={location.value} />}
+
+      {withCategories && <CategoryPicker value={categoryIds} onChange={setCategoryIds} />}
+
+      <SourceAiSection
+        idPrefix="add-playlist"
+        summaries={{
+          checked: summariesEnabled,
+          onChange: setSummariesEnabled,
+        }}
+        categorization={{
+          checked: categorizationEnabled,
+          onChange: setCategorizationEnabled,
+        }}
+        onNavigateAway={onClose}
+      />
 
       <div className="min-w-0 border-t border-border pt-4">
         <button
@@ -185,7 +225,11 @@ function AddPlaylistForm({ onClose }: { onClose: () => void }) {
         </div>
       </div>
 
-      {error && <p className="text-sm text-destructive">{error.message}</p>}
+      {error && (
+        <p role="alert" className="text-sm text-destructive">
+          {error.message}
+        </p>
+      )}
       <Button type="submit" disabled={!canSubmit} className="self-start">
         {submitting ? 'Creating…' : 'Create Playlist'}
       </Button>

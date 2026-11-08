@@ -93,13 +93,24 @@ impl ScheduledTask {
         self.retries + 1 >= MAX_ATTEMPTS
     }
 
-    /// The video a `download_video` task targets; `None` for any other
-    /// task type.
-    pub fn download_video_id(&self) -> Option<String> {
-        (self.task_type == "download_video")
-            .then(|| Task::decode_download_video_payload(&self.payload).ok())
+    /// The video a `sync_video` task targets; `None` for any other task
+    /// type.
+    pub fn sync_video_id(&self) -> Option<String> {
+        (self.task_type == "sync_video")
+            .then(|| Task::decode_sync_video_payload(&self.payload).ok())
             .flatten()
-            .map(|(video_id, _, _)| video_id)
+    }
+
+    /// The show directory this task writes to or deletes from, for a
+    /// per-video task; `None` for any other.
+    pub fn output_dir(&self) -> Option<String> {
+        Task::output_dir_of(&self.task_type, &self.payload)
+    }
+
+    /// The source path a `delete_playlist_files` / `delete_channel_files`
+    /// task removes; `None` for any other.
+    pub fn deleted_path(&self) -> Option<String> {
+        Task::deleted_path_of(&self.task_type, &self.payload)
     }
 
     /// Runs no later than `run_at`; a task already due earlier keeps its time.

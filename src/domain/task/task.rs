@@ -19,6 +19,7 @@ pub enum Task {
     DeleteVideoFile {
         filename: Option<String>,
         thumbnail_filename: Option<String>,
+        subtitle_filename: Option<String>,
         output_dir: String,
     },
     DeletePlaylistFiles {
@@ -33,6 +34,28 @@ pub enum Task {
     FetchThumbnail {
         video_id: String,
         output_dir: String,
+    },
+    FetchSubtitles {
+        video_id: String,
+        output_dir: String,
+    },
+    SyncVideo {
+        video_id: String,
+    },
+    SyncPlexLabels,
+    FetchChapters {
+        video_id: String,
+    },
+    UpgradeQuality {
+        video_id: String,
+        quality: String,
+        output_dir: String,
+    },
+    SummarizeVideo {
+        video_id: String,
+    },
+    CategorizeVideo {
+        video_id: String,
     },
 }
 
@@ -54,10 +77,13 @@ struct DownloadVideoPayload {
 }
 
 #[derive(Debug, Deserialize)]
-struct DeleteVideoFilePayload {
-    filename: Option<String>,
-    thumbnail_filename: Option<String>,
-    output_dir: String,
+pub struct DeleteVideoFilePayload {
+    pub filename: Option<String>,
+    pub thumbnail_filename: Option<String>,
+    /// Absent from tasks queued before subtitles existed.
+    #[serde(default)]
+    pub subtitle_filename: Option<String>,
+    pub output_dir: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,6 +107,35 @@ struct FetchThumbnailPayload {
     output_dir: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct FetchSubtitlesPayload {
+    video_id: String,
+    output_dir: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SyncVideoPayload {
+    video_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SyncPlexLabelsPayload {}
+
+#[derive(Debug, Deserialize)]
+struct SummarizeVideoPayload {
+    video_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CategorizeVideoPayload {
+    video_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FetchChaptersPayload {
+    video_id: String,
+}
+
 impl Task {
     pub fn task_type(&self) -> &'static str {
         match self {
@@ -92,6 +147,13 @@ impl Task {
             Self::DeleteChannelFiles { .. } => "delete_channel_files",
             Self::UpdateYtdlp => "update_ytdlp",
             Self::FetchThumbnail { .. } => "fetch_thumbnail",
+            Self::FetchSubtitles { .. } => "fetch_subtitles",
+            Self::SyncVideo { .. } => "sync_video",
+            Self::SyncPlexLabels => "sync_plex_labels",
+            Self::FetchChapters { .. } => "fetch_chapters",
+            Self::SummarizeVideo { .. } => "summarize_video",
+            Self::CategorizeVideo { .. } => "categorize_video",
+            Self::UpgradeQuality { .. } => "upgrade_quality",
         }
     }
 
@@ -107,10 +169,12 @@ impl Task {
             Self::DeleteVideoFile {
                 filename,
                 thumbnail_filename,
+                subtitle_filename,
                 output_dir,
             } => json!({
                 "filename": filename,
                 "thumbnail_filename": thumbnail_filename,
+                "subtitle_filename": subtitle_filename,
                 "output_dir": output_dir,
             }),
             Self::DeletePlaylistFiles { playlist_id, path } => json!({
@@ -126,6 +190,20 @@ impl Task {
                 video_id,
                 output_dir,
             } => json!({ "video_id": video_id, "output_dir": output_dir }),
+            Self::FetchSubtitles {
+                video_id,
+                output_dir,
+            } => json!({ "video_id": video_id, "output_dir": output_dir }),
+            Self::SyncVideo { video_id } => json!({ "video_id": video_id }),
+            Self::SyncPlexLabels => json!({}),
+            Self::FetchChapters { video_id } => json!({ "video_id": video_id }),
+            Self::SummarizeVideo { video_id } => json!({ "video_id": video_id }),
+            Self::CategorizeVideo { video_id } => json!({ "video_id": video_id }),
+            Self::UpgradeQuality {
+                video_id,
+                quality,
+                output_dir,
+            } => json!({ "video_id": video_id, "quality": quality, "output_dir": output_dir }),
         }
     }
 
@@ -151,24 +229,27 @@ impl Task {
     pub fn decode_download_video_payload(
         payload: &str,
     ) -> Result<(String, String, String), TaskError> {
-        let parsed: DownloadVideoPayload = serde_json::from_str(payload)
-            .map_err(|e| TaskError(format!("invalid download_video payload: {e}")))?;
-        Ok((parsed.video_id, parsed.quality, parsed.output_dir))
+        Self::decode_video_quality_payload(payload, "download_video")
+    }
+
+    /// Decodes an `upgrade_quality` task's raw JSON payload, as handed to a
+    /// `TaskHandler`, back into the video's surrogate ID, quality, and
+    /// output directory it targets.
+    pub fn decode_upgrade_quality_payload(
+        payload: &str,
+    ) -> Result<(String, String, String), TaskError> {
+        Self::decode_video_quality_payload(payload, "upgrade_quality")
     }
 
     /// Decodes a `delete_video_file` task's raw JSON payload, as handed to a
     /// `TaskHandler`, back into the recorded filename, recorded thumbnail
-    /// filename, and output directory it targets.
+    /// filename, recorded subtitle filename, and output directory it
+    /// targets.
     pub fn decode_delete_video_file_payload(
         payload: &str,
-    ) -> Result<(Option<String>, Option<String>, String), TaskError> {
-        let parsed: DeleteVideoFilePayload = serde_json::from_str(payload)
-            .map_err(|e| TaskError(format!("invalid delete_video_file payload: {e}")))?;
-        Ok((
-            parsed.filename,
-            parsed.thumbnail_filename,
-            parsed.output_dir,
-        ))
+    ) -> Result<DeleteVideoFilePayload, TaskError> {
+        serde_json::from_str(payload)
+            .map_err(|e| TaskError(format!("invalid delete_video_file payload: {e}")))
     }
 
     /// Decodes a `delete_playlist_files` task's raw JSON payload, as handed
@@ -211,20 +292,75 @@ impl Task {
         Ok((parsed.video_id, parsed.output_dir))
     }
 
+    /// Decodes a `fetch_subtitles` task's raw JSON payload, as handed to a
+    /// `TaskHandler`, back into the video's surrogate ID and the output
+    /// directory it targets.
+    pub fn decode_fetch_subtitles_payload(payload: &str) -> Result<(String, String), TaskError> {
+        let parsed: FetchSubtitlesPayload = serde_json::from_str(payload)
+            .map_err(|e| TaskError(format!("invalid fetch_subtitles payload: {e}")))?;
+        Ok((parsed.video_id, parsed.output_dir))
+    }
+
+    /// Decodes a `sync_video` task's raw JSON payload, as handed to a
+    /// `TaskHandler`, back into the video's surrogate ID.
+    pub fn decode_sync_video_payload(payload: &str) -> Result<String, TaskError> {
+        let parsed: SyncVideoPayload = serde_json::from_str(payload)
+            .map_err(|e| TaskError(format!("invalid sync_video payload: {e}")))?;
+        Ok(parsed.video_id)
+    }
+
+    /// Decodes a `sync_plex_labels` task's raw JSON payload, as handed to a
+    /// `TaskHandler`. The payload carries no fields; this only confirms it's
+    /// well-formed.
+    pub fn decode_sync_plex_labels_payload(payload: &str) -> Result<(), TaskError> {
+        serde_json::from_str::<SyncPlexLabelsPayload>(payload)
+            .map_err(|e| TaskError(format!("invalid sync_plex_labels payload: {e}")))?;
+        Ok(())
+    }
+
+    /// Decodes a `fetch_chapters` task's raw JSON payload, as handed to a
+    /// `TaskHandler`, back into the video's surrogate ID.
+    pub fn decode_fetch_chapters_payload(payload: &str) -> Result<String, TaskError> {
+        let parsed: FetchChaptersPayload = serde_json::from_str(payload)
+            .map_err(|e| TaskError(format!("invalid fetch_chapters payload: {e}")))?;
+        Ok(parsed.video_id)
+    }
+
+    /// Decodes a `summarize_video` task's raw JSON payload, as handed to a
+    /// `TaskHandler`, back into the video's surrogate ID.
+    pub fn decode_summarize_video_payload(payload: &str) -> Result<String, TaskError> {
+        let parsed: SummarizeVideoPayload = serde_json::from_str(payload)
+            .map_err(|e| TaskError(format!("invalid summarize_video payload: {e}")))?;
+        Ok(parsed.video_id)
+    }
+
+    /// Decodes a `categorize_video` task's raw JSON payload, as handed to a
+    /// `TaskHandler`, back into the video's surrogate ID.
+    pub fn decode_categorize_video_payload(payload: &str) -> Result<String, TaskError> {
+        let parsed: CategorizeVideoPayload = serde_json::from_str(payload)
+            .map_err(|e| TaskError(format!("invalid categorize_video payload: {e}")))?;
+        Ok(parsed.video_id)
+    }
+
     /// The executor lane a task of `task_type` runs in. Unknown types fall
     /// into `Light`.
     pub fn lane_for(task_type: &str) -> TaskLane {
         match task_type {
-            "download_video" => TaskLane::Download,
+            "download_video" | "upgrade_quality" => TaskLane::Download,
             "fetch_thumbnail" => TaskLane::Thumbnail,
+            "fetch_subtitles" | "fetch_chapters" => TaskLane::Subtitles,
+            "sync_video" => TaskLane::VideoSync,
+            "sync_plex_labels" => TaskLane::Plex,
+            "summarize_video" | "categorize_video" => TaskLane::Summaries,
             "update_ytdlp" => TaskLane::Exclusive,
             _ => TaskLane::Light,
         }
     }
 
-    /// `Some("video:<id>")` for `download_video` and `fetch_thumbnail`: two
-    /// tasks sharing a key never run at the same time, and a task with a key
-    /// is not scheduled twice while one is pending or running.
+    /// `Some("video:<id>")` for `download_video`, `fetch_thumbnail`,
+    /// `fetch_subtitles`, `fetch_chapters`, `upgrade_quality`, `summarize_video`, `categorize_video` and `sync_video`: two tasks sharing a key never run
+    /// at the same time, and a task with a key is not scheduled twice while
+    /// one is pending (or running, see `dedupes_running`).
     pub fn exclusivity_key(task_type: &str, payload: &str) -> Option<String> {
         let video_id = match task_type {
             "download_video" => Self::decode_download_video_payload(payload)
@@ -233,9 +369,75 @@ impl Task {
             "fetch_thumbnail" => Self::decode_fetch_thumbnail_payload(payload)
                 .ok()
                 .map(|(video_id, _)| video_id),
+            "fetch_subtitles" => Self::decode_fetch_subtitles_payload(payload)
+                .ok()
+                .map(|(video_id, _)| video_id),
+            "sync_video" => Self::decode_sync_video_payload(payload).ok(),
+            "fetch_chapters" => Self::decode_fetch_chapters_payload(payload).ok(),
+            "summarize_video" => Self::decode_summarize_video_payload(payload).ok(),
+            "categorize_video" => Self::decode_categorize_video_payload(payload).ok(),
+            "upgrade_quality" => Self::decode_upgrade_quality_payload(payload)
+                .ok()
+                .map(|(video_id, _, _)| video_id),
             _ => None,
         }?;
         Some(format!("video:{video_id}"))
+    }
+
+    /// Whether scheduling a keyed task is skipped while one of the same type
+    /// for the same video is running, not only pending. False for
+    /// `sync_video`: a running sync must not swallow a newer request.
+    pub fn dedupes_running(task_type: &str) -> bool {
+        task_type != "sync_video"
+    }
+
+    /// The show directory a per-video task (`download_video`,
+    /// `fetch_thumbnail`, `fetch_subtitles`, `upgrade_quality`,
+    /// `delete_video_file`) writes to
+    /// or deletes from; `None` for any other task type.
+    pub fn output_dir_of(task_type: &str, payload: &str) -> Option<String> {
+        match task_type {
+            "download_video" => Self::decode_download_video_payload(payload)
+                .ok()
+                .map(|(_, _, output_dir)| output_dir),
+            "fetch_thumbnail" => Self::decode_fetch_thumbnail_payload(payload)
+                .ok()
+                .map(|(_, output_dir)| output_dir),
+            "fetch_subtitles" => Self::decode_fetch_subtitles_payload(payload)
+                .ok()
+                .map(|(_, output_dir)| output_dir),
+            "delete_video_file" => Self::decode_delete_video_file_payload(payload)
+                .ok()
+                .map(|payload| payload.output_dir),
+            "upgrade_quality" => Self::decode_upgrade_quality_payload(payload)
+                .ok()
+                .map(|(_, _, output_dir)| output_dir),
+            _ => None,
+        }
+    }
+
+    /// The source path (relative to the videos root) a `delete_playlist_files`
+    /// or `delete_channel_files` task removes recursively; `None` for any
+    /// other task type.
+    pub fn deleted_path_of(task_type: &str, payload: &str) -> Option<String> {
+        match task_type {
+            "delete_playlist_files" => Self::decode_delete_playlist_files_payload(payload)
+                .ok()
+                .map(|(_, path)| path),
+            "delete_channel_files" => Self::decode_delete_channel_files_payload(payload)
+                .ok()
+                .map(|(_, path)| path),
+            _ => None,
+        }
+    }
+
+    fn decode_video_quality_payload(
+        payload: &str,
+        task_type: &str,
+    ) -> Result<(String, String, String), TaskError> {
+        let parsed: DownloadVideoPayload = serde_json::from_str(payload)
+            .map_err(|e| TaskError(format!("invalid {task_type} payload: {e}")))?;
+        Ok((parsed.video_id, parsed.quality, parsed.output_dir))
     }
 }
 
@@ -338,6 +540,7 @@ mod tests {
         let task = Task::DeleteVideoFile {
             filename: Some("My Video.mp4".to_string()),
             thumbnail_filename: Some("My Video.jpg".to_string()),
+            subtitle_filename: Some("My Video.en.srt".to_string()),
             output_dir: "/videos/music".to_string(),
         };
 
@@ -347,6 +550,7 @@ mod tests {
             json!({
                 "filename": "My Video.mp4",
                 "thumbnail_filename": "My Video.jpg",
+                "subtitle_filename": "My Video.en.srt",
                 "output_dir": "/videos/music",
             })
         );
@@ -357,14 +561,20 @@ mod tests {
         let task = Task::DeleteVideoFile {
             filename: Some("My Video.mp4".to_string()),
             thumbnail_filename: Some("My Video.jpg".to_string()),
+            subtitle_filename: Some("My Video.en.srt".to_string()),
             output_dir: "/videos/music".to_string(),
         };
 
-        let (filename, thumbnail_filename, output_dir) =
-            Task::decode_delete_video_file_payload(&task.payload().to_string()).unwrap();
+        let DeleteVideoFilePayload {
+            filename,
+            thumbnail_filename,
+            subtitle_filename,
+            output_dir,
+        } = Task::decode_delete_video_file_payload(&task.payload().to_string()).unwrap();
 
         assert_eq!(filename, Some("My Video.mp4".to_string()));
         assert_eq!(thumbnail_filename, Some("My Video.jpg".to_string()));
+        assert_eq!(subtitle_filename, Some("My Video.en.srt".to_string()));
         assert_eq!(output_dir, "/videos/music");
     }
 
@@ -460,10 +670,16 @@ mod tests {
     }
 
     #[test]
+    fn it_should_reject_a_malformed_sync_plex_labels_payload() {
+        assert!(Task::decode_sync_plex_labels_payload("not json").is_err());
+    }
+
+    #[test]
     fn it_should_map_task_types_to_lanes() {
         let lanes: Vec<TaskLane> = [
             "download_video",
             "fetch_thumbnail",
+            "fetch_subtitles",
             "update_ytdlp",
             "reconcile_playlist",
             "reconcile_channel",
@@ -481,6 +697,7 @@ mod tests {
             vec![
                 TaskLane::Download,
                 TaskLane::Thumbnail,
+                TaskLane::Subtitles,
                 TaskLane::Exclusive,
                 TaskLane::Light,
                 TaskLane::Light,
@@ -490,6 +707,16 @@ mod tests {
                 TaskLane::Light,
             ]
         );
+    }
+
+    #[test]
+    fn it_should_run_video_syncs_in_their_own_lane() {
+        assert_eq!(Task::lane_for("sync_video"), TaskLane::VideoSync);
+    }
+
+    #[test]
+    fn it_should_run_label_syncs_in_the_plex_lane() {
+        assert_eq!(Task::lane_for("sync_plex_labels"), TaskLane::Plex);
     }
 
     #[test]
@@ -520,5 +747,195 @@ mod tests {
                 None,
             ]
         );
+    }
+
+    #[test]
+    fn it_should_dedupe_running_video_tasks_except_video_syncs() {
+        let dedupes: Vec<bool> = [
+            "download_video",
+            "fetch_thumbnail",
+            "fetch_subtitles",
+            "sync_video",
+        ]
+        .iter()
+        .map(|task_type| Task::dedupes_running(task_type))
+        .collect();
+
+        assert_eq!(dedupes, vec![true, true, true, false]);
+    }
+
+    #[test]
+    fn it_should_run_summarize_video_in_the_summaries_lane_exclusive_per_video() {
+        let task = Task::SummarizeVideo {
+            video_id: "rec1".to_string(),
+        };
+
+        assert_eq!(
+            (
+                Task::lane_for(task.task_type()),
+                Task::exclusivity_key(task.task_type(), &task.payload().to_string()),
+                Task::dedupes_running(task.task_type())
+            ),
+            (TaskLane::Summaries, Some("video:rec1".to_string()), true)
+        );
+    }
+
+    #[test]
+    fn it_should_run_fetch_chapters_in_the_subtitles_lane_exclusive_per_video() {
+        let task = Task::FetchChapters {
+            video_id: "rec1".to_string(),
+        };
+
+        assert_eq!(
+            (
+                Task::lane_for(task.task_type()),
+                Task::exclusivity_key(task.task_type(), &task.payload().to_string()),
+                Task::dedupes_running(task.task_type()),
+            ),
+            (TaskLane::Subtitles, Some("video:rec1".to_string()), true)
+        );
+    }
+
+    #[test]
+    fn it_should_run_upgrade_quality_in_the_download_lane_exclusive_per_video() {
+        let task = Task::UpgradeQuality {
+            video_id: "rec1".to_string(),
+            quality: "high".to_string(),
+            output_dir: "/videos/music".to_string(),
+        };
+
+        assert_eq!(
+            (
+                Task::lane_for(task.task_type()),
+                Task::exclusivity_key(task.task_type(), &task.payload().to_string()),
+                Task::dedupes_running(task.task_type()),
+            ),
+            (TaskLane::Download, Some("video:rec1".to_string()), true)
+        );
+    }
+
+    #[test]
+    fn it_should_read_the_output_dir_of_an_upgrade_quality() {
+        let task = Task::UpgradeQuality {
+            video_id: "rec1".to_string(),
+            quality: "high".to_string(),
+            output_dir: "/videos/music".to_string(),
+        };
+
+        assert_eq!(
+            Task::output_dir_of(task.task_type(), &task.payload().to_string()),
+            Some("/videos/music".to_string())
+        );
+    }
+
+    #[test]
+    fn it_should_give_a_video_sync_the_video_exclusivity_key() {
+        let task = Task::SyncVideo {
+            video_id: "rec1".to_string(),
+        };
+
+        assert_eq!(
+            Task::exclusivity_key(task.task_type(), &task.payload().to_string()),
+            Some("video:rec1".to_string())
+        );
+    }
+
+    #[test]
+    fn it_should_read_the_output_dir_of_every_per_video_task() {
+        let tasks = [
+            Task::DownloadVideo {
+                video_id: "rec1".to_string(),
+                quality: "high".to_string(),
+                output_dir: "/videos/music".to_string(),
+            },
+            Task::FetchThumbnail {
+                video_id: "rec1".to_string(),
+                output_dir: "/videos/music".to_string(),
+            },
+            Task::FetchSubtitles {
+                video_id: "rec1".to_string(),
+                output_dir: "/videos/music".to_string(),
+            },
+            Task::DeleteVideoFile {
+                filename: Some("My Video.mp4".to_string()),
+                thumbnail_filename: None,
+                subtitle_filename: None,
+                output_dir: "/videos/music".to_string(),
+            },
+        ];
+
+        let output_dirs: Vec<Option<String>> = tasks
+            .iter()
+            .map(|task| Task::output_dir_of(task.task_type(), &task.payload().to_string()))
+            .collect();
+
+        assert_eq!(output_dirs, vec![Some("/videos/music".to_string()); 4]);
+    }
+
+    #[test]
+    fn it_should_have_no_output_dir_for_reconciles() {
+        let tasks = [
+            Task::ReconcilePlaylist {
+                playlist_id: "PL1".to_string(),
+            },
+            Task::ReconcileChannel {
+                channel_id: "@somechannel".to_string(),
+            },
+        ];
+
+        let output_dirs: Vec<Option<String>> = tasks
+            .iter()
+            .map(|task| Task::output_dir_of(task.task_type(), &task.payload().to_string()))
+            .collect();
+
+        assert_eq!(output_dirs, vec![None, None]);
+    }
+
+    #[test]
+    fn it_should_read_the_deleted_path_of_source_file_deletions() {
+        let tasks = [
+            Task::DeletePlaylistFiles {
+                playlist_id: "PL1".to_string(),
+                path: "music/chill".to_string(),
+            },
+            Task::DeleteChannelFiles {
+                channel_id: "@somechannel".to_string(),
+                path: "music/chill".to_string(),
+            },
+        ];
+
+        let deleted_paths: Vec<Option<String>> = tasks
+            .iter()
+            .map(|task| Task::deleted_path_of(task.task_type(), &task.payload().to_string()))
+            .collect();
+
+        assert_eq!(deleted_paths, vec![Some("music/chill".to_string()); 2]);
+    }
+
+    #[test]
+    fn it_should_have_no_deleted_path_for_other_tasks() {
+        let tasks = [
+            Task::ReconcilePlaylist {
+                playlist_id: "PL1".to_string(),
+            },
+            Task::DeleteVideoFile {
+                filename: Some("My Video.mp4".to_string()),
+                thumbnail_filename: None,
+                subtitle_filename: None,
+                output_dir: "/videos/music".to_string(),
+            },
+        ];
+
+        let deleted_paths: Vec<Option<String>> = tasks
+            .iter()
+            .map(|task| Task::deleted_path_of(task.task_type(), &task.payload().to_string()))
+            .collect();
+
+        assert_eq!(deleted_paths, vec![None, None]);
+    }
+
+    #[test]
+    fn it_should_have_no_deleted_path_for_an_undecodable_payload() {
+        assert_eq!(Task::deleted_path_of("delete_playlist_files", "{}"), None);
     }
 }

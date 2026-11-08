@@ -1,4 +1,4 @@
-use crate::domain::playlist::{Playlist, PlaylistPreview};
+use crate::domain::playlist::{Playlist, PlaylistPreview, PlaylistView};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +13,10 @@ pub struct CreatePlaylistRequest {
     pub exclude_from_home: Option<bool>,
     #[serde(default)]
     pub reconcile_interval_minutes: Option<i64>,
+    #[serde(default)]
+    pub summaries_enabled: Option<bool>,
+    #[serde(default)]
+    pub categorization_enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -20,7 +24,19 @@ pub struct UpdatePlaylistRequest {
     #[serde(default)]
     pub exclude_from_home: Option<bool>,
     #[serde(default)]
+    pub hide_unwatched_count: Option<bool>,
+    #[serde(default)]
     pub reconcile_interval_minutes: Option<i64>,
+    #[serde(default)]
+    pub summaries_enabled: Option<bool>,
+    #[serde(default)]
+    pub categorization_enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MovePlaylistRequest {
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,7 +53,10 @@ pub struct PlaylistResponse {
     pub quality: String,
     pub kind: String,
     pub exclude_from_home: bool,
+    pub hide_unwatched_count: bool,
     pub reconcile_interval_minutes: u32,
+    pub summaries_enabled: bool,
+    pub categorization_enabled: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -50,8 +69,48 @@ impl From<Playlist> for PlaylistResponse {
             quality: playlist.quality.as_str().to_string(),
             kind: playlist.kind.as_str().to_string(),
             exclude_from_home: playlist.exclude_from_home,
+            hide_unwatched_count: playlist.hide_unwatched_count,
             reconcile_interval_minutes: playlist.reconcile_interval.minutes(),
+            summaries_enabled: playlist.summaries_enabled,
+            categorization_enabled: playlist.categorization_enabled,
             created_at: playlist.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct PlaylistListItemResponse {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub quality: String,
+    pub kind: String,
+    pub exclude_from_home: bool,
+    pub hide_unwatched_count: bool,
+    pub reconcile_interval_minutes: u32,
+    pub summaries_enabled: bool,
+    pub categorization_enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub unwatched_count: usize,
+    pub work_in_progress: bool,
+}
+
+impl From<PlaylistView> for PlaylistListItemResponse {
+    fn from(playlist: PlaylistView) -> Self {
+        Self {
+            id: playlist.id.as_str().to_string(),
+            name: playlist.name.as_str().to_string(),
+            path: playlist.path.as_str().to_string(),
+            quality: playlist.quality.as_str().to_string(),
+            kind: playlist.kind.as_str().to_string(),
+            exclude_from_home: playlist.exclude_from_home,
+            hide_unwatched_count: playlist.hide_unwatched_count,
+            reconcile_interval_minutes: playlist.reconcile_interval.minutes(),
+            summaries_enabled: playlist.summaries_enabled,
+            categorization_enabled: playlist.categorization_enabled,
+            created_at: playlist.created_at,
+            unwatched_count: playlist.unwatched_count,
+            work_in_progress: playlist.work_in_progress,
         }
     }
 }

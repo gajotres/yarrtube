@@ -1,5 +1,10 @@
 use super::episode_number::EpisodeNumber;
+use super::late_data_checks::LateDataChecks;
+use super::late_data_outcome::LateDataOutcome;
 use super::playback_position::PlaybackPosition;
+use super::subtitle_state::SubtitleState;
+use super::summary_state::SummaryState;
+use super::video_chapter::VideoChapter;
 use super::video_duration::VideoDuration;
 use super::video_id::VideoId;
 use super::video_output_entry::is_episode_path;
@@ -47,6 +52,28 @@ pub struct Video {
     /// The video's episode number within its show, assigned once by the
     /// first thumbnail fetch, download or relocation that places a file.
     pub episode_number: Option<EpisodeNumber>,
+    pub subtitle_state: SubtitleState,
+    /// The episode's subtitle file, recorded once its subtitles are fetched.
+    pub subtitle_filename: Option<String>,
+    /// The checks of the video's subtitles while Missing — see the
+    /// `late-video-data` capability.
+    pub subtitle_checks: LateDataChecks,
+    /// The video's YouTube chapters: `None` while never checked,
+    /// `Some(vec![])` once checked and found to have none.
+    pub chapters: Option<Vec<VideoChapter>>,
+    /// The checks of the video's chapters — see the `late-video-data`
+    /// capability.
+    pub chapters_checks: LateDataChecks,
+    /// Whether the chapters are final: never checked again.
+    pub chapters_settled: bool,
+    /// The height in pixels of the downloaded file, when reported.
+    pub downloaded_height: Option<u32>,
+    /// The checks of the downloaded quality — see the `late-video-data`
+    /// capability.
+    pub quality_checks: LateDataChecks,
+    /// Whether the downloaded quality is final: never checked again.
+    pub quality_settled: bool,
+    pub summary_state: SummaryState,
 }
 
 const WATCHED_THRESHOLD: f64 = 0.9;
@@ -71,6 +98,16 @@ impl Video {
             last_errored_at: None,
             last_played_at: None,
             episode_number: None,
+            subtitle_state: SubtitleState::Missing,
+            subtitle_filename: None,
+            subtitle_checks: LateDataChecks::default(),
+            chapters: None,
+            chapters_checks: LateDataChecks::default(),
+            chapters_settled: false,
+            downloaded_height: None,
+            quality_checks: LateDataChecks::default(),
+            quality_settled: false,
+            summary_state: SummaryState::Missing,
         }
     }
 
@@ -147,10 +184,13 @@ impl Video {
     }
 
     /// Resets a video back to `Pending`, clearing its recorded filename,
-    /// thumbnail filename, and quality, used by filesystem reconciliation
-    /// both when a `Downloaded` video's recorded file is missing from disk
-    /// and when an `Errored` video is given another chance, in each case
-    /// followed by scheduling a fresh download.
+    /// thumbnail filename, quality and subtitles (back to `Missing`), and
+    /// clearing the late-data checks, settled flags and downloaded height so
+    /// the redownload refetches them,
+    /// used by filesystem reconciliation both when a `Downloaded` video's
+    /// recorded file is missing from disk and when an `Errored` video is
+    /// given another chance, in each case followed by scheduling a fresh
+    /// download.
     pub fn reset_for_redownload(self, now: DateTime<Utc>) -> Self {
         Self {
             status: VideoStatus::Pending,
@@ -160,6 +200,14 @@ impl Video {
             duration_seconds: None,
             updated_at: now,
             synced_at: None,
+            subtitle_state: SubtitleState::Missing,
+            subtitle_filename: None,
+            subtitle_checks: LateDataChecks::default(),
+            chapters_checks: LateDataChecks::default(),
+            chapters_settled: false,
+            downloaded_height: None,
+            quality_checks: LateDataChecks::default(),
+            quality_settled: false,
             ..self
         }
     }
@@ -213,6 +261,17 @@ impl Video {
         Self {
             watched_at: Some(now),
             playback_position: PlaybackPosition::start(),
+            ..self
+        }
+    }
+
+    /// This video with `current`'s watch state: `watched_at`,
+    /// `playback_position` and `last_played_at`.
+    pub fn with_watch_state_of(self, current: &Video) -> Self {
+        Self {
+            watched_at: current.watched_at,
+            playback_position: current.playback_position,
+            last_played_at: current.last_played_at,
             ..self
         }
     }
@@ -274,6 +333,210 @@ impl Video {
     /// nor an `Errored` one, whose recovery redownload writes its own.
     pub fn is_thumbnail_fetchable(&self) -> bool {
         !matches!(self.status, VideoStatus::Excluded | VideoStatus::Errored)
+    }
+
+    /// Whether a subtitle fetch is worth attempting: Downloaded, numbered,
+    /// in its season folder (a legacy-layout file has no episode path to
+    /// place the subtitles next to) and its subtitles still Missing.
+    pub fn is_subtitle_fetchable(&self) -> bool {
+        self.is_downloaded()
+            && self.episode_number.is_some()
+            && !self.is_in_legacy_layout()
+            && self.subtitle_state == SubtitleState::Missing
+    }
+
+    /// Records the fetched subtitle file: subtitle state Fetched, its check
+    /// recorded as complete. Touches only the subtitle fields and
+    /// `updated_at`, stored through `VideoRepository::update_subtitles` only.
+    pub fn mark_subtitles_fetched(
+        self,
+        subtitle_filename: impl Into<String>,
+        now: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            subtitle_state: SubtitleState::Fetched,
+            subtitle_filename: Some(subtitle_filename.into()),
+            subtitle_checks: self.subtitle_checks.record(LateDataOutcome::Complete, now),
+            updated_at: now,
+            ..self
+        }
+    }
+
+    /// Whether a chapters fetch is worth attempting: Downloaded and its
+    /// chapters unsettled.
+    pub fn is_chapters_fetchable(&self) -> bool {
+        self.is_downloaded() && !self.chapters_settled
+    }
+
+    /// Downloaded, subtitles Fetched, summary Missing.
+    pub fn is_summarizable(&self) -> bool {
+        self.is_downloaded()
+            && self.subtitle_state == SubtitleState::Fetched
+            && self.summary_state == SummaryState::Missing
+    }
+
+    /// Summary Generated: a video is categorized from its summary.
+    pub fn is_categorizable(&self) -> bool {
+        self.summary_state == SummaryState::Generated
+    }
+
+    pub fn mark_summary_generated(self, now: DateTime<Utc>) -> Self {
+        Self {
+            summary_state: SummaryState::Generated,
+            updated_at: now,
+            ..self
+        }
+    }
+
+    /// The generation is given up: only new summary settings bring it back.
+    pub fn mark_summary_unavailable(self, now: DateTime<Utc>) -> Self {
+        Self {
+            summary_state: SummaryState::Unavailable,
+            updated_at: now,
+            ..self
+        }
+    }
+
+    /// Test fixture: sets the chapters alone, without recording a check
+    /// (`record_chapters_check` is the production transition).
+    #[cfg(test)]
+    pub fn with_chapters(self, chapters: Vec<VideoChapter>, now: DateTime<Utc>) -> Self {
+        Self {
+            chapters: Some(chapters),
+            updated_at: now,
+            ..self
+        }
+    }
+
+    /// The language code the fetched subtitle file is named with (`en` for
+    /// `… .en.srt`); `None` unless the subtitles are Fetched.
+    pub fn subtitle_language(&self) -> Option<String> {
+        self.subtitle_filename
+            .as_deref()
+            .filter(|_| self.subtitle_state == SubtitleState::Fetched)
+            .and_then(|filename| filename.strip_suffix(".srt"))
+            .and_then(|stem| stem.rsplit_once('.'))
+            .map(|(_, language)| language.to_string())
+    }
+
+    /// Test fixture: subtitles Unavailable without recording a check
+    /// (`record_subtitles_check` is the production transition).
+    #[cfg(test)]
+    pub fn mark_subtitles_unavailable(self, now: DateTime<Utc>) -> Self {
+        Self {
+            subtitle_state: SubtitleState::Unavailable,
+            updated_at: now,
+            ..self
+        }
+    }
+
+    /// Records a subtitle check that found no subtitles (`Incomplete`) or
+    /// failed: Unavailable once the `late-video-data` policy settles them.
+    /// Touches only the subtitle fields and `updated_at`.
+    pub fn record_subtitles_check(
+        self,
+        outcome: LateDataOutcome,
+        published_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Self {
+        let subtitle_checks = self.subtitle_checks.record(outcome, now);
+        let subtitle_state = if subtitle_checks.settles(outcome, published_at, now) {
+            SubtitleState::Unavailable
+        } else {
+            self.subtitle_state
+        };
+        Self {
+            subtitle_state,
+            subtitle_checks,
+            updated_at: now,
+            ..self
+        }
+    }
+
+    /// Records a chapters check: `Some` non-empty chapters are `Complete`,
+    /// `Some(vec![])` `Incomplete`, `None` a failed check (keeping the
+    /// chapters already recorded, or none once settled while unchecked).
+    /// Touches only the chapters fields and `updated_at`.
+    pub fn record_chapters_check(
+        self,
+        chapters: Option<Vec<VideoChapter>>,
+        published_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Self {
+        let outcome = match &chapters {
+            Some(found) if !found.is_empty() => LateDataOutcome::Complete,
+            Some(_) => LateDataOutcome::Incomplete,
+            None => LateDataOutcome::Failed,
+        };
+        let chapters_checks = self.chapters_checks.record(outcome, now);
+        let chapters_settled = chapters_checks.settles(outcome, published_at, now);
+        let chapters = match chapters.or(self.chapters) {
+            None if chapters_settled => Some(vec![]),
+            kept => kept,
+        };
+        Self {
+            chapters,
+            chapters_settled,
+            chapters_checks,
+            updated_at: now,
+            ..self
+        }
+    }
+
+    /// Records the tier and height a download or quality upgrade landed at,
+    /// settling the quality when the video is old or the tier's target
+    /// height is reached; a `degraded` one (SABR reported) counts as a failed
+    /// check instead. Touches only the quality fields and `updated_at`.
+    pub fn record_downloaded_quality(
+        self,
+        quality: Quality,
+        height: Option<u32>,
+        degraded: bool,
+        published_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Self {
+        let outcome = match height {
+            _ if degraded => LateDataOutcome::Failed,
+            Some(height) if height >= quality.target_height() => LateDataOutcome::Complete,
+            _ => LateDataOutcome::Incomplete,
+        };
+        let quality_checks = self.quality_checks.record(outcome, now);
+        Self {
+            quality: Some(quality),
+            downloaded_height: height,
+            quality_settled: quality_checks.settles(outcome, published_at, now),
+            quality_checks,
+            updated_at: now,
+            ..self
+        }
+    }
+
+    /// Records a quality check that found nothing better (`probed_height`
+    /// the height the tier would get now) or failed (`None`). Touches only
+    /// the quality fields and `updated_at`.
+    pub fn record_quality_check(
+        self,
+        probed_height: Option<u32>,
+        published_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Self {
+        let outcome = match probed_height {
+            Some(_) => LateDataOutcome::Incomplete,
+            None => LateDataOutcome::Failed,
+        };
+        let quality_checks = self.quality_checks.record(outcome, now);
+        Self {
+            quality_settled: quality_checks.settles(outcome, published_at, now),
+            quality_checks,
+            updated_at: now,
+            ..self
+        }
+    }
+
+    /// Whether a quality check is worth attempting: Downloaded and its
+    /// quality unsettled.
+    pub fn is_quality_checkable(&self) -> bool {
+        self.is_downloaded() && !self.quality_settled
     }
 
     /// Records the episode number assigned to this video.
@@ -532,6 +795,166 @@ mod tests {
     }
 
     #[test]
+    fn it_should_record_its_fetched_subtitles() {
+        let now = DateTime::<Utc>::from_timestamp(100, 0).unwrap();
+        let video = video();
+
+        let fetched = video
+            .clone()
+            .mark_subtitles_fetched("Season 1/S01E003 - My Video.en.srt", now);
+
+        assert_eq!(
+            fetched,
+            Video {
+                subtitle_state: SubtitleState::Fetched,
+                subtitle_filename: Some("Season 1/S01E003 - My Video.en.srt".to_string()),
+                subtitle_checks: LateDataChecks {
+                    last_checked_at: Some(now),
+                    failed_attempts: 0,
+                },
+                updated_at: now,
+                ..video
+            }
+        );
+    }
+
+    #[test]
+    fn it_should_mark_its_subtitles_unavailable() {
+        let now = DateTime::<Utc>::from_timestamp(100, 0).unwrap();
+        let video = video();
+
+        let unavailable = video.clone().mark_subtitles_unavailable(now);
+
+        assert_eq!(
+            unavailable,
+            Video {
+                subtitle_state: SubtitleState::Unavailable,
+                updated_at: now,
+                ..video
+            }
+        );
+    }
+
+    #[test]
+    fn it_should_record_its_generated_summary() {
+        let now = DateTime::<Utc>::from_timestamp(100, 0).unwrap();
+        let video = video();
+
+        let generated = video.clone().mark_summary_generated(now);
+
+        assert_eq!(
+            generated,
+            Video {
+                summary_state: SummaryState::Generated,
+                updated_at: now,
+                ..video
+            }
+        );
+    }
+
+    #[test]
+    fn it_should_give_up_on_a_summary() {
+        let now = DateTime::<Utc>::from_timestamp(100, 0).unwrap();
+        let video = video();
+
+        let unavailable = video.clone().mark_summary_unavailable(now);
+
+        assert_eq!(
+            unavailable,
+            Video {
+                summary_state: SummaryState::Unavailable,
+                updated_at: now,
+                ..video
+            }
+        );
+    }
+
+    #[test]
+    fn it_should_report_the_subtitle_language_from_its_filename() {
+        let now = DateTime::<Utc>::from_timestamp(100, 0).unwrap();
+        let filename = "Season 1/S01E003 - My Video.en.srt";
+
+        let languages = [
+            video().mark_subtitles_fetched(filename, now),
+            video(),
+            Video {
+                subtitle_state: SubtitleState::Unavailable,
+                subtitle_filename: Some(filename.to_string()),
+                ..video()
+            },
+        ]
+        .map(|video| video.subtitle_language());
+
+        assert_eq!(languages, [Some("en".to_string()), None, None]);
+    }
+
+    #[test]
+    fn it_should_clear_its_subtitles_when_reset_for_redownload() {
+        let now = DateTime::<Utc>::from_timestamp(100, 0).unwrap();
+        let later = DateTime::<Utc>::from_timestamp(200, 0).unwrap();
+        let fetched = video()
+            .mark_downloaded(
+                Quality::High,
+                "Season 1/S01E003 - My Video.mp4",
+                None,
+                None,
+                now,
+            )
+            .mark_subtitles_fetched("Season 1/S01E003 - My Video.en.srt", now);
+
+        let reset = fetched.clone().reset_for_redownload(later);
+
+        assert_eq!(
+            reset,
+            Video {
+                status: VideoStatus::Pending,
+                quality: None,
+                filename: None,
+                subtitle_state: SubtitleState::Missing,
+                subtitle_filename: None,
+                subtitle_checks: LateDataChecks::default(),
+                updated_at: later,
+                synced_at: None,
+                ..fetched
+            }
+        );
+    }
+
+    #[test]
+    fn it_should_clear_the_subtitle_checks_when_reset_for_redownload() {
+        let now = DateTime::<Utc>::from_timestamp(100, 0).unwrap();
+        let later = DateTime::<Utc>::from_timestamp(200, 0).unwrap();
+        let checked = Video {
+            subtitle_checks: LateDataChecks {
+                last_checked_at: Some(now),
+                failed_attempts: 2,
+            },
+            ..video().mark_downloaded(
+                Quality::High,
+                "Season 1/S01E003 - My Video.mp4",
+                None,
+                None,
+                now,
+            )
+        };
+
+        let reset = checked.clone().reset_for_redownload(later);
+
+        assert_eq!(
+            reset,
+            Video {
+                status: VideoStatus::Pending,
+                quality: None,
+                filename: None,
+                subtitle_checks: LateDataChecks::default(),
+                updated_at: later,
+                synced_at: None,
+                ..checked
+            }
+        );
+    }
+
+    #[test]
     fn it_should_keep_when_it_last_errored_when_reset_for_redownload() {
         let errored_at = DateTime::<Utc>::from_timestamp(100, 0).unwrap();
         let later = DateTime::<Utc>::from_timestamp(200, 0).unwrap();
@@ -624,5 +1047,46 @@ mod tests {
             [pending, retrying, in_progress].map(|v| v.is_due_for_recovery(later)),
             [false, false, false]
         );
+    }
+
+    #[test]
+    fn it_should_not_be_subtitle_fetchable_if_in_the_legacy_layout() {
+        let now = DateTime::<Utc>::from_timestamp(100, 0).unwrap();
+        let number = EpisodeNumber::from_columns(1, 3).unwrap();
+        let downloaded_at = |filename: &str| {
+            video().with_episode_number(number, now).mark_downloaded(
+                Quality::High,
+                filename,
+                None,
+                None,
+                now,
+            )
+        };
+
+        let fetchable = [
+            "Season 1/S01E003 - My Video.mp4",
+            "My Video/My Video.mp4",
+            "My Video.mp4",
+        ]
+        .map(|filename| downloaded_at(filename).is_subtitle_fetchable());
+
+        assert_eq!(fetchable, [true, false, false]);
+    }
+
+    #[test]
+    fn it_should_be_settled_only_when_downloaded_errored_or_excluded() {
+        let now = DateTime::<Utc>::from_timestamp(100, 0).unwrap();
+        let videos = [
+            video(),
+            video().start_download(now),
+            video().mark_downloaded(Quality::High, "My Video.mp4", None, None, now),
+            video().mark_errored_retrying(now),
+            video().mark_errored(now),
+            video().mark_excluded(now),
+        ];
+
+        let settled: Vec<bool> = videos.iter().map(Video::is_download_settled).collect();
+
+        assert_eq!(settled, vec![false, false, true, false, true, true]);
     }
 }

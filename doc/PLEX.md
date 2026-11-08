@@ -4,7 +4,7 @@
 
 Every tracked playlist and channel shows up in Plex (and Kodi or Jellyfin)
 as a **TV show**: one tile per playlist/channel, episode thumbnails,
-Continue Watching, On Deck and "play next episode".
+subtitles, Continue Watching, On Deck and "play next episode".
 
 ```
 channels/Some Channel/
@@ -28,10 +28,33 @@ playlists/Some Playlist/
 
 Episode numbers never change, so Plex keeps your watch progress.
 
-Only step 1 is required. Step 2 is optional and makes new episodes show up
-in Plex right after they download.
+### Subtitles
 
-## 1. Set up a TV Shows library
+Each episode also gets its captions, saved next to it as
+`S2026E031501 - Title.en.srt`, which Plex picks up as a subtitle track.
+They're in the video's original language: the uploader's captions, else
+YouTube's auto-generated ones, never translations. Whether Plex turns them
+on by itself depends on each user's settings (_Account → Languages_).
+
+YouTube can take a while to generate captions for new videos, so yarrtube keeps
+trying for about a week. After upgrading, captions for episodes already
+downloaded are fetched in the background.
+
+### Chapters
+
+When a video has YouTube chapters, they're embedded in its file as chapter
+markers, so Plex (and Kodi or Jellyfin) shows a chapter list in the player
+to jump between them. For a picture per chapter, turn on _Settings → Library
+→ Generate chapter thumbnails_. Only videos downloaded since chapters were
+added get them in the file; older episodes keep playing without.
+
+## Setup
+
+Setting up Plex takes two steps, and only the first is required. The second
+makes new episodes show up in Plex right after they download, and gives you
+[category playlists](CATEGORIES.md#in-plex) for free.
+
+### 1. Set up a TV Shows library
 
 Create a **TV Shows** library over the folders holding yarrtube's videos
 (for example the host folders mounted at `/videos/playlists` and
@@ -57,15 +80,19 @@ Optionally enable _Settings → Library → Scan my library automatically_ and
 _Run a partial scan when changes are detected_: Plex then imports new
 episodes on its own, and the scan trigger below just makes it immediate.
 
-## 2. Scan trigger (optional)
+### 2. Scan trigger (optional)
 
 With the scan trigger on, yarrtube asks Plex to scan a show as soon as one
-of its videos finishes downloading. You need:
+of its videos finishes downloading, and again once that video's subtitle
+file is written. After you
+[move a playlist or channel](INSTALLATION.md#moving-a-playlist-or-channel),
+it asks Plex to scan both the show's new folder and its old one, so Plex
+picks the show up at its new location and drops it from the old. You need:
 
 - A Plex token (`X-Plex-Token`) to authenticate yarrtube's requests.
 - The path at which the Plex server sees yarrtube's videos root.
 
-### Get your Plex token (`YARRTUBE_PLEX_TOKEN`)
+#### Get your Plex token (`YARRTUBE_PLEX_TOKEN`)
 
 Follow Plex's official guide:
 [Finding an authentication token / X-Plex-Token](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/).
@@ -86,7 +113,7 @@ sudo grep -o 'PlexOnlineToken="[^"]*"' \
 The value between the quotes is the token. Treat it like a password: it
 gives full access to your Plex account and server.
 
-### Configure yarrtube
+#### Configure yarrtube
 
 Set the environment variables on the yarrtube container and restart it:
 
@@ -107,9 +134,15 @@ the same machine, use its LAN IP (e.g. `http://192.168.1.10:32400`) or run
 yarrtube with `network_mode: host` (then set `YARRTUBE_PORT` for the web
 UI, since `ports:` is ignored).
 
+## Category playlists
+
+Once the scan trigger is configured (step 2), each yarrtube category also
+becomes a smart playlist in Plex. Nothing else to set up. See
+[Categories](CATEGORIES.md#in-plex) for what you get and its limits.
+
 ## Troubleshooting
 
-- **A playlist has no poster**: expected, only channels have one (their
+- **A YouTube playlist's show has no poster**: expected, only channels have one (their
   avatar).
 - **Episodes show as "Episode 31502" without their title**: the library is
   not using the **Plex NFO Series** agent, or _Use local assets_ is off.
@@ -118,6 +151,8 @@ UI, since `ports:` is ignored).
   download. If you see `no Plex section contains the folder` instead,
   `YARRTUBE_PLEX_VIDEOS_PATH` doesn't match the folders your TV Shows
   library points at.
+- **Category playlists don't show up**: see
+  [Categories](CATEGORIES.md#in-plex).
 - **`error sending request for url (http://.../library/sections)`** in the
   log: yarrtube can't reach Plex. Check that `YARRTUBE_PLEX_URL` isn't
   `localhost` (see [Configure yarrtube](#configure-yarrtube)) and that no

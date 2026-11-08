@@ -1,15 +1,27 @@
 import type { ReactElement, ReactNode } from 'react'
 import { render } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, type InitialEntry } from 'react-router-dom'
 import { vi } from 'vitest'
+import SHIPPED_PROMPT from '../../../prompts/summaries/v3.md?raw'
+import SHIPPED_CATEGORIZATION_PROMPT from '../../../prompts/categorization/v2.md?raw'
+import { VideoCategoriesEditor } from '@/components/VideoCategoriesEditor'
 import type {
   Announcement,
+  AppVersion,
+  Category,
+  CategoryList,
+  CategoryVideo,
   ChannelListItem,
+  CreatedCategory,
+  HomeCategorySection,
   HomeVideo,
+  OllamaServer,
   PlaylistListItem,
+  Preferences,
   Task,
   Video,
+  VideoCategoryChoice,
 } from '@/api/types'
 
 /**
@@ -48,6 +60,21 @@ export function pendingForever(): () => Promise<RouteResponse> {
   return () => new Promise<RouteResponse>(() => {})
 }
 
+/**
+ * A route value held until `release()`, e.g. a delete still in flight; `route`
+ * is a mock, so a test can wait for the request to have been sent.
+ */
+export function heldUntilReleased(value: RouteResponse = null): {
+  route: ReturnType<typeof vi.fn>
+  release: () => void
+} {
+  let release = () => {}
+  const held = new Promise<RouteResponse>((resolve) => {
+    release = () => resolve(value)
+  })
+  return { route: vi.fn(() => held), release: () => release() }
+}
+
 function isHttpError(value: unknown): value is { status: number; error: string } {
   return (
     typeof value === 'object' &&
@@ -67,16 +94,22 @@ function jsonResponse(body: unknown, status: number): Response {
 
 /**
  * Renders `ui` inside a fresh react-query client and a memory router, the
- * providers every routed component expects. Retries and polling are off so
+ * providers every routed component expects. `route` is a path, or a location
+ * carrying navigation state. Retries and polling are off so
  * tests stay deterministic.
  */
-export function renderWithProviders(ui: ReactElement, { route = '/' }: { route?: string } = {}) {
+export function renderWithProviders(
+  ui: ReactElement,
+  { route = '/' }: { route?: InitialEntry } = {},
+) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, refetchInterval: false } },
   })
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={[route]}>{children}</MemoryRouter>
+      <VideoCategoriesEditor>
+        <MemoryRouter initialEntries={[route]}>{children}</MemoryRouter>
+      </VideoCategoriesEditor>
     </QueryClientProvider>
   )
   return { ...render(ui, { wrapper }), queryClient }
@@ -94,7 +127,10 @@ export function aChannel(overrides: Partial<ChannelListItem> = {}): ChannelListI
     video_limit: 3,
     reconcile_interval_minutes: 180,
     avatar_filename: null,
+    summaries_enabled: false,
+    categorization_enabled: false,
     unwatched_count: 0,
+    work_in_progress: false,
     ...overrides,
   }
 }
@@ -108,8 +144,13 @@ export function aPlaylist(overrides: Partial<PlaylistListItem> = {}): PlaylistLi
     quality: 'high',
     kind: 'playlist',
     exclude_from_home: false,
+    hide_unwatched_count: false,
     reconcile_interval_minutes: 180,
+    summaries_enabled: false,
+    categorization_enabled: false,
     created_at: '2026-01-01T00:00:00Z',
+    unwatched_count: 0,
+    work_in_progress: false,
     ...overrides,
   }
 }
@@ -118,6 +159,7 @@ export function aVideo(overrides: Partial<Video> = {}): Video {
   uniqueId += 1
   return {
     id: `video-${uniqueId}`,
+    record_id: `record-${uniqueId}`,
     title: `Video ${uniqueId}`,
     status: 'DOWNLOADED',
     quality: 'high',
@@ -130,8 +172,10 @@ export function aVideo(overrides: Partial<Video> = {}): Video {
     position_seconds: 0,
     synced_at: null,
     published_at: null,
-    description: null,
     channel_name: null,
+    subtitle_language: null,
+    chapters: [],
+    summary: null,
     ...overrides,
   }
 }
@@ -140,11 +184,13 @@ export function aHomeVideo(overrides: Partial<HomeVideo> = {}): HomeVideo {
   uniqueId += 1
   return {
     id: `video-${uniqueId}`,
+    record_id: `record-${uniqueId}`,
     title: `Video ${uniqueId}`,
     thumbnail_filename: null,
     duration_seconds: 120,
     watched: false,
     position_seconds: 0,
+    published_at: null,
     source: {
       kind: 'playlist',
       id: `playlist-${uniqueId}`,
@@ -152,6 +198,38 @@ export function aHomeVideo(overrides: Partial<HomeVideo> = {}): HomeVideo {
       path: `playlists/playlist-${uniqueId}`,
       avatar_filename: null,
     },
+    category_ids: [],
+    ...overrides,
+  }
+}
+
+export function aCategoryVideo(overrides: Partial<CategoryVideo> = {}): CategoryVideo {
+  const video = aVideo()
+  return {
+    ...video,
+    source: {
+      kind: 'playlist',
+      id: `playlist-${uniqueId}`,
+      name: `Playlist ${uniqueId}`,
+      path: `playlists/playlist-${uniqueId}`,
+      avatar_filename: null,
+    },
+    category_ids: [],
+    ...overrides,
+  }
+}
+
+export function aVideoCategoryChoice(
+  overrides: Partial<VideoCategoryChoice> = {},
+): VideoCategoryChoice {
+  uniqueId += 1
+  return {
+    id: `category-${uniqueId}`,
+    name: `Category ${uniqueId}`,
+    color: '#f59e0b',
+    belongs: false,
+    from: null,
+    verdict: null,
     ...overrides,
   }
 }
@@ -176,6 +254,110 @@ export function anAnnouncement(overrides: Partial<Announcement> = {}): Announcem
   return {
     id: `announcement-${uniqueId}`,
     text: `Announcement ${uniqueId}`,
+    ...overrides,
+  }
+}
+
+export function aVersion(overrides: Partial<AppVersion> = {}): AppVersion {
+  return {
+    version: 'v0.9.2',
+    channel: 'release',
+    commit: {
+      sha: 'abc1234def5678abc1234def5678abc1234def56',
+      subject: 'Fix sync',
+      date: '2026-10-19T10:00:00Z',
+    },
+    ...overrides,
+  }
+}
+
+export function aCategory(overrides: Partial<Category> = {}): Category {
+  uniqueId += 1
+  return {
+    id: `category-${uniqueId}`,
+    name: `Category ${uniqueId}`,
+    color: '#f59e0b',
+    ai_prompt: null,
+    unwatched_count: 0,
+    ai_verdict_count: 0,
+    channels: [],
+    playlists: [],
+    ...overrides,
+  }
+}
+
+export function aHomeCategorySection(
+  overrides: Partial<HomeCategorySection> = {},
+): HomeCategorySection {
+  uniqueId += 1
+  return {
+    id: `category-${uniqueId}`,
+    name: `Category ${uniqueId}`,
+    color: '#f59e0b',
+    videos: [aHomeVideo()],
+    ...overrides,
+  }
+}
+
+export function aCreatedCategory(overrides: Partial<CreatedCategory> = {}): CreatedCategory {
+  uniqueId += 1
+  return {
+    id: `category-${uniqueId}`,
+    name: `Category ${uniqueId}`,
+    color: '#f59e0b',
+    ai_prompt: null,
+    channels: [],
+    playlists: [],
+    ...overrides,
+  }
+}
+
+export function aCategoryList(
+  categories: Category[] = [],
+  overrides: Partial<CategoryList> = {},
+): CategoryList {
+  return {
+    categories,
+    unwatched_total: 0,
+    ...overrides,
+  }
+}
+
+export function aPreferences(overrides: Partial<Preferences> = {}): Preferences {
+  return {
+    categories_enabled: true,
+    home_show_continue_watching: true,
+    home_show_categories: true,
+    home_show_quick_watches: true,
+    home_show_latest: true,
+    theme: 'light',
+    ai_enabled: false,
+    ollama_url: null,
+    summaries_enabled: false,
+    summaries_model: 'qwen3:4b',
+    summaries_context_length: 12288,
+    summaries_temperature: 0.3,
+    summaries_thinking: true,
+    summaries_prompt: SHIPPED_PROMPT,
+    summaries_prompt_is_default: true,
+    categorization_enabled: false,
+    categorization_model: 'qwen3:4b',
+    categorization_context_length: 4096,
+    categorization_temperature: 0,
+    categorization_thinking: true,
+    categorization_prompt: SHIPPED_CATEGORIZATION_PROMPT,
+    categorization_prompt_is_default: true,
+    ...overrides,
+  }
+}
+
+export function anOllamaServer(overrides: Partial<OllamaServer> = {}): OllamaServer {
+  return {
+    version: '0.40.13',
+    models: [
+      { name: 'gemma3:4b', size_bytes: 3_338_801_804, thinking: false },
+      { name: 'qwen3:4b', size_bytes: 2_497_293_918, thinking: true },
+    ],
     ...overrides,
   }
 }

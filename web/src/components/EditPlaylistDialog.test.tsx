@@ -1,17 +1,29 @@
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { EditPlaylistDialog } from './EditPlaylistDialog'
-import { aPlaylist } from '@/test/helpers'
+import {
+  aCategory,
+  aCategoryList,
+  aPlaylist,
+  aPreferences,
+  mockApi,
+  renderWithProviders,
+  type Routes,
+} from '@/test/helpers'
 import type { PlaylistListItem } from '@/api/types'
 
 function renderDialog(
   playlist: PlaylistListItem,
   onSave: (changes: object) => Promise<void> = vi.fn(async () => {}),
+  routes: Routes = { 'GET /api/categories': aCategoryList() },
 ) {
+  const fetchMock = mockApi({ 'GET /api/preferences': aPreferences(), ...routes })
   const onOpenChange = vi.fn()
-  render(<EditPlaylistDialog playlist={playlist} open onOpenChange={onOpenChange} onSave={onSave} />)
-  return { onOpenChange, onSave }
+  renderWithProviders(
+    <EditPlaylistDialog playlist={playlist} open onOpenChange={onOpenChange} onSave={onSave} />,
+  )
+  return { onOpenChange, onSave, fetchMock }
 }
 
 describe('EditPlaylistDialog', () => {
@@ -36,6 +48,91 @@ describe('EditPlaylistDialog', () => {
 
     expect(onSave).toHaveBeenCalledExactlyOnceWith({ reconcile_interval_minutes: 30 })
     expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it('sends only the checked summaries setting', async () => {
+    const { onSave, onOpenChange } = renderDialog(aPlaylist(), undefined, {
+      'GET /api/categories': aCategoryList(),
+      'GET /api/preferences': aPreferences({ ai_enabled: true, summaries_enabled: true }),
+    })
+    const user = userEvent.setup()
+    const summaries = screen.getByRole('checkbox', { name: 'Summarize videos' })
+
+    expect(summaries).not.toBeChecked()
+    await waitFor(() => expect(summaries).toBeEnabled())
+    await user.click(summaries)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(onSave).toHaveBeenCalledExactlyOnceWith({ summaries_enabled: true })
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it('sends only the checked categorization setting', async () => {
+    const { onSave, onOpenChange } = renderDialog(aPlaylist(), undefined, {
+      'GET /api/categories': aCategoryList(),
+      'GET /api/preferences': aPreferences({ ai_enabled: true, categorization_enabled: true }),
+    })
+    const user = userEvent.setup()
+    const categorization = await screen.findByRole('checkbox', { name: 'Categorize videos' })
+
+    expect(categorization).not.toBeChecked()
+    await waitFor(() => expect(categorization).toBeEnabled())
+    await user.click(categorization)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(onSave).toHaveBeenCalledExactlyOnceWith({ categorization_enabled: true })
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it('disables summaries while AI is off', async () => {
+    const { fetchMock } = renderDialog(aPlaylist())
+    const summaries = screen.getByRole('checkbox', { name: 'Summarize videos' })
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith('/api/preferences', expect.anything()),
+    )
+
+    expect(summaries).toBeDisabled()
+  })
+
+  it('lets summaries be turned off while AI is off', async () => {
+    const { onSave, onOpenChange, fetchMock } = renderDialog(aPlaylist({ summaries_enabled: true }))
+    const user = userEvent.setup()
+    const summaries = screen.getByRole('checkbox', { name: 'Summarize videos' })
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith('/api/preferences', expect.anything()),
+    )
+
+    expect(summaries).toBeChecked()
+    expect(summaries).toBeEnabled()
+    await user.click(summaries)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(onSave).toHaveBeenCalledExactlyOnceWith({ summaries_enabled: false })
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it('offers no categories and saves none while categories are off', async () => {
+    const { onSave, onOpenChange, fetchMock } = renderDialog(
+      aPlaylist({ reconcile_interval_minutes: 180 }),
+      undefined,
+      {
+        'GET /api/categories': aCategoryList(),
+        'GET /api/preferences': aPreferences({ categories_enabled: false }),
+      },
+    )
+    const user = userEvent.setup()
+    const amount = screen.getByLabelText('Check for new videos every')
+
+    await user.clear(amount)
+    await user.type(amount, '4')
+    expect(screen.queryByRole('group', { name: 'Categories' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    expect(onSave).toHaveBeenCalledExactlyOnceWith({ reconcile_interval_minutes: 240 })
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'PUT'),
+    ).toEqual([])
   })
 
   it('sends nothing and closes when nothing changed', async () => {
@@ -76,5 +173,73 @@ describe('EditPlaylistDialog', () => {
     expect(amount).toBeInvalid()
     expect(onSave).not.toHaveBeenCalled()
     expect(onOpenChange).not.toHaveBeenCalled()
+  })
+
+  it('saves a change of categories alone', async () => {
+    const { onSave, onOpenChange, fetchMock } = renderDialog(
+      aPlaylist({ id: 'PLend', name: 'Endgames' }),
+      vi.fn(async () => {}),
+      {
+        'GET /api/categories': aCategoryList([
+          aCategory({ id: 'chess', name: 'Chess', playlists: ['PLend'] }),
+          aCategory({ id: 'courses', name: 'Courses', channels: ['@teacher'] }),
+        ]),
+        'PUT /api/categories/courses/members': null,
+      },
+    )
+    const user = userEvent.setup()
+    await screen.findByRole('button', { name: 'Chess', pressed: true })
+
+    await user.click(screen.getByRole('button', { name: 'Courses' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    expect(onSave).not.toHaveBeenCalled()
+    expect(
+      fetchMock.mock.calls
+        .filter(([, init]) => (init as RequestInit | undefined)?.method === 'PUT')
+        .map(([url, init]) => [url, JSON.parse((init as RequestInit).body as string)]),
+    ).toEqual([
+      ['/api/categories/courses/members', { channels: ['@teacher'], playlists: ['PLend'] }],
+    ])
+  })
+  it('shows where the playlist is stored', () => {
+    renderDialog(aPlaylist({ name: 'Lofi beats', path: 'music/chill' }))
+
+    expect(screen.getByText('Location')).toBeInTheDocument()
+    expect(screen.getByText('music/chill')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Move…' })).toBeInTheDocument()
+  })
+
+  it('opens the move dialog without saving', async () => {
+    const { onSave } = renderDialog(aPlaylist({ name: 'Lofi beats', path: 'music/chill' }), vi.fn(async () => {}), {
+      'GET /api/categories': aCategoryList(),
+      'GET /api/playlists': [],
+      'GET /api/channels': [],
+      'GET /api/directories': { root: '/videos', path: '', entries: [] },
+    })
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: 'Move…' }))
+
+    expect(await screen.findByRole('dialog', { name: 'Move Lofi beats' })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: 'Edit Lofi beats settings' })).not.toBeInTheDocument()
+    expect(await screen.findByRole('radio', { name: 'music/' })).toBeChecked()
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
+  it('focuses its first setting, not "Move…", when opened', () => {
+    renderDialog(aPlaylist())
+
+    expect(screen.getByLabelText('Check for new videos every')).toHaveFocus()
+  })
+
+  it('disables "Move…" while the playlist has work in progress', () => {
+    renderDialog(aPlaylist({ work_in_progress: true }))
+
+    expect(screen.getByRole('button', { name: 'Move…' })).toBeDisabled()
+    expect(
+      screen.getByText('Downloads in progress — you can move it once they finish.'),
+    ).toBeInTheDocument()
   })
 })

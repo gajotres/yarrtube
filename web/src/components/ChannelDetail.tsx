@@ -2,16 +2,25 @@ import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   queryKeys,
+  useCategoriesShown,
+  useCategorizationAvailable,
   useChannels,
   useChannelVideos,
+  useDeleteSource,
   useLibraryAction,
-  useRemoveQuery,
 } from '@/api/queries'
-import { reconcileChannel, deleteChannel, markChannelWatched, avatarMediaUrl } from '@/api/client'
+import {
+  reconcileChannel,
+  deleteChannel,
+  deleteSourceAiVerdicts,
+  markChannelWatched,
+  avatarMediaUrl,
+} from '@/api/client'
 import { useWatchProgress } from '@/hooks/useWatchProgress'
 import { usePlaybackSpeed } from '@/hooks/usePlaybackSpeed'
 import { useSaveChannelSettings } from '@/hooks/useSaveChannelSettings'
 import { useVideoSelection } from '@/hooks/useVideoSelection'
+import { youtubeChannelUrl } from '@/lib/sourcePath'
 import { VideoPlayer } from './VideoPlayer'
 import { VideoDetail } from './VideoDetail'
 import { VideoListPane } from './VideoListPane'
@@ -23,9 +32,11 @@ export function ChannelDetail() {
   const navigate = useNavigate()
   const { data: channels, error: channelsError } = useChannels()
   const refreshing = useLibraryAction()
-  const removeQuery = useRemoveQuery()
+  const deleteSource = useDeleteSource()
   const saveChannelSettings = useSaveChannelSettings()
   const [editing, setEditing] = useState(false)
+  const categoriesShown = useCategoriesShown()
+  const categorizationAvailable = useCategorizationAvailable()
   const channel = channels?.find((item) => item.id === id) ?? null
 
   const { data: videos, error } = useChannelVideos(id)
@@ -60,9 +71,19 @@ export function ChannelDetail() {
         onSync={refreshing(() => reconcileChannel(id))}
         onMarkWatched={refreshing(() => markChannelWatched(id))}
         onEditRequest={() => setEditing(true)}
+        youtubeLink={{ href: youtubeChannelUrl(id), label: 'Open channel on YouTube' }}
+        aiCategorization={
+          categoriesShown
+            ? {
+                enabled: categorizationAvailable && channel.categorization_enabled,
+                onDeleteAiVerdicts: refreshing(() =>
+                  deleteSourceAiVerdicts({ kind: 'channel', id }),
+                ),
+              }
+            : undefined
+        }
         onDelete={refreshing(async () => {
-          await deleteChannel(id)
-          removeQuery(queryKeys.channelVideos(id))
+          await deleteSource(queryKeys.channelVideos(id), () => deleteChannel(id))
           navigate('/')
         })}
         deleteDescription="This removes the channel from tracking."
@@ -77,6 +98,7 @@ export function ChannelDetail() {
         <div className="contents md:flex md:h-full md:min-w-0 md:flex-col md:gap-4 md:overflow-y-auto">
           <VideoPlayer
             basePath={channel.path}
+            source={{ kind: 'channel', id }}
             video={selectedVideo}
             autoplay={autoplay}
             onVideoElement={setVideoElement}
@@ -97,7 +119,8 @@ export function ChannelDetail() {
 
         <VideoListPane
           noun="channel"
-          basePath={channel.path}
+          basePathOf={() => channel.path}
+          sourceNameOf={() => channel.name}
           videos={videos}
           error={error}
           selectedVideoId={selectedVideo?.id ?? null}

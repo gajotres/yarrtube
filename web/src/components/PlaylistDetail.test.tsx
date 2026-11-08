@@ -3,17 +3,31 @@ import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Route, Routes } from 'react-router-dom'
 import { PlaylistDetail } from './PlaylistDetail'
-import { aPlaylist, aVideo, mockApi, renderWithProviders, type Routes as ApiRoutes } from '@/test/helpers'
+import { queryKeys } from '@/api/queries'
+import {
+  aPlaylist,
+  aVideo,
+  heldUntilReleased,
+  aPreferences,
+  mockApi,
+  renderWithProviders,
+  type Routes as ApiRoutes,
+} from '@/test/helpers'
+import { useDesktopViewport } from '@/test/viewport'
 
 function renderPlaylist(routes: ApiRoutes, route: string) {
-  mockApi(routes)
-  return renderWithProviders(
+  const fetchMock = mockApi({
+    'GET /api/preferences': aPreferences({ categories_enabled: false }),
+    ...routes,
+  })
+  const rendered = renderWithProviders(
     <Routes>
       <Route path="/playlists/:id" element={<PlaylistDetail />} />
       <Route path="/" element={<p>home page</p>} />
     </Routes>,
     { route },
   )
+  return { ...rendered, fetchMock }
 }
 
 describe('PlaylistDetail', () => {
@@ -34,8 +48,47 @@ describe('PlaylistDetail', () => {
     expect(document.querySelector('video')?.getAttribute('src')).toBe(
       `/media/${playlist.path}/first.mp4`,
     )
-    // Playlists have no mark-all-watched action.
-    expect(screen.queryByRole('button', { name: 'Mark all watched' })).not.toBeInTheDocument()
+  })
+
+  it("summarizes the playlist's unwatched count", async () => {
+    for (const hidden of [false, true]) {
+      const { unmount } = renderPlaylist(
+        {
+          'GET /api/playlists': [
+            aPlaylist({ id: 'PL1', unwatched_count: 2, hide_unwatched_count: hidden }),
+          ],
+          'GET /api/playlists/PL1/videos': [aVideo(), aVideo(), aVideo()],
+        },
+        '/playlists/PL1',
+      )
+
+      expect(await screen.findByText('3 videos · 2 unwatched')).toBeInTheDocument()
+      unmount()
+    }
+  })
+
+  it('shows progress and time left on an in-progress row', async () => {
+    renderPlaylist(
+      {
+        'GET /api/playlists': [aPlaylist({ id: 'PL1' })],
+        'GET /api/playlists/PL1/videos': [
+          aVideo({ title: 'Fresh Video', duration_seconds: 120 }),
+          aVideo({ title: 'Started Video', position_seconds: 120, duration_seconds: 600 }),
+        ],
+      },
+      '/playlists/PL1',
+    )
+
+    // Each row's select button, not its "Actions for …" menu button.
+    const started = await screen.findByRole('button', { name: /^(?!Actions for).*Started Video$/ })
+    expect(within(started).getByRole('progressbar', { name: 'Watch progress' })).toHaveAttribute(
+      'aria-valuenow',
+      '20',
+    )
+    expect(within(started).getByText('8m left')).toBeInTheDocument()
+    const fresh = screen.getByRole('button', { name: /^(?!Actions for).*Fresh Video$/ })
+    expect(within(fresh).queryByRole('progressbar')).not.toBeInTheDocument()
+    expect(within(fresh).getByText('2:00')).toBeInTheDocument()
   })
 
   it('reports an unknown playlist', async () => {
@@ -66,7 +119,7 @@ describe('PlaylistDetail', () => {
     expect(await screen.findByText('No video selected.')).toBeInTheDocument()
   })
 
-  it('keeps Sync visible and the other actions in the ⋮ menu', async () => {
+  it('keeps every action, Sync included, in the ⋮ menu on mobile', async () => {
     renderPlaylist(
       {
         'GET /api/playlists': [aPlaylist({ id: 'PL1', name: 'The Playlist' })],
@@ -75,11 +128,58 @@ describe('PlaylistDetail', () => {
       '/playlists/PL1',
     )
 
-    expect(await screen.findByRole('button', { name: 'Sync' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'More actions for The Playlist' }))
-    expect(await screen.findByRole('menuitem', { name: 'Delete' })).toBeInTheDocument()
+    await user.click(await screen.findByRole('button', { name: 'More actions for The Playlist' }))
+
+    expect(
+      (await screen.findAllByRole('menuitem')).map((item) => item.textContent),
+    ).toEqual([
+      'Sync',
+      'Mark all watched',
+      'Exclude from home',
+      'Hide unwatched count',
+      'Edit settings',
+      'Open playlist on YouTube',
+      'Delete',
+    ])
+    expect(screen.queryByRole('button', { name: 'Sync' })).not.toBeInTheDocument()
+  })
+
+  describe('on desktop', () => {
+    useDesktopViewport()
+
+    it('lays every action but mark-all-watched and delete out as a button, then a ⋮ menu offering both', async () => {
+      renderPlaylist(
+        {
+          'GET /api/playlists': [aPlaylist({ id: 'PL1', name: 'The Playlist' })],
+          'GET /api/playlists/PL1/videos': [],
+        },
+        '/playlists/PL1',
+      )
+
+      expect(await screen.findByRole('button', { name: 'Sync' })).toBeInTheDocument()
+      for (const name of [
+        'Exclude from home',
+        'Hide unwatched count',
+        'Edit settings',
+        'More actions for The Playlist',
+      ]) {
+        expect(screen.getByRole('button', { name })).toBeInTheDocument()
+      }
+      expect(screen.getByRole('link', { name: 'Open playlist on YouTube' })).toHaveAttribute(
+        'href',
+        'https://www.youtube.com/playlist?list=PL1',
+      )
+      expect(screen.queryByRole('button', { name: 'Mark all watched' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
+      await userEvent
+        .setup()
+        .click(screen.getByRole('button', { name: 'More actions for The Playlist' }))
+      expect((await screen.findAllByRole('menuitem')).map((item) => item.textContent)).toEqual([
+        'Mark all watched',
+        'Delete',
+      ])
+    })
   })
 
   it('excludes the playlist from home from its page header menu', async () => {
@@ -106,6 +206,67 @@ describe('PlaylistDetail', () => {
     expect(await screen.findByRole('menuitem', { name: 'Include in home' })).toBeInTheDocument()
   })
 
+  it('marks the playlist watched from its page header', async () => {
+    const first = aVideo({ title: 'First Video' })
+    const second = aVideo({ title: 'Second Video' })
+    let marked = false
+    renderPlaylist(
+      {
+        'GET /api/playlists': () => [
+          aPlaylist({ id: 'PL1', name: 'The Playlist', unwatched_count: marked ? 0 : 2 }),
+        ],
+        'GET /api/playlists/PL1/videos': () => [
+          { ...first, watched: marked },
+          { ...second, watched: marked },
+        ],
+        'POST /api/playlists/PL1/watched': () => {
+          marked = true
+          return null
+        },
+      },
+      '/playlists/PL1',
+    )
+    const user = userEvent.setup()
+
+    expect(await screen.findByText('2 videos · 2 unwatched')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'More actions for The Playlist' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Mark all watched' }))
+    await user.click(await screen.findByRole('button', { name: 'Mark watched' }))
+
+    expect(await screen.findByText('2 videos')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: /^Watched.*Second Video$/ }),
+    ).toBeInTheDocument()
+  })
+
+  it('hides the unwatched count from its page header', async () => {
+    let playlist = aPlaylist({ id: 'PL1', name: 'The Playlist' })
+    const update = vi.fn(() => {
+      playlist = { ...playlist, hide_unwatched_count: true }
+      return playlist
+    })
+    const { fetchMock } = renderPlaylist(
+      {
+        'GET /api/playlists': () => [playlist],
+        'GET /api/playlists/PL1/videos': [],
+        'PATCH /api/playlists/PL1': update,
+      },
+      '/playlists/PL1',
+    )
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'More actions for The Playlist' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Hide unwatched count' }))
+
+    expect(update).toHaveBeenCalledOnce()
+    const patchCall = fetchMock.mock.calls.find(
+      ([, init]) => (init as RequestInit | undefined)?.method === 'PATCH',
+    ) as [string, RequestInit]
+    expect(JSON.parse(patchCall[1].body as string)).toEqual({ hide_unwatched_count: true })
+    await user.click(screen.getByRole('button', { name: 'More actions for The Playlist' }))
+    expect(await screen.findByRole('menuitem', { name: 'Show unwatched count' })).toBeInTheDocument()
+  })
+
   it('deletes the playlist from its page header menu after confirming', async () => {
     const remove = vi.fn(() => null)
     renderPlaylist(
@@ -127,6 +288,54 @@ describe('PlaylistDetail', () => {
 
     expect(await screen.findByText('home page')).toBeInTheDocument()
     expect(remove).toHaveBeenCalledOnce()
+  })
+
+  it("doesn't ask for its videos while it's being deleted", async () => {
+    const videos = vi.fn(() => [])
+    const remove = heldUntilReleased()
+    const { queryClient } = renderPlaylist(
+      {
+        'GET /api/playlists': [aPlaylist({ id: 'PL1', name: 'The Playlist' })],
+        'GET /api/playlists/PL1/videos': videos,
+        'DELETE /api/playlists/PL1': remove.route,
+      },
+      '/playlists/PL1',
+    )
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'More actions for The Playlist' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Delete' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(remove.route).toHaveBeenCalledOnce())
+
+    // A poll lands while the delete is in flight: the server may already have
+    // removed the playlist.
+    await queryClient.refetchQueries({ queryKey: queryKeys.playlistVideos('PL1') })
+    remove.release()
+
+    expect(await screen.findByText('home page')).toBeInTheDocument()
+    expect(videos).toHaveBeenCalledOnce()
+  })
+
+  it('keeps asking for its videos when deleting it fails', async () => {
+    const videos = vi.fn(() => [])
+    const { queryClient } = renderPlaylist(
+      {
+        'GET /api/playlists': [aPlaylist({ id: 'PL1', name: 'The Playlist' })],
+        'GET /api/playlists/PL1/videos': videos,
+        'DELETE /api/playlists/PL1': { status: 500, error: 'database is locked' },
+      },
+      '/playlists/PL1',
+    )
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'More actions for The Playlist' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Delete' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Delete' }))
+    expect(await within(dialog).findByText('database is locked')).toBeInTheDocument()
+
+    await queryClient.refetchQueries({ queryKey: queryKeys.playlistVideos('PL1') })
+
+    expect(videos).toHaveBeenCalledTimes(2)
   })
 
   it("alerts and leaves the playlist as it was when changing its home setting fails", async () => {

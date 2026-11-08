@@ -1,9 +1,11 @@
 use crate::domain::playlist::Playlist;
 use crate::domain::playlist::PlaylistId;
+use crate::domain::playlist::PlaylistSettingsChange;
 use crate::domain::playlist::errors::UpdatePlaylistError;
 use crate::domain::shared::ReconcileInterval;
 use crate::domain::task::Task;
 use crate::infrastructure::repositories::sqlite_playlist_repository::PlaylistRepository;
+use crate::infrastructure::repositories::sqlite_preferences_repository::PreferencesRepository;
 use crate::infrastructure::repositories::sqlite_task_repository::TaskRepository;
 use crate::infrastructure::shared::system_clock::Clock;
 use std::sync::Arc;
@@ -15,6 +17,7 @@ pub struct PlaylistUpdater {
     repository: Arc<dyn PlaylistRepository>,
     task_repository: Arc<dyn TaskRepository>,
     clock: Arc<dyn Clock>,
+    preferences_repository: Arc<dyn PreferencesRepository>,
 }
 
 impl PlaylistUpdater {
@@ -22,26 +25,28 @@ impl PlaylistUpdater {
         repository: Arc<dyn PlaylistRepository>,
         task_repository: Arc<dyn TaskRepository>,
         clock: Arc<dyn Clock>,
+        preferences_repository: Arc<dyn PreferencesRepository>,
     ) -> Self {
         Self {
             repository,
             task_repository,
             clock,
+            preferences_repository,
         }
     }
 }
 
 pub trait PlaylistUpdaterApi: Send + Sync {
-    /// Sets whether the playlist's videos are left out of home and/or its
-    /// reconcile interval, returning the playlist as stored. `None` keeps the
-    /// stored value; setting the value it already has changes nothing. A new
+    /// Applies `change` (whether the playlist's videos are left out of home,
+    /// whether its unwatched count is hidden, its reconcile interval),
+    /// returning the playlist as stored. A `None` setting keeps the stored
+    /// value; setting the value it already has changes nothing. A new
     /// interval brings the pending reconcile forward when it would now run
     /// later than `now + interval`.
     fn update_settings(
         &self,
         id: PlaylistId,
-        exclude_from_home: Option<bool>,
-        reconcile_interval: Option<ReconcileInterval>,
+        change: PlaylistSettingsChange,
     ) -> Result<Playlist, UpdatePlaylistError>;
 }
 
@@ -49,21 +54,19 @@ impl PlaylistUpdaterApi for PlaylistUpdater {
     fn update_settings(
         &self,
         id: PlaylistId,
-        exclude_from_home: Option<bool>,
-        reconcile_interval: Option<ReconcileInterval>,
+        change: PlaylistSettingsChange,
     ) -> Result<Playlist, UpdatePlaylistError> {
-        let playlist = Self::apply_settings(
-            self.find_playlist(&id)?,
-            exclude_from_home,
-            reconcile_interval,
-        );
+        self.ensure_summaries_available(change.summaries_enabled)?;
+        self.ensure_categorization_available(change.categorization_enabled)?;
+        let playlist = Self::apply_settings(self.find_playlist(&id)?, change);
         self.update_playlist(&playlist)?;
-        if let Some(reconcile_interval) = reconcile_interval {
+        if let Some(reconcile_interval) = change.reconcile_interval {
             self.bring_forward_next_reconcile(&id, reconcile_interval)?;
         }
         info!(
             playlist_id = %id,
             exclude_from_home = playlist.exclude_from_home,
+            hide_unwatched_count = playlist.hide_unwatched_count,
             reconcile_interval_minutes = playlist.reconcile_interval.minutes(),
             "updated playlist"
         );
@@ -72,6 +75,46 @@ impl PlaylistUpdaterApi for PlaylistUpdater {
 }
 
 impl PlaylistUpdater {
+    /// Enabling categorization needs it available in the preferences.
+    fn ensure_categorization_available(
+        &self,
+        categorization_enabled: Option<bool>,
+    ) -> Result<(), UpdatePlaylistError> {
+        if categorization_enabled != Some(true) {
+            return Ok(());
+        }
+        let preferences = self
+            .preferences_repository
+            .find()
+            .map_err(UpdatePlaylistError::Repository)?
+            .unwrap_or_default();
+        if preferences.categorization_available() {
+            Ok(())
+        } else {
+            Err(UpdatePlaylistError::CategorizationUnavailable)
+        }
+    }
+
+    /// Enabling summaries needs AI and summaries on in the preferences.
+    fn ensure_summaries_available(
+        &self,
+        summaries_enabled: Option<bool>,
+    ) -> Result<(), UpdatePlaylistError> {
+        if summaries_enabled != Some(true) {
+            return Ok(());
+        }
+        let preferences = self
+            .preferences_repository
+            .find()
+            .map_err(UpdatePlaylistError::Repository)?
+            .unwrap_or_default();
+        if preferences.summaries_available() {
+            Ok(())
+        } else {
+            Err(UpdatePlaylistError::SummariesUnavailable)
+        }
+    }
+
     fn find_playlist(&self, id: &PlaylistId) -> Result<Playlist, UpdatePlaylistError> {
         match self.repository.find(id) {
             Ok(Some(playlist)) => Ok(playlist),
@@ -80,17 +123,27 @@ impl PlaylistUpdater {
         }
     }
 
-    fn apply_settings(
-        playlist: Playlist,
-        exclude_from_home: Option<bool>,
-        reconcile_interval: Option<ReconcileInterval>,
-    ) -> Playlist {
-        let playlist = match exclude_from_home {
+    fn apply_settings(playlist: Playlist, change: PlaylistSettingsChange) -> Playlist {
+        let playlist = match change.exclude_from_home {
             Some(exclude_from_home) => playlist.with_exclude_from_home(exclude_from_home),
             None => playlist,
         };
-        match reconcile_interval {
+        let playlist = match change.hide_unwatched_count {
+            Some(hide_unwatched_count) => playlist.with_hide_unwatched_count(hide_unwatched_count),
+            None => playlist,
+        };
+        let playlist = match change.reconcile_interval {
             Some(reconcile_interval) => playlist.with_reconcile_interval(reconcile_interval),
+            None => playlist,
+        };
+        let playlist = match change.summaries_enabled {
+            Some(summaries_enabled) => playlist.with_summaries_enabled(summaries_enabled),
+            None => playlist,
+        };
+        match change.categorization_enabled {
+            Some(categorization_enabled) => {
+                playlist.with_categorization_enabled(categorization_enabled)
+            }
             None => playlist,
         }
     }

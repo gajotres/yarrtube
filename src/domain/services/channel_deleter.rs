@@ -6,7 +6,11 @@ use crate::infrastructure::repositories::filesystem_channel_avatar_repository::C
 use crate::infrastructure::repositories::sqlite_channel_repository::ChannelRepository;
 use crate::infrastructure::repositories::sqlite_channel_video_repository::ChannelVideoRepository;
 use crate::infrastructure::repositories::sqlite_task_repository::TaskRepository;
+use crate::infrastructure::repositories::sqlite_video_categories_repository::VideoCategoriesRepository;
+use crate::infrastructure::repositories::sqlite_video_category_verdict_repository::VideoCategoryVerdictRepository;
 use crate::infrastructure::repositories::sqlite_video_repository::VideoRepository;
+use crate::infrastructure::repositories::sqlite_video_summary_repository::VideoSummaryRepository;
+use crate::infrastructure::repositories::sqlite_video_transcript_repository::VideoTranscriptRepository;
 use crate::infrastructure::shared::domain_events::event_publisher::EventPublisher;
 use std::sync::Arc;
 use tracing::info;
@@ -16,28 +20,41 @@ use tracing::info;
 pub struct ChannelDeleter {
     repository: Arc<dyn ChannelRepository>,
     video_repository: Arc<dyn VideoRepository>,
+    video_transcript_repository: Arc<dyn VideoTranscriptRepository>,
+    video_summary_repository: Arc<dyn VideoSummaryRepository>,
     channel_video_repository: Arc<dyn ChannelVideoRepository>,
     avatar_repository: Arc<dyn ChannelAvatarRepository>,
     event_publisher: Arc<dyn EventPublisher>,
     task_repository: Arc<dyn TaskRepository>,
+    video_categories_repository: Arc<dyn VideoCategoriesRepository>,
+    video_category_verdict_repository: Arc<dyn VideoCategoryVerdictRepository>,
 }
 
 impl ChannelDeleter {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         repository: Arc<dyn ChannelRepository>,
         video_repository: Arc<dyn VideoRepository>,
+        video_transcript_repository: Arc<dyn VideoTranscriptRepository>,
+        video_summary_repository: Arc<dyn VideoSummaryRepository>,
         channel_video_repository: Arc<dyn ChannelVideoRepository>,
         avatar_repository: Arc<dyn ChannelAvatarRepository>,
         event_publisher: Arc<dyn EventPublisher>,
         task_repository: Arc<dyn TaskRepository>,
+        video_categories_repository: Arc<dyn VideoCategoriesRepository>,
+        video_category_verdict_repository: Arc<dyn VideoCategoryVerdictRepository>,
     ) -> Self {
         Self {
             repository,
             video_repository,
+            video_transcript_repository,
+            video_summary_repository,
             channel_video_repository,
             avatar_repository,
             event_publisher,
             task_repository,
+            video_categories_repository,
+            video_category_verdict_repository,
         }
     }
 }
@@ -70,8 +87,9 @@ impl ChannelDeleter {
         }
     }
 
-    /// Deletes each `ChannelVideo`'s owned `Video` row, then the
-    /// `ChannelVideo` rows themselves.
+    /// Deletes each `ChannelVideo`'s owned `Video` row, its transcript, its
+    /// summary, its categories and its verdicts, then the `ChannelVideo` rows
+    /// themselves.
     fn delete_channel_videos(&self, id: &ChannelHandle) -> Result<(), DeleteChannelError> {
         let channel_videos = self
             .channel_video_repository
@@ -80,6 +98,18 @@ impl ChannelDeleter {
         for channel_video in &channel_videos {
             self.video_repository
                 .delete(&channel_video.video_id)
+                .map_err(DeleteChannelError::Repository)?;
+            self.video_transcript_repository
+                .delete(&channel_video.video_id)
+                .map_err(DeleteChannelError::Repository)?;
+            self.video_summary_repository
+                .delete(&channel_video.video_id)
+                .map_err(DeleteChannelError::Repository)?;
+            self.video_categories_repository
+                .delete(&channel_video.video_id)
+                .map_err(DeleteChannelError::Repository)?;
+            self.video_category_verdict_repository
+                .delete_for_video(&channel_video.video_id)
                 .map_err(DeleteChannelError::Repository)?;
         }
         self.channel_video_repository

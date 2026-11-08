@@ -3,7 +3,7 @@ import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { VideoActionsMenu } from './VideoActionsMenu'
 import { useChannels, useRecentVideos } from '@/api/queries'
-import { aPlaylist, mockApi, renderWithProviders } from '@/test/helpers'
+import { aPlaylist, aPreferences, mockApi, renderWithProviders } from '@/test/helpers'
 
 /** Keeps the channel list and home videos observed, so a refetch of them shows up as a request. */
 function LibraryObserver() {
@@ -12,7 +12,7 @@ function LibraryObserver() {
   return null
 }
 
-const EMPTY_HOME = { continue_watching: [], quick_watches: [], latest: [] }
+const EMPTY_HOME = { continue_watching: [], categories: [], quick_watches: [], latest: [] }
 
 describe('VideoActionsMenu', () => {
   it('marks the video watched when "Mark as watched" is chosen', async () => {
@@ -27,7 +27,7 @@ describe('VideoActionsMenu', () => {
     renderWithProviders(
       <>
         <LibraryObserver />
-        <VideoActionsMenu videoId="abc" title="My Video" markable />
+        <VideoActionsMenu videoId="abc" recordId="rec-abc" title="My Video" sourceName="My Channel" markable />
       </>,
     )
     await waitFor(() => expect(home).toHaveBeenCalledOnce())
@@ -43,7 +43,7 @@ describe('VideoActionsMenu', () => {
 
   it('disables "Mark as watched" when not markable', async () => {
     mockApi({})
-    renderWithProviders(<VideoActionsMenu videoId="abc" title="My Video" markable={false} />)
+    renderWithProviders(<VideoActionsMenu videoId="abc" recordId="rec-abc" title="My Video" sourceName="My Channel" markable={false} />)
 
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: 'Actions for My Video' }))
@@ -65,7 +65,7 @@ describe('VideoActionsMenu', () => {
     renderWithProviders(
       <>
         <LibraryObserver />
-        <VideoActionsMenu videoId="abc" title="My Video" markable />
+        <VideoActionsMenu videoId="abc" recordId="rec-abc" title="My Video" sourceName="My Channel" markable />
       </>,
     )
     await waitFor(() => expect(home).toHaveBeenCalledOnce())
@@ -97,7 +97,9 @@ describe('VideoActionsMenu', () => {
         <LibraryObserver />
         <VideoActionsMenu
           videoId="abc"
+          recordId="rec-abc"
           title="My Video"
+          sourceName="My Channel"
           markable
           excludablePlaylist={{ id: 'PL1', name: 'Bluey' }}
         />
@@ -119,8 +121,8 @@ describe('VideoActionsMenu', () => {
   })
 
   it('offers no exclude item without a playlist', async () => {
-    mockApi({})
-    renderWithProviders(<VideoActionsMenu videoId="abc" title="My Video" markable />)
+    mockApi({ 'GET /api/preferences': aPreferences({ categories_enabled: false }) })
+    renderWithProviders(<VideoActionsMenu videoId="abc" recordId="rec-abc" title="My Video" sourceName="My Channel" markable />)
 
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: 'Actions for My Video' }))
@@ -144,7 +146,9 @@ describe('VideoActionsMenu', () => {
         <LibraryObserver />
         <VideoActionsMenu
           videoId="abc"
+          recordId="rec-abc"
           title="My Video"
+          sourceName="My Channel"
           markable
           excludablePlaylist={{ id: 'PL1', name: 'Bluey' }}
         />
@@ -163,5 +167,60 @@ describe('VideoActionsMenu', () => {
     )
     expect(channels).toHaveBeenCalledOnce()
     expect(home).toHaveBeenCalledOnce()
+  })
+
+  it("extends the control's hit area to 44 by 44 pixels on touch devices", () => {
+    mockApi({})
+    renderWithProviders(<VideoActionsMenu videoId="abc" recordId="rec-abc" title="My Video" sourceName="My Channel" markable />)
+
+    // A 28px control (size-7) grown by 8px on every side (-inset-2) under `pointer: coarse`.
+    expect(screen.getByRole('button', { name: 'Actions for My Video' })).toHaveClass(
+      'relative',
+      'size-7',
+      'pointer-coarse:after:absolute',
+      'pointer-coarse:after:-inset-2',
+    )
+  })
+
+  it('offers Edit categories only while categories are on', async () => {
+    mockApi({
+      'GET /api/preferences': aPreferences({ categories_enabled: true }),
+      'GET /api/videos/rec-abc/categories': { categories: [] },
+    })
+    renderWithProviders(
+      <VideoActionsMenu
+        videoId="abc"
+        recordId="rec-abc"
+        title="My Video"
+        sourceName="My Channel"
+        markable
+      />,
+    )
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: 'Actions for My Video' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Edit categories…' }))
+
+    expect(await screen.findByRole('dialog', { name: 'My Video' })).toBeInTheDocument()
+  })
+
+  it('offers no Edit categories while categories are off', async () => {
+    mockApi({ 'GET /api/preferences': aPreferences({ categories_enabled: false }) })
+    const { queryClient } = renderWithProviders(
+      <VideoActionsMenu
+        videoId="abc"
+        recordId="rec-abc"
+        title="My Video"
+        sourceName="My Channel"
+        markable
+      />,
+    )
+    await waitFor(() => expect(queryClient.getQueryData(['preferences'])).toBeDefined())
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: 'Actions for My Video' }))
+
+    expect(await screen.findByRole('menuitem', { name: 'Mark as watched' })).toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: 'Edit categories…' })).not.toBeInTheDocument()
   })
 })

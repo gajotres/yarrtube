@@ -1,10 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { screen, waitFor } from '@testing-library/react'
+import { cleanup, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { AddChannelDialog } from './AddChannelDialog'
-import { aChannel, aPlaylist, mockApi, renderWithProviders, type Routes } from '@/test/helpers'
+import {
+  aCategory,
+  aCategoryList,
+  aChannel,
+  aPlaylist,
+  aPreferences,
+  mockApi,
+  renderWithProviders,
+  type Routes,
+} from '@/test/helpers'
+import { RouteProbe } from '@/test/RouteProbe'
 
 const baseRoutes: Routes = {
+  'GET /api/preferences': aPreferences(),
+  'GET /api/categories': aCategoryList(),
   'GET /api/channels': [],
   'GET /api/playlists': [],
   'GET /api/directories': { root: '/videos', path: '', entries: [] },
@@ -68,6 +80,41 @@ describe('AddChannelDialog', () => {
     expect(screen.getByRole('button', { name: 'Create Channel' })).toBeEnabled()
   })
 
+  it('keeps a non-Latin handle in the folder name and allows creating it', async () => {
+    renderDialog({
+      [`GET /api/channels/preview?channel=${encodeURIComponent('@НаучныйСон')}`]: {
+        id: '@НаучныйСон',
+        title: 'Научный Сон',
+        avatar_url: null,
+      },
+    })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('Channel Handle or URL'), '@НаучныйСон')
+
+    expect(
+      await screen.findByText(/The latest 3 videos from “Научный Сон” will be downloaded to/),
+    ).toBeInTheDocument()
+    expect(screen.getByText('/videos/channels/научныйсон')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create Channel' })).toBeEnabled()
+  })
+
+  it('names the folder after the decoded handle when it is entered percent-encoded', async () => {
+    const encoded = '@%D0%9D%D0%B0%D1%83%D1%87%D0%BD%D1%8B%D0%B9%D0%A1%D0%BE%D0%BD'
+    renderDialog({
+      [`GET /api/channels/preview?channel=${encodeURIComponent(encoded)}`]: {
+        id: '@НаучныйСон',
+        title: 'Научный Сон',
+        avatar_url: null,
+      },
+    })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('Channel Handle or URL'), encoded)
+
+    expect(await screen.findByText('/videos/channels/научныйсон')).toBeInTheDocument()
+  })
+
   it('creates the channel with the numeric video limit and closes', async () => {
     const { fetchMock, onOpenChange } = renderDialog({
       'GET /api/channels/preview?channel=%40chan': {
@@ -94,7 +141,181 @@ describe('AddChannelDialog', () => {
       video_limit: 3,
       path: 'channels/chan',
       reconcile_interval_minutes: 180,
+      summaries_enabled: false,
+      categorization_enabled: false,
     })
+  })
+
+  it('creates the channel with summaries checked without opening advanced options', async () => {
+    const { fetchMock, onOpenChange } = renderDialog({
+      'GET /api/preferences': aPreferences({ ai_enabled: true, summaries_enabled: true }),
+      'GET /api/channels/preview?channel=%40chan': {
+        id: '@chan',
+        title: 'The Channel',
+        avatar_url: null,
+      },
+      'POST /api/channels': aChannel(),
+    })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('Channel Handle or URL'), '@chan')
+    const summaries = await screen.findByRole('checkbox', { name: 'Summarize videos' })
+    expect(summaries).toHaveAccessibleDescription('Generate and show an AI summary of each video.')
+    await waitFor(() => expect(summaries).toBeEnabled())
+    await user.click(summaries)
+    const submit = screen.getByRole('button', { name: 'Create Channel' })
+    await waitFor(() => expect(submit).toBeEnabled())
+    await user.click(submit)
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    const createCall = fetchMock.mock.calls.find(
+      ([, init]) => (init as RequestInit | undefined)?.method === 'POST',
+    ) as [string, RequestInit]
+    expect(JSON.parse(createCall[1].body as string)).toMatchObject({ summaries_enabled: true })
+  })
+
+  it('groups the AI options in an AI section', async () => {
+    renderDialog({
+      'GET /api/preferences': aPreferences({
+        ai_enabled: true,
+        summaries_enabled: true,
+        categorization_enabled: true,
+      }),
+    })
+    const section = await screen.findByRole('group', { name: 'AI' })
+
+    await waitFor(() =>
+      expect(within(section).getByRole('checkbox', { name: 'Categorize videos' })).toBeEnabled(),
+    )
+    expect(
+      within(section)
+        .getAllByRole('checkbox')
+        .map((box) => box.getAttribute('id')),
+    ).toEqual(['add-channel-summaries', 'add-channel-categorization'])
+    expect(
+      within(section).getByRole('checkbox', { name: 'Categorize videos' }),
+    ).toHaveAccessibleDescription(
+      'Let AI add each video to the categories it fits.',
+    )
+  })
+
+  it('creates the channel with categorization when checked', async () => {
+    const { fetchMock, onOpenChange } = renderDialog({
+      'GET /api/preferences': aPreferences({ ai_enabled: true, categorization_enabled: true }),
+      'GET /api/channels/preview?channel=%40chan': {
+        id: '@chan',
+        title: 'The Channel',
+        avatar_url: null,
+      },
+      'POST /api/channels': aChannel(),
+    })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('Channel Handle or URL'), '@chan')
+    const categorization = await screen.findByRole('checkbox', { name: 'Categorize videos' })
+    await waitFor(() => expect(categorization).toBeEnabled())
+    await user.click(categorization)
+    const submit = screen.getByRole('button', { name: 'Create Channel' })
+    await waitFor(() => expect(submit).toBeEnabled())
+    await user.click(submit)
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    const createCall = fetchMock.mock.calls.find(
+      ([, init]) => (init as RequestInit | undefined)?.method === 'POST',
+    ) as [string, RequestInit]
+    expect(JSON.parse(createCall[1].body as string)).toMatchObject({
+      categorization_enabled: true,
+    })
+  })
+
+  it('disables categorization while it is unavailable and links to the AI settings', async () => {
+    const { fetchMock } = renderDialog({})
+
+    const categorization = await screen.findByRole('checkbox', { name: 'Categorize videos' })
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith('/api/preferences', expect.anything()),
+    )
+    expect(categorization).toBeDisabled()
+    expect(categorization).not.toBeChecked()
+    expect(categorization).toHaveAccessibleDescription('Turn on AI categorization in AI settings.')
+  })
+
+  it('hides categorization while categories are off', async () => {
+    renderDialog({ 'GET /api/preferences': aPreferences({ categories_enabled: false }) })
+
+    await waitFor(() =>
+      expect(screen.queryByRole('checkbox', { name: 'Categorize videos' })).not.toBeInTheDocument(),
+    )
+    expect(screen.getByRole('checkbox', { name: 'Summarize videos' })).toBeInTheDocument()
+  })
+
+  it('disables summaries while AI is off and links to the AI settings', async () => {
+    const fetchMock = mockApi(baseRoutes)
+    const onOpenChange = vi.fn()
+    renderWithProviders(
+      <>
+        <AddChannelDialog open onOpenChange={onOpenChange} />
+        <RouteProbe />
+      </>,
+    )
+    const user = userEvent.setup()
+
+    const summaries = await screen.findByRole('checkbox', { name: 'Summarize videos' })
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith('/api/preferences', expect.anything()),
+    )
+    expect(summaries).toBeDisabled()
+    expect(summaries).not.toBeChecked()
+    expect(summaries).toHaveAccessibleDescription('Turn on AI summaries in AI settings.')
+    await user.click(screen.getAllByRole('link', { name: 'AI settings' })[0]!)
+
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+    expect(screen.getByRole('status', { name: 'Current route', hidden: true })).toHaveTextContent(
+      '/ai',
+    )
+  })
+
+  it('offers no categories and saves none while categories are off', async () => {
+    const { fetchMock, onOpenChange } = renderDialog({
+      'GET /api/preferences': aPreferences({ categories_enabled: false }),
+      'GET /api/channels/preview?channel=%40chan': {
+        id: '@chan',
+        title: 'The Channel',
+        avatar_url: null,
+      },
+      'POST /api/channels': aChannel(),
+    })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('Channel Handle or URL'), '@chan')
+    const submit = screen.getByRole('button', { name: 'Create Channel' })
+    await waitFor(() => expect(submit).toBeEnabled())
+    expect(screen.queryByRole('group', { name: 'Categories' })).not.toBeInTheDocument()
+    await user.click(submit)
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/categories')),
+    ).toEqual([])
+  })
+
+  it('should show the add channel submit error as an alert', async () => {
+    renderDialog({
+      'GET /api/channels/preview?channel=%40chan': {
+        id: '@chan',
+        title: 'The Channel',
+        avatar_url: null,
+      },
+      'POST /api/channels': { status: 422, error: 'destination already used' },
+    })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('Channel Handle or URL'), '@chan')
+    const submit = screen.getByRole('button', { name: 'Create Channel' })
+    await waitFor(() => expect(submit).toBeEnabled())
+    await user.click(submit)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('destination already used')
   })
 
   it('creates the channel with the interval set under advanced options', async () => {
@@ -129,6 +350,8 @@ describe('AddChannelDialog', () => {
       video_limit: 3,
       path: 'channels/chan',
       reconcile_interval_minutes: 30,
+      summaries_enabled: false,
+      categorization_enabled: false,
     })
   })
 
@@ -182,5 +405,53 @@ describe('AddChannelDialog', () => {
 
     expect(await screen.findByText('channel not found')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Create Channel' })).toBeDisabled()
+  })
+
+  it('adds a channel into the chosen categories, and reports categories that failed to save', async () => {
+    const routes = (streamsResponse: unknown): Routes => ({
+      'GET /api/categories': aCategoryList([
+        aCategory({ id: 'chess', name: 'Chess', channels: ['@other'] }),
+        aCategory({ id: 'cooking', name: 'Cooking' }),
+        aCategory({ id: 'streams', name: 'Streams' }),
+      ]),
+      'GET /api/channels/preview?channel=%40chan': {
+        id: '@chan',
+        title: 'The Channel',
+        avatar_url: null,
+      },
+      'POST /api/channels': aChannel({ id: '@chan' }),
+      'PUT /api/categories/chess/members': null,
+      'PUT /api/categories/streams/members': streamsResponse,
+    })
+    const addWithCategories = async () => {
+      const user = userEvent.setup()
+      await user.type(screen.getByLabelText('Channel Handle or URL'), '@chan')
+      await user.click(await screen.findByRole('button', { name: 'Chess' }))
+      await user.click(screen.getByRole('button', { name: 'Streams' }))
+      const submit = screen.getByRole('button', { name: 'Create Channel' })
+      await waitFor(() => expect(submit).toBeEnabled())
+      await user.click(submit)
+    }
+    const saved = renderDialog(routes(null))
+    await addWithCategories()
+    await waitFor(() => expect(saved.onOpenChange).toHaveBeenCalledWith(false))
+    const membersSent = saved.fetchMock.mock.calls
+      .filter(([, init]) => (init as RequestInit | undefined)?.method === 'PUT')
+      .map(([url, init]) => [url, JSON.parse((init as RequestInit).body as string)])
+    cleanup()
+
+    const failed = renderDialog(routes({ status: 500, error: 'disk full' }))
+    await addWithCategories()
+
+    expect(membersSent).toEqual([
+      ['/api/categories/chess/members', { channels: ['@other', '@chan'], playlists: [] }],
+      ['/api/categories/streams/members', { channels: ['@chan'], playlists: [] }],
+    ])
+    expect(
+      await screen.findByText(
+        'The channel was added, but its categories were not saved: disk full',
+      ),
+    ).toBeInTheDocument()
+    expect(failed.onOpenChange).not.toHaveBeenCalled()
   })
 })

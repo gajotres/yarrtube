@@ -4,6 +4,8 @@
    ui/tabs classes (data-horizontal: / group-data-horizontal/tabs: …) target it. */
 @custom-variant data-horizontal (&[data-orientation="horizontal"]);
 @custom-variant data-vertical (&[data-orientation="vertical"]);
+/* Dark mode follows the `dark` class on <html> (the header toggle), not the OS. */
+@custom-variant dark (&:where(.dark, .dark *));
 
 :root {
   --background: #ffffff;
@@ -37,12 +39,47 @@
   --radius: 0.625rem;
 
   /* Shared by the sticky header and the sticky mobile video player below it. */
-  --header-height: 4rem;
+  --header-height: 3.5rem;
+  /* Where the pinned player sits: below the header, or at the top while the
+     mobile header is scrolled out of view. */
+  --header-offset: var(--header-height);
 
   --font-sans: "Archivo", ui-sans-serif, system-ui, sans-serif;
   --font-heading: "Bricolage Grotesque", var(--font-sans);
 
   color-scheme: light;
+}
+
+.dark {
+  --background: #0f0f0f;
+  --foreground: #f1f1f1;
+
+  --card: #181818;
+  --card-foreground: #f1f1f1;
+
+  --popover: #212121;
+  --popover-foreground: #f1f1f1;
+
+  --primary: #3fa168;
+  --primary-foreground: #ffffff;
+
+  --secondary: #272727;
+  --secondary-foreground: #f1f1f1;
+
+  --muted: #272727;
+  --muted-foreground: #aaaaaa;
+
+  --accent: #1d2e23;
+  --accent-foreground: #f1f1f1;
+
+  --destructive: #f05252;
+  --destructive-foreground: #ffffff;
+
+  --border: #2e2e2e;
+  --input: #3a3a3a;
+  --ring: #3fa168;
+
+  color-scheme: dark;
 }
 
 @theme inline {
@@ -84,6 +121,8 @@
 
   --animate-beacon-pulse: beacon-pulse 2s ease-in-out infinite;
   --animate-enter: enter 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-seek-feedback: seek-feedback 0.7s ease-out both;
+  --animate-seek-chevron: seek-chevron 0.6s ease-in-out both;
 }
 
 @media (width >= 40rem) {
@@ -99,6 +138,12 @@
 
   body {
     @apply bg-background text-foreground font-sans antialiased;
+  }
+
+  /* Thin, muted scrollbars, so nested scroll areas don't weigh on the layout. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--muted-foreground) 35%, transparent) transparent;
   }
 }
 
@@ -122,6 +167,29 @@
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes seek-feedback {
+  0% {
+    opacity: 0;
+  }
+  15%,
+  60% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes seek-chevron {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
   }
 }
 

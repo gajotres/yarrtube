@@ -2,9 +2,19 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { AddPlaylistDialog } from './AddPlaylistDialog'
-import { aPlaylist, mockApi, renderWithProviders, type Routes } from '@/test/helpers'
+import {
+  aCategory,
+  aCategoryList,
+  aPlaylist,
+  aPreferences,
+  mockApi,
+  renderWithProviders,
+  type Routes,
+} from '@/test/helpers'
 
 const baseRoutes: Routes = {
+  'GET /api/preferences': aPreferences(),
+  'GET /api/categories': aCategoryList(),
   'GET /api/playlists': [],
   'GET /api/channels': [],
   'GET /api/directories': { root: '/videos', path: '', entries: [] },
@@ -244,7 +254,78 @@ describe('AddPlaylistDialog', () => {
       quality: 'high',
       exclude_from_home: false,
       reconcile_interval_minutes: 180,
+      summaries_enabled: false,
+      categorization_enabled: false,
     })
+  })
+
+  it('creates the playlist with categorization when checked', async () => {
+    const { fetchMock, onOpenChange } = renderDialog({
+      'GET /api/preferences': aPreferences({ ai_enabled: true, categorization_enabled: true }),
+      'GET /api/playlists/preview?playlist=PL1': { id: 'PL1', title: 'My Mix', video_count: 3 },
+      'POST /api/playlists': aPlaylist(),
+    })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('Playlist ID or URL'), 'PL1')
+    const categorization = await screen.findByRole('checkbox', { name: 'Categorize videos' })
+    await waitFor(() => expect(categorization).toBeEnabled())
+    await user.click(categorization)
+    const submit = screen.getByRole('button', { name: 'Create Playlist' })
+    await waitFor(() => expect(submit).toBeEnabled())
+    await user.click(submit)
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    const createCall = fetchMock.mock.calls.find(
+      ([, init]) => (init as RequestInit | undefined)?.method === 'POST',
+    ) as [string, RequestInit]
+    expect(JSON.parse(createCall[1].body as string)).toMatchObject({
+      categorization_enabled: true,
+    })
+  })
+
+  it('creates the playlist with summaries checked without opening advanced options', async () => {
+    const { fetchMock, onOpenChange } = renderDialog({
+      'GET /api/preferences': aPreferences({ ai_enabled: true, summaries_enabled: true }),
+      'GET /api/playlists/preview?playlist=PL1': { id: 'PL1', title: 'My Mix', video_count: 3 },
+      'POST /api/playlists': aPlaylist(),
+    })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('Playlist ID or URL'), 'PL1')
+    const summaries = await screen.findByRole('checkbox', { name: 'Summarize videos' })
+    expect(summaries).toHaveAccessibleDescription('Generate and show an AI summary of each video.')
+    await waitFor(() => expect(summaries).toBeEnabled())
+    await user.click(summaries)
+    const submit = screen.getByRole('button', { name: 'Create Playlist' })
+    await waitFor(() => expect(submit).toBeEnabled())
+    await user.click(submit)
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    const createCall = fetchMock.mock.calls.find(
+      ([, init]) => (init as RequestInit | undefined)?.method === 'POST',
+    ) as [string, RequestInit]
+    expect(JSON.parse(createCall[1].body as string)).toMatchObject({ summaries_enabled: true })
+  })
+
+  it('offers no categories and saves none while categories are off', async () => {
+    const { fetchMock, onOpenChange } = renderDialog({
+      'GET /api/preferences': aPreferences({ categories_enabled: false }),
+      'GET /api/playlists/preview?playlist=PL1': { id: 'PL1', title: 'My Mix', video_count: 3 },
+      'POST /api/playlists': aPlaylist(),
+    })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('Playlist ID or URL'), 'PL1')
+    const submit = screen.getByRole('button', { name: 'Create Playlist' })
+    await waitFor(() => expect(submit).toBeEnabled())
+    expect(screen.queryByRole('group', { name: 'Categories' })).not.toBeInTheDocument()
+    await user.click(submit)
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/categories')),
+    ).toEqual([])
   })
 
   it('creates the playlist with the interval set under advanced options', async () => {
@@ -275,6 +356,8 @@ describe('AddPlaylistDialog', () => {
       quality: 'high',
       exclude_from_home: false,
       reconcile_interval_minutes: 30,
+      summaries_enabled: false,
+      categorization_enabled: false,
     })
   })
 
@@ -370,6 +453,21 @@ describe('AddPlaylistDialog', () => {
     expect(onOpenChange).not.toHaveBeenCalledWith(false)
   })
 
+  it('should show the add playlist submit error as an alert', async () => {
+    renderDialog({
+      'GET /api/playlists/preview?playlist=PL1': { id: 'PL1', title: 'My Mix', video_count: 3 },
+      'POST /api/playlists': { status: 422, error: 'destination already used' },
+    })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('Playlist ID or URL'), 'PL1')
+    const submit = screen.getByRole('button', { name: 'Create Playlist' })
+    await waitFor(() => expect(submit).toBeEnabled())
+    await user.click(submit)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('destination already used')
+  })
+
   it('flags a destination already used by another entry', async () => {
     renderDialog({
       'GET /api/playlists': [aPlaylist({ id: 'other', name: 'Other Mix', path: 'playlists/my-mix' })],
@@ -383,5 +481,31 @@ describe('AddPlaylistDialog', () => {
       await screen.findByText(/is already used by Other Mix\. Choose a different folder\./),
     ).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Create Playlist' })).toBeDisabled()
+  })
+
+  it('adds a playlist into the chosen categories', async () => {
+    const { fetchMock, onOpenChange } = renderDialog({
+      'GET /api/categories': aCategoryList([
+        aCategory({ id: 'chess', name: 'Chess', playlists: ['PLother'] }),
+        aCategory({ id: 'music', name: 'Music' }),
+      ]),
+      'GET /api/playlists/preview?playlist=PL1': { id: 'PL1', title: 'My Mix', video_count: 3 },
+      'POST /api/playlists': aPlaylist({ id: 'PL1' }),
+      'PUT /api/categories/chess/members': null,
+    })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('Playlist ID or URL'), 'PL1')
+    await user.click(await screen.findByRole('button', { name: 'Chess' }))
+    const submit = screen.getByRole('button', { name: 'Create Playlist' })
+    await waitFor(() => expect(submit).toBeEnabled())
+    await user.click(submit)
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    expect(
+      fetchMock.mock.calls
+        .filter(([, init]) => (init as RequestInit | undefined)?.method === 'PUT')
+        .map(([url, init]) => [url, JSON.parse((init as RequestInit).body as string)]),
+    ).toEqual([['/api/categories/chess/members', { channels: [], playlists: ['PLother', 'PL1'] }]])
   })
 })

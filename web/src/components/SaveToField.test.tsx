@@ -16,12 +16,12 @@ const baseRoutes: Routes = {
 function renderField(routes: Routes) {
   mockApi({ ...baseRoutes, ...routes })
   const captured: { value?: LocationValue } = {}
-  function Harness() {
+  function Harness({ onValue }: { onValue: (value: LocationValue) => void }) {
     const location = useSaveLocation('playlist', 'My Mix')
-    captured.value = location.value
+    onValue(location.value)
     return <SaveToField location={location} />
   }
-  renderWithProviders(<Harness />)
+  renderWithProviders(<Harness onValue={(value) => (captured.value = value)} />)
   return captured
 }
 
@@ -88,5 +88,19 @@ describe('SaveToField', () => {
     await user.click(screen.getByRole('button', { name: 'Use folder' }))
 
     expect(await screen.findByText('Folder name must not contain "/".')).toBeInTheDocument()
+  })
+  it.each(['.', '..'])('rejects a new folder named "%s"', async (name) => {
+    renderField({})
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: 'Choose another folder…' }))
+    await user.click(await screen.findByRole('button', { name: 'New folder' }))
+    await user.type(screen.getByLabelText('New folder name'), name)
+    await user.click(screen.getByRole('button', { name: 'Use folder' }))
+
+    expect(await screen.findByText('Folder name must not be "." or "..".')).toBeInTheDocument()
+    expect(
+      screen.queryByText('Does not exist yet — created on the first download.'),
+    ).not.toBeInTheDocument()
   })
 })

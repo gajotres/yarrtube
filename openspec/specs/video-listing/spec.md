@@ -68,18 +68,18 @@ The system SHALL include each video's recorded sync time in the responses that l
 - **THEN** that video's entry reports its sync time as absent
 
 ### Requirement: Listed Videos Include Their Metadata
-The system SHALL include each video's publish time, description and channel name, taken from its generated metadata, in the responses that list the videos of a playlist and of a channel. The description SHALL be the same truncated plot recorded for the video's metadata file. For a video whose metadata has not been generated, the system SHALL report all three as absent.
+The system SHALL include each video's publish time and channel name, taken from its generated metadata, in the responses that list the videos of a playlist and of a channel. These responses SHALL NOT include the video's description. For a video whose metadata has not been generated, the system SHALL report both as absent.
 
 #### Scenario: Video with generated metadata is listed
 - **WHEN** a client lists the videos of a tracked playlist or channel that has a video with generated metadata
-- **THEN** that video's entry includes its publish time, its description and the name of the channel that published it
+- **THEN** that video's entry includes its publish time and the name of the channel that published it, and no description
 
 #### Scenario: Video without generated metadata is listed
 - **WHEN** a client lists the videos of a tracked playlist or channel that has a video whose metadata has not been generated
-- **THEN** that video's entry reports its publish time, description and channel name as absent, and every other field is still returned
+- **THEN** that video's entry reports its publish time and channel name as absent, and every other field is still returned
 
 ### Requirement: List Home Videos Across Sources
-The system SHALL provide an HTTP endpoint that returns, in one response, the downloaded videos of the three home sections across every tracked channel and every tracked playlist not excluded from home, so that a YouTube video appears in at most one section.
+The system SHALL provide an HTTP endpoint that returns, in one response, the downloaded videos of the home sections across every tracked channel and every tracked playlist not excluded from home, so that a YouTube video appears in at most one section.
 
 A playlist excluded from home SHALL NOT be the source of any video in any section. A video it tracks SHALL still appear when another source that is not excluded tracks it, through that source.
 
@@ -88,12 +88,14 @@ A playlist excluded from home SHALL NOT be the source of any video in any sectio
 - ordered by last played time, most recent first
 
 "Quick watches" SHALL hold up to 6 short videos:
-- each is unwatched, with a recorded duration shorter than 15 minutes (900 seconds), and not shown under "Continue watching"
+- each is unwatched, with a recorded duration shorter than 15 minutes (900 seconds), and not shown under "Continue watching" or any category section
 - ordered by sync time (the time the video was recorded by the system), newest first
 
-In these two sections, a YouTube video tracked by more than one source SHALL appear once, from a tracking channel when there is one.
+Category sections, described in "Home Category Sections", SHALL come after "Continue watching" and before "Quick watches".
 
-"Latest videos" SHALL hold up to 18 videos that are not shown under "Continue watching" or "Quick watches", ordered by sync time, newest first, once per source that tracks them.
+In these sections, a YouTube video tracked by more than one source SHALL appear once, from a tracking channel when there is one.
+
+"Latest videos" SHALL hold up to 18 videos that are not shown under "Continue watching", any category section or "Quick watches", ordered by sync time, newest first, once per source that tracks them.
 
 Only the videos a section shows SHALL be left out of the sections after it.
 
@@ -109,14 +111,14 @@ Each returned video SHALL include:
 
 #### Scenario: Nothing downloaded
 - **WHEN** no downloaded video is recorded
-- **THEN** the daemon responds with HTTP status 200 and three empty sections
+- **THEN** the daemon responds with HTTP status 200, three empty sections and no category sections
 
 #### Scenario: A started short video counts as continue watching
 - **WHEN** a video qualifies for both "Continue watching" and "Quick watches"
 - **THEN** it appears under "Continue watching" only
 
 #### Scenario: A video shown above is not repeated in latest videos
-- **WHEN** a video appears under "Continue watching" or "Quick watches"
+- **WHEN** a video appears under "Continue watching", a category section or "Quick watches"
 - **THEN** it does not appear under "Latest videos"
 
 #### Scenario: Sections are bounded
@@ -202,3 +204,202 @@ Each returned video SHALL include:
 #### Scenario: Including a playlist in home again
 - **WHEN** a playlist excluded from home is included in home again
 - **THEN** its downloaded videos appear in the home sections they qualify for
+
+#### Scenario: A video shown in a category section is not a quick watch
+- **WHEN** a short, unwatched video is shown in a category section
+- **THEN** it does not appear under "Quick watches"
+
+### Requirement: Listed Videos Include Their Subtitle Language
+The system SHALL include each video's subtitle language in the responses that list the videos of a playlist and of a channel. The language SHALL be the code its subtitle file is named with (the base code, e.g. `es` for an `es-US` track). The system SHALL report it as absent for a video whose subtitles are not fetched.
+
+#### Scenario: Video with fetched subtitles is listed
+- **WHEN** a client lists the videos of a tracked playlist or channel that has a video whose subtitles were fetched as `Season 2026/S2026E031501 - Title.en.srt`
+- **THEN** that video's entry reports its subtitle language as `en`
+
+#### Scenario: Video without fetched subtitles is listed
+- **WHEN** a client lists the videos of a tracked playlist or channel that has a video whose subtitle state is Missing or Unavailable
+- **THEN** that video's entry reports its subtitle language as absent, and every other field is still returned
+
+### Requirement: List Videos For A Category
+The system SHALL provide an HTTP endpoint that, given a category's identifier, returns the downloaded videos of all the category's members, each YouTube video once, ordered by sync time (the time the video was recorded by the system), newest first. When a YouTube video is tracked by more than one member, it SHALL be returned from a tracking channel when there is one. Playlists excluded from home SHALL still contribute their videos. Each returned video SHALL include every field a video has in the responses that list the videos of a playlist and of a channel, taken from the copy of the source it is returned from: its status, quality, file name, thumbnail, duration, watch state and position, record and sync times, publish time, channel name and subtitle language. Each SHALL also include the source that tracks it and its categories. When no category has the identifier, the endpoint SHALL respond with HTTP status 404.
+
+#### Scenario: Videos across members
+- **WHEN** the category "Chess" has a channel member with 2 downloaded videos and a playlist member with 1 downloaded video
+- **THEN** the daemon responds with HTTP status 200 and the 3 videos, newest sync first, each with its source
+
+#### Scenario: Playback fields included
+- **WHEN** a member of the category has a downloaded video whose subtitles were fetched as `en`
+- **THEN** its entry includes the status `DOWNLOADED`, its quality, its file name, its sync time and the subtitle language `en`, as the member's own video listing does
+
+#### Scenario: Metadata included
+- **WHEN** a member of the category has a downloaded video with generated metadata
+- **THEN** its entry includes its publish time and the name of the channel that published it, and no description
+
+#### Scenario: Metadata not yet generated
+- **WHEN** a member of the category has a downloaded video whose metadata has not been generated
+- **THEN** its entry reports its publish time and channel name as absent, and every other field is still returned
+
+#### Scenario: A video tracked by two members
+- **WHEN** a YouTube video is tracked by both a channel member and a playlist member of the category
+- **THEN** it is returned once, from the channel
+
+#### Scenario: Only downloaded videos
+- **WHEN** a member of the category has videos that are pending, downloading, failed or excluded
+- **THEN** those videos are not returned
+
+#### Scenario: Playlist excluded from home
+- **WHEN** a playlist member of the category is excluded from home
+- **THEN** its downloaded videos are still returned
+
+#### Scenario: Category without members
+- **WHEN** the category has no members
+- **THEN** the daemon responds with HTTP status 200 and no videos
+
+#### Scenario: Unknown category
+- **WHEN** a client lists the videos of a category identifier that does not exist
+- **THEN** the daemon responds with HTTP status 404
+
+### Requirement: Home And Category Videos Include Their Categories
+Each video returned by the home endpoint and the category videos endpoint SHALL include the identifiers of the categories it belongs to, ordered by category name ignoring case, each once. A video SHALL belong to a category when any of the category's members has that YouTube video downloaded, whichever source the video is returned from. Members whose unwatched count is hidden or that are excluded from home SHALL still count. A video in no category SHALL include an empty list.
+
+#### Scenario: Video in one category
+- **WHEN** a home video comes from the channel "@Hikaru", a member of "Chess" only
+- **THEN** its category identifiers are those of ["Chess"]
+
+#### Scenario: Ordered by category name
+- **WHEN** the source of a home video is a member of "Streams" and "chess"
+- **THEN** its category identifiers are those of ["chess", "Streams"]
+
+#### Scenario: Category reached through another source
+- **WHEN** a YouTube video is returned from the channel "@Hikaru", a member of "Chess", and is also tracked by the playlist "PLbest", a member of "Highlights" and excluded from home
+- **THEN** its category identifiers are those of ["Chess", "Highlights"]
+
+#### Scenario: Category reached by two members once
+- **WHEN** a YouTube video is tracked by two members of "Chess"
+- **THEN** "Chess" appears once among its category identifiers
+
+#### Scenario: No category
+- **WHEN** a home video's YouTube video is tracked by no member of any category
+- **THEN** its category identifiers are an empty list
+
+#### Scenario: Category videos include their categories
+- **WHEN** a video listed for the category "Chess" is also tracked by a member of "Streams"
+- **THEN** its category identifiers are those of ["Chess", "Streams"]
+
+### Requirement: Home Category Sections
+The home endpoint SHALL return up to 3 category sections, each with the category's identifier, name and color and up to 6 of its pending videos: downloaded, unwatched videos from the home sources that belong to the category and are not shown under "Continue watching" or an earlier category section, newest sync first. A category with no such videos SHALL get no section.
+
+#### Scenario: Category with pending videos
+- **WHEN** "Chess" has 2 downloaded, unwatched videos and no other category has any
+- **THEN** the response holds one category section for "Chess", with its identifier, name and color, listing both videos, the more recently synced first
+
+#### Scenario: Watched videos are not pending
+- **WHEN** every downloaded video of "Chess" is watched
+- **THEN** the response holds no category section for "Chess"
+
+#### Scenario: Category section is bounded
+- **WHEN** "Chess" has 10 pending videos
+- **THEN** its section holds the 6 most recently synced
+
+#### Scenario: Continue watching videos are left out
+- **WHEN** a video of "Chess" is shown under "Continue watching"
+- **THEN** it does not appear in the "Chess" section
+
+#### Scenario: Video in two categories appears once
+- **WHEN** a pending video belongs to "Chess" and "Streams", and both get a section
+- **THEN** it appears only in the first of the two sections
+
+#### Scenario: Excluded playlists do not feed category sections
+- **WHEN** a pending video of "Highlights" is tracked only by a playlist excluded from home
+- **THEN** it appears in no category section
+
+#### Scenario: Video reached through a source shown on home
+- **WHEN** a pending video belongs to "Highlights" through a playlist excluded from home and is also tracked by a channel that is not excluded
+- **THEN** it can appear in the "Highlights" section, with the channel as its source
+
+### Requirement: Home Category Section Ranking
+Categories SHALL be ranked by their number of pending videos not shown under "Continue watching", counted in full and not only up to 6, most first, ties broken by category name ignoring case. Sections SHALL follow the ranking; a category left without videos once those shown in earlier sections are removed SHALL be skipped and the next ranked category SHALL take its place, until 3 sections are filled or no category remains.
+
+#### Scenario: Most pending first
+- **WHEN** "Chess" has 4 pending videos, "Science" has 9 and "Streams" has 1
+- **THEN** the sections are, in order, "Science", "Chess" and "Streams"
+
+#### Scenario: At most three sections
+- **WHEN** 5 categories have pending videos
+- **THEN** only the 3 with the most pending videos get a section
+
+#### Scenario: Ties by name
+- **WHEN** "chess" and "Astronomy" both have 3 pending videos
+- **THEN** "Astronomy" comes before "chess"
+
+#### Scenario: Emptied category is skipped
+- **WHEN** every pending video of the second-ranked category is shown in the first-ranked section, and a fourth category has pending videos
+- **THEN** the second-ranked category gets no section and the fourth one does
+
+### Requirement: Home Sections Follow Preferences
+The home endpoint SHALL return an empty list for each section turned off in the preferences: "Continue watching" when `home_show_continue_watching` is off, "Quick watches" when `home_show_quick_watches` is off, "Latest videos" when `home_show_latest` is off, and no category sections when `home_show_categories` or `categories_enabled` is off. A section turned off SHALL show no video, so videos it would have held can appear in the sections after it.
+
+#### Scenario: Continue watching turned off
+- **WHEN** `home_show_continue_watching` is off and an unwatched short video has been started recently
+- **THEN** "Continue watching" is empty and the video appears under "Quick watches"
+
+#### Scenario: Categories turned off
+- **WHEN** `categories_enabled` is off and "Chess" has pending videos
+- **THEN** the response holds no category sections, and Chess's videos can appear under "Quick watches" or "Latest videos"
+
+#### Scenario: Home category sections turned off
+- **WHEN** `categories_enabled` is on, `home_show_categories` is off and "Chess" has pending videos
+- **THEN** the response holds no category sections
+
+#### Scenario: Latest videos turned off
+- **WHEN** `home_show_latest` is off
+- **THEN** "Latest videos" is empty and the other sections are unchanged
+
+#### Scenario: Everything on
+- **WHEN** every preference is on
+- **THEN** the home response is the same as without preferences
+
+### Requirement: Home Videos Include Their Publish Date
+Every video the home endpoint returns, in every section, SHALL include its YouTube publish date as `published_at`, an RFC 3339 timestamp, or `null` when the publish date is unknown.
+
+#### Scenario: Video with a publish date
+- **WHEN** a video under "Latest videos" was published on 2026-10-28
+- **THEN** its entry has a `published_at` on 2026-10-28
+
+#### Scenario: Unknown publish date
+- **WHEN** a home video's publish date is unknown
+- **THEN** its entry has `published_at` set to `null`
+
+### Requirement: Listed Videos Include Their Chapters
+The system SHALL include each video's recorded chapters, in playback order, in the responses that list the videos of a playlist, of a channel and of a category: each chapter's start and end in whole seconds and its title. A video recorded as having no chapters, or whose chapters were never checked, SHALL be reported with an empty chapter list.
+
+#### Scenario: Video with chapters is listed
+- **WHEN** a client lists the videos of a tracked playlist, channel or category that has a video recorded with chapters "Game 1" (0–1037 s) and "Game 2" (1037–2201 s)
+- **THEN** that video's entry includes exactly those two chapters, in that order, each with its start, end and title
+
+#### Scenario: Video without chapters is listed
+- **WHEN** a client lists the videos of a tracked playlist, channel or category that has a video recorded as having no chapters
+- **THEN** that video's entry includes an empty chapter list
+
+#### Scenario: Video with unchecked chapters is listed
+- **WHEN** a client lists the videos of a tracked playlist, channel or category that has a video whose chapters were never checked
+- **THEN** that video's entry includes an empty chapter list, and every other field is still returned
+
+### Requirement: Listed Videos Include Their Summary
+The system SHALL include each video's AI summary text in the responses that list the videos of a playlist, of a channel and of a category. It SHALL be reported as absent for a video with no stored summary, and for one whose summary is hidden (see `video-summaries`). In a category, whether it is hidden SHALL follow the source the video is returned from.
+
+#### Scenario: Video with a summary is listed
+- **WHEN** AI and summaries are on and a client lists the videos of a tracked playlist, channel or category whose source has summaries enabled and that has a video with a stored summary
+- **THEN** that video's entry includes the summary's text
+
+#### Scenario: Video without a summary is listed
+- **WHEN** a client lists a video that has no stored summary, whether it is waiting for one or was given up on
+- **THEN** that video's entry reports its summary as absent, and every other field is still returned
+
+#### Scenario: Hidden summary is listed
+- **WHEN** a client lists a video whose stored summary is hidden
+- **THEN** that video's entry reports its summary as absent
+
+#### Scenario: Category video returned from a channel that opted out
+- **WHEN** a category lists a YouTube video tracked by a channel with `summaries_enabled` `false` and a playlist with it `true`
+- **THEN** the video is returned from the channel and reports its summary as absent

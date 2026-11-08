@@ -50,7 +50,7 @@ avatars default to `yarrtube.sqlite3` and `avatars/` in the working directory.
 The UI in `web/` is a React + Vite single-page app written in TypeScript.
 To iterate on it with hot reload, keep the backend running
 (`scripts/run-local.sh --skip-web-build`) and start Vite's dev server, which
-proxies `/api` and `/media` to `localhost:8080`:
+proxies `/api`, `/media` and `/avatars` to `localhost:8080`:
 
 ```bash
 cd web
@@ -58,6 +58,21 @@ npm run dev          # dev server with hot reload
 npm run test:watch   # Vitest suite, re-running on change
 npm run check        # typecheck + lint + test, what CI runs
 ```
+
+To try UI changes against a real library instead of an empty local one, point
+the dev server at a running daemon, e.g. on a NAS. Only frontend changes show
+up; backend changes need a daemon running an image that has them.
+
+```bash
+YARRTUBE_REMOTE_URL=http://192.168.1.142:8080 scripts/run-spa-against-remote.sh
+```
+
+It's read-only by default: the dev server answers every request but GET and
+HEAD with 405, so actions like mark watched or delete fail instead of changing
+the remote library. Pass `--allow-writes` to forward them. When node can't
+reach the remote but curl can (macOS Local Network privacy blocks node from LAN
+addresses until the terminal app is allowed under System Settings → Privacy &
+Security → Local Network), the script bridges the proxy through curl by itself.
 
 Layout of `web/src/`:
 
@@ -79,14 +94,57 @@ against the mocked API, so the suite finishes in seconds.
 
 ## Checks
 
-These are what CI runs:
+One script runs every test suite, locally and in CI:
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo test --locked
-(cd web && npm run check)   # typecheck + lint + tests
+scripts/run-tests.sh                 # everything
+scripts/run-tests.sh --only e2e      # one suite: web, rust, contract or e2e
+scripts/run-tests.sh --ci            # what CI runs (also when CI=true)
+scripts/run-tests.sh --workers 2     # end-to-end tests at once (default 3)
 ```
 
-End-to-end tests against a real container live in `smoke-tests/` (see its
-README) and run with `scripts/run-smoke-tests.sh`.
+The suites are the web UI's checks, Rust formatting, clippy and tests, the
+YouTube contract tests and the end-to-end suite (`e2e-tests/`, see its
+README: the Docker image driven through real browsers against a fake
+YouTube). CI runs all of them except the contract tests, which need the real
+YouTube, on every pull request and push to `main`. The script only checks:
+it installs and builds nothing, so install the web UI's and `e2e-tests/`'s
+dependencies (and the Playwright browsers) and build the web UI first. Each
+end-to-end worker runs its own container on its own ports, so the suite runs
+in parallel and worktrees can run it at the same time. Before running
+anything it checks every selected suite's dependencies, listing all that are
+missing, and prints what will run: the suites, CI mode (`--ci` or
+`CI=true`: no contract tests, failing end-to-end tests retried) and the
+end-to-end workers and upgrade check. Each phase's output
+goes to a log rather than the terminal: a progress line while it runs, its
+time and test counts once done, and on failure only the failing tests with
+their errors, plus the path of the kept logs.
+
+### YouTube contract tests
+
+The adapters that talk to YouTube (`yt-dlp` downloads, thumbnails,
+captions, channel listings, and the Data API's playlists, videos, channels
+and avatars) have tests against the real thing, in modules named
+`youtube_contract_tests` next to each adapter. They're `#[ignore]`d, so
+`cargo test` and CI skip them; run them with
+`scripts/run-tests.sh --only contract`. It needs `yt-dlp` and `ffprobe` on `PATH` (or `YTDLP_PATH`), the network,
+and `YOUTUBE_API_KEY` (from the environment or `.env`), and takes about ten
+seconds. Run it after upgrading `yt-dlp` or when downloads start failing,
+to tell a change on YouTube's side from a bug of ours. The fixtures (a short
+Creative-Commons clip, Big Buck Bunny, the project's "test" playlist and an
+inactive Creative-Commons channel) are listed with their credits in
+`src/infrastructure/shared/youtube_contract.rs`.
+
+## Deploy
+
+This fork publishes images to `ghcr.io/gajotres/yarrtube`.
+Every merge to `main` that passes CI, including the Docker end-to-end suite,
+receives the next release tag and publishes `latest`, `X.Y.Z` and `X.Y` from
+the same multi-architecture image. `scripts/next-release-tag.sh` increments the
+last patch version unless `Cargo.toml` specifies a higher version. After image
+publication succeeds, the workflow creates a GitHub release with generated notes.
+The release tag and source commit metadata are stamped into the binary.
+
+Manual Release workflow runs publish `edge` for testing a selected ref. SHA
+image tags are not published. To roll back, pin an existing numbered release.
+A manually pushed `vX.Y.Z` tag also triggers the stable release workflow.

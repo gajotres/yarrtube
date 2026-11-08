@@ -1,0 +1,115 @@
+//! What the YouTube contract tests share. Those tests run the adapters
+//! against the real `yt-dlp` and YouTube Data API, so they're `#[ignore]`d
+//! (CI and the default `cargo test` skip them) and run by
+//! `scripts/run-tests.sh --only contract`. The fixtures are public videos,
+//! playlists and channels that are Creative-Commons licensed or maintained by
+//! the project, and unlikely to change.
+
+use std::path::{Path, PathBuf};
+
+/// "Boat in Island [UHD]", 14 s, CC BY, by "Free HD videos - no copyright".
+pub(crate) const SHORT_VIDEO_ID: &str = "mqWUW6ypo6w";
+/// "Big Buck Bunny", CC BY, Blender Foundation (@BlenderOfficial), with
+/// uploaded `en` and `fr` subtitles.
+pub(crate) const CAPTIONED_VIDEO_ID: &str = "YE7VzlLtp-4";
+/// "Installing Flamenco in 5 minutes", 299 s, CC BY, by Blender Studio
+/// (@BlenderStudio), split into 9 chapters.
+pub(crate) const CHAPTERED_VIDEO_ID: &str = "O728EFaXuBk";
+/// An id YouTube has no video for.
+pub(crate) const MISSING_VIDEO_ID: &str = "aaaaaaaaaaa";
+/// The project's "test" playlist (maintainer-owned), holding only Big Buck
+/// Bunny.
+pub(crate) const PLAYLIST_ID: &str = "PLXWRoRTUXjks";
+/// "Free HD videos - no copyright": CC BY uploads, inactive since 2023. Its
+/// listing order isn't stable: don't pin which videos come first.
+pub(crate) const CHANNEL_HANDLE: &str = "@FreeHDvideosnocopyright";
+
+pub(crate) fn video_url(id: &str) -> String {
+    format!("https://www.youtube.com/watch?v={id}")
+}
+
+/// `YTDLP_PATH`, else `yt-dlp` on `PATH`.
+pub(crate) fn ytdlp_path() -> PathBuf {
+    PathBuf::from(std::env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_string()))
+}
+
+/// The real YouTube Data API's root.
+pub(crate) fn api_url() -> String {
+    crate::serve::DEFAULT_YOUTUBE_API_URL.to_string()
+}
+
+/// `YOUTUBE_API_KEY`, which the contract tests can't run without.
+pub(crate) fn api_key() -> String {
+    std::env::var("YOUTUBE_API_KEY")
+        .expect("YOUTUBE_API_KEY must be set (see scripts/run-tests.sh --only contract)")
+}
+
+/// `(codec_type, codec_name)` of every stream in `media`, via `ffprobe`.
+pub(crate) fn stream_codecs(media: &Path) -> Vec<(String, String)> {
+    ffprobe(
+        &[
+            "-show_entries",
+            "stream=codec_type,codec_name",
+            "-of",
+            "csv=p=0",
+        ],
+        media,
+    )
+    .lines()
+    .filter_map(|line| line.split_once(','))
+    .map(|(name, kind)| (kind.to_string(), name.to_string()))
+    .collect()
+}
+
+/// `(start in whole seconds, title)` of every chapter marker embedded in
+/// `media`, via `ffprobe`.
+pub(crate) fn embedded_chapters(media: &Path) -> Vec<(i64, String)> {
+    ffprobe(
+        &[
+            "-show_entries",
+            "chapter=start_time:chapter_tags=title",
+            "-of",
+            "csv=p=0",
+        ],
+        media,
+    )
+    .lines()
+    .filter_map(|line| line.split_once(','))
+    .filter_map(|(start, title)| {
+        start
+            .parse::<f64>()
+            .ok()
+            .map(|start| (start as i64, title.to_string()))
+    })
+    .collect()
+}
+
+/// The height in pixels of `media`'s first video stream, via `ffprobe`.
+pub(crate) fn video_height(media: &Path) -> u32 {
+    ffprobe(
+        &[
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=height",
+            "-of",
+            "csv=p=0",
+        ],
+        media,
+    )
+    .trim()
+    .parse()
+    .unwrap_or_else(|_| panic!("ffprobe printed no video height for {media:?}"))
+}
+
+/// `ffprobe -v error <args> <media>`'s stdout; panics if it can't run or fails.
+fn ffprobe(args: &[&str], media: &Path) -> String {
+    let output = std::process::Command::new("ffprobe")
+        .args(["-v", "error"])
+        .args(args)
+        .arg(media)
+        .output()
+        .expect("ffprobe must be installed (it comes with ffmpeg)");
+    assert!(output.status.success(), "ffprobe failed on {media:?}");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}

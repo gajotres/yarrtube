@@ -16,6 +16,8 @@ pub trait PlaylistVideoRepository: Send + Sync {
     fn find_by_video(&self, video_id: &VideoRecordId) -> anyhow::Result<Option<PlaylistVideo>>;
     /// Ordered by position (YouTube-defined order), then by insertion order.
     fn list_for_playlist(&self, playlist_id: &PlaylistId) -> anyhow::Result<Vec<PlaylistVideo>>;
+    /// Every stored playlist video, across all playlists.
+    fn list(&self) -> anyhow::Result<Vec<PlaylistVideo>>;
     fn delete(&self, playlist_id: &PlaylistId, youtube_video_id: &VideoId) -> anyhow::Result<()>;
     fn delete_all_for_playlist(&self, playlist_id: &PlaylistId) -> anyhow::Result<()>;
 }
@@ -88,6 +90,31 @@ impl PlaylistVideoRepository for SqlitePlaylistVideoRepository {
                 tracing::error!(playlist_id = %playlist_id, error = %e, "failed to list playlist videos")
             })
             .context("failed to list playlist videos")?;
+
+        rows.map(|row| {
+            let columns = row
+                .inspect_err(|e| tracing::error!(error = %e, "failed to read playlist video row"))
+                .context("failed to read playlist video row")?;
+            columns_to_playlist_video(columns)
+        })
+        .collect()
+    }
+
+    fn list(&self) -> anyhow::Result<Vec<PlaylistVideo>> {
+        let conn = self.db.read()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, playlist_id, video_id, position, created_at
+                 FROM playlist_videos ORDER BY id ASC",
+            )
+            .inspect_err(
+                |e| tracing::error!(error = %e, "failed to prepare list-all-playlist-videos query"),
+            )
+            .context("failed to prepare list-all-playlist-videos query")?;
+        let rows = stmt
+            .query_map([], row_to_columns)
+            .inspect_err(|e| tracing::error!(error = %e, "failed to list all playlist videos"))
+            .context("failed to list all playlist videos")?;
 
         rows.map(|row| {
             let columns = row
@@ -209,6 +236,43 @@ mod tests {
                 id: 1,
                 ..PlaylistVideo::create(playlist_id(), video.id, 0, now)
             }]
+        );
+    }
+
+    #[test]
+    fn it_should_list_videos_of_every_playlist() {
+        let repo = repo();
+        let now = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        let other_playlist = PlaylistId::new("PL2").unwrap();
+        let first = seed_video(&repo, "yt1", "First");
+        let second = seed_video(&repo, "yt2", "Second");
+        repo.save(&PlaylistVideo::create(
+            playlist_id(),
+            first.id.clone(),
+            0,
+            now,
+        ))
+        .unwrap();
+        repo.save(&PlaylistVideo::create(
+            other_playlist.clone(),
+            second.id.clone(),
+            0,
+            now,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            repo.list().unwrap(),
+            vec![
+                PlaylistVideo {
+                    id: 1,
+                    ..PlaylistVideo::create(playlist_id(), first.id, 0, now)
+                },
+                PlaylistVideo {
+                    id: 2,
+                    ..PlaylistVideo::create(other_playlist, second.id, 0, now)
+                },
+            ]
         );
     }
 

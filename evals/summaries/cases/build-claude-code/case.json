@@ -1,0 +1,78 @@
+{
+  "youtube_id": "K36Eq6eXh6E",
+  "url": "https://www.youtube.com/watch?v=K36Eq6eXh6E",
+  "title": "Creé mi propio Claude Code (para aprender)",
+  "yarrtube_title": "I Built My Own Claude Code (To Learn)",
+  "channel": "BettaTech",
+  "published": "2026-10-22",
+  "lang": "es",
+  "duration_s": 823,
+  "chapters": [],
+  "description": "Apúntate al taller gratuito que haremos el 3 de Noviembre! \n► https://www.commitacademy.io/sp/taller-ia-o\n\nRepositorio y web con el código completo: https://www.byoharness.dev/es/\n\n► Mi Academia de Ciencias de la Computación: https://link.bettatech.net/academia\nSígueme en https://www.instagram.com/betta_tech/\n\n✉️  CONTACTO PROFESIONAL:\n► Respuesta no garantizada: \nbettatechyt@gmail.com\n\n📚 LIBROS 📚 \nDesign Patterns \n► https://amzn.to/39XuQlq\nHead First Design Patterns \n► https://amzn.to/2uq6XUq\nRefactoring \n► https://amzn.to/2SQnf2c\nClean Architecture \n►  https://amzn.to/3bZVonJ\nClean Code \n► https://amzn.to/32WVKq3\nIntroduction to Algorithms \n► https://amzn.to/34SyVFP\nCracking the Coding Interview \n► https://amzn.to/2QkdwC6",
+  "summary": {
+    "facts": [
+      {
+        "id": "topic-own-harness",
+        "fact": "The author built his own Claude Code-like AI coding agent (a 'harness') in Go, using the Anthropic API, to learn how AI harnesses work.",
+        "critical": true,
+        "trap": "It was built in Python/TypeScript, or with the OpenAI API.",
+        "note": "Auto-captions write 'Cloud Code' and 'Antropic'; correct names are Claude Code and Anthropic. Providers are pluggable (OpenAI mentioned as an option), but the project was built on the Anthropic API.",
+        "evidence": {
+          "at": "0:08",
+          "quote": "Hice un proyecto utilizando Go en el que utilizando la API de Antropic implementé todo el arnés alrededor de la LLM."
+        }
+      },
+      {
+        "id": "agentic-loop",
+        "fact": "He explains the agentic loop: the model either returns a final answer or a tool call; the tool is executed and its result sent back to the model until a final response, all inside an outer REPL loop that waits for user input.",
+        "critical": false,
+        "evidence": {
+          "at": "2:34",
+          "quote": "si es que sí, ejecutamos la tool, ¿vale? En esta línea de aquí es donde haríamos la ejecución, y volvemos a llamar al modelo con el resultado."
+        }
+      },
+      {
+        "id": "multi-agent-subagents",
+        "fact": "In this video he adds multi-agent orchestration: a spawn tool launches subagents in the background, each in its own Git worktree and goroutine, reporting their status to the main loop and shown in the terminal UI.",
+        "critical": false,
+        "trap": "Subagents run on separate machines or share the same working copy.",
+        "note": "Inspired by agent orchestrator apps the captions call 'Orca' and 'Herder' (names may be misheard).",
+        "evidence": {
+          "at": "7:59",
+          "quote": "Empieza un agente en background con su propio work tree de Git y vuelve inmediatamente."
+        }
+      },
+      {
+        "id": "takeaway-demystify",
+        "fact": "Main takeaway: agents aren't magic, just a wrapper around LLM calls; products like Claude Code sell mainly the UI/experience, and the best way to learn is to build things yourself step by step. His harness is for learning, not production.",
+        "critical": true,
+        "trap": "He presents his agent as a production-ready replacement for Claude Code.",
+        "evidence": {
+          "at": "9:54",
+          "quote": "un agente de IA no deja de ser esto, un wrapper a llamadas a un LLM."
+        }
+      },
+      {
+        "id": "build-your-own-harness",
+        "fact": "He points to his 'Build Your Own Harness' website and repository, with step-by-step lessons (also in Spanish) and exercises.",
+        "critical": false,
+        "evidence": {
+          "at": "0:32",
+          "quote": "realicé un repositorio y una página web que se llama Build your own harness o Build your own coding agent"
+        },
+        "trap": "Presents Build Your Own Harness as the project shown in the video or part of it; it is a separate learning site he promotes."
+      }
+    ],
+    "review": {
+      "reviewed_on": "2026-11-02",
+      "by": "viewer",
+      "note": "Facts confirmed by a viewer. Viewer prefers gemma3:4b's baseline summary by far: qwen3:4b's mixes up the Build Your Own Harness site (a separate site he promotes) with the harness project the video shows.",
+      "human_verdicts": {
+        "run": "2026-11-02_baseline_prompt-v2",
+        "qwen3:4b": {
+          "build-your-own-harness": "contradicted"
+        }
+      }
+    }
+  }
+}

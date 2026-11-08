@@ -7,7 +7,7 @@ Provides an HTTP endpoint to list tasks that have not yet completed, so pending 
 ## Requirements
 
 ### Requirement: List Non-Completed Tasks
-The system SHALL provide an HTTP endpoint that returns every scheduled task whose status is `pending` or `running`, regardless of when it is next due to run, including each task's type, status, retry count, scheduled run time, and — resolved server-side from the task's stored payload at read time — whatever context that payload makes resolvable: the name of the playlist or channel a task concerns, the title of a video being downloaded or having its thumbnail fetched, and the raw filename or output path a file-cleanup task targets. A playlist or channel reconciliation task SHALL also include the identifier of the playlist or channel it reconciles, taken from its stored payload, whether or not that playlist or channel can still be found.
+The system SHALL provide an HTTP endpoint that returns every scheduled task whose status is `pending` or `running`, regardless of when it is next due to run, including each task's type, status, retry count, scheduled run time, and — resolved server-side from the task's stored payload at read time — whatever context that payload makes resolvable: the name of the playlist or channel a task concerns, the title of a video being downloaded, having its thumbnail, subtitles or chapters fetched, or being synced, and the raw filename or output path a file-cleanup task targets. A playlist or channel reconciliation task SHALL also include the identifier of the playlist or channel it reconciles, taken from its stored payload, whether or not that playlist or channel can still be found.
 
 #### Scenario: Non-completed tasks exist
 - **WHEN** a client requests the list of non-completed tasks and one or more tasks are `pending` or `running`
@@ -60,3 +60,33 @@ The system SHALL provide an HTTP endpoint that returns every scheduled task whos
 #### Scenario: Referenced playlist or video no longer exists
 - **WHEN** a client requests the list of non-completed tasks and a task's payload references a playlist, channel, or video that can no longer be found
 - **THEN** the daemon still responds with HTTP status 200 and includes the task, omitting the name(s) that could not be resolved but keeping a reconciliation task's playlist or channel identifier
+
+#### Scenario: Task syncs a specific video
+- **WHEN** a client requests the list of non-completed tasks and a video sync task is pending or running
+- **THEN** the returned task includes that video's title, and the current name of whichever playlist or channel the video belongs to
+
+#### Scenario: Task fetches a specific video's chapters
+- **WHEN** a client requests the list of non-completed tasks and a task fetches a specific video's chapters
+- **THEN** the returned task includes that video's title, and the current name of whichever playlist or channel the video belongs to
+
+### Requirement: Quality Check Tasks Carry Video Context
+The task listing SHALL resolve a quality check task's context the same way as a chapters fetch task's: the title of the video whose quality is being checked and the name of the playlist or channel it belongs to, when they can still be found.
+
+#### Scenario: Task checks a specific video's quality
+- **WHEN** a quality check task is pending for a video that still exists in a tracked playlist
+- **THEN** the listed task has type `upgrade_quality` and includes that video's title and the playlist's name
+
+#### Scenario: Quality check task whose video no longer exists
+- **WHEN** a quality check task is pending for a video whose record was deleted
+- **THEN** the task is still listed, without a video title
+
+### Requirement: Summary Tasks Carry Video Context
+The task listing SHALL resolve a video summary task's context the same way as a chapters fetch task's: the title of the video being summarized and the name of the playlist or channel it belongs to, when they can still be found.
+
+#### Scenario: Task summarizes a specific video
+- **WHEN** a summary task is pending for a video that still exists in a tracked channel
+- **THEN** the listed task has type `summarize_video` and includes that video's title and the channel's name
+
+#### Scenario: Summary task whose video no longer exists
+- **WHEN** a summary task is pending for a video whose record was deleted
+- **THEN** the task is still listed, without a video title

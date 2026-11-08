@@ -1,22 +1,32 @@
 import type {
   Announcement,
   AppVersion,
+  CategoryList,
+  CategoryMembers,
+  CategoryVideo,
+  CreatedCategory,
+  NewCategory,
   ChannelListItem,
   ChannelPreview,
   CreatedChannel,
   DirectoryListing,
   HomeVideos,
+  VideoSearchResults,
   PlaylistListItem,
   PlaylistPreview,
+  OllamaServer,
+  Preferences,
+  PreferencesPatch,
   RecordProgressResponse,
   Task,
   Video,
+  VideoCategories,
   VideoProgress,
 } from './types'
 import { parseAnnouncements } from '@/lib/announcements'
 
 interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE'
+  method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE'
   body?: unknown
   /** Names the request in the fallback error message; defaults to the path. */
   label?: string
@@ -61,6 +71,11 @@ export function fetchHomeVideos(): Promise<HomeVideos> {
   return request('/videos/home')
 }
 
+/** Downloaded videos whose title contains `text` (at least 2 characters once trimmed). */
+export function searchVideos(text: string): Promise<VideoSearchResults> {
+  return request(`/videos/search?q=${encodeURIComponent(text)}`)
+}
+
 export function fetchTasks(): Promise<Task[]> {
   return request('/tasks')
 }
@@ -68,6 +83,20 @@ export function fetchTasks(): Promise<Task[]> {
 /** The version the running daemon was built for (`dev` for local builds). */
 export function fetchVersion(): Promise<AppVersion> {
   return request('/version')
+}
+
+export function fetchPreferences(): Promise<Preferences> {
+  return request('/preferences')
+}
+
+/** Changes only the preferences in `patch`; resolves with every preference. */
+export function patchPreferences(patch: PreferencesPatch): Promise<Preferences> {
+  return request('/preferences', { method: 'PATCH', body: patch })
+}
+
+/** Checks the Ollama server at `url` (saved or not) and lists its models. */
+export function fetchOllama(url: string): Promise<OllamaServer> {
+  return request(`/ollama?url=${encodeURIComponent(url)}`)
 }
 
 /**
@@ -87,6 +116,17 @@ export function videoMediaUrl(playlistPath: string, filename: string): string {
   return `/media/${encodedPath}/${encodedFilename}`
 }
 
+/** The playlist or channel a video is played from. */
+export interface VideoSourceRef {
+  kind: 'playlist' | 'channel'
+  id: string
+}
+
+/** The WebVTT subtitles of `videoId` as recorded for `source`. */
+export function videoSubtitlesUrl(source: VideoSourceRef, videoId: string): string {
+  return `/api/${source.kind}s/${encodeURIComponent(source.id)}/videos/${encodeURIComponent(videoId)}/subtitles.vtt`
+}
+
 export function avatarMediaUrl(filename: string): string {
   return `/avatars/${encodeURIComponent(filename)}`
 }
@@ -97,6 +137,8 @@ export interface CreatePlaylistRequest {
   quality: string
   exclude_from_home: boolean
   reconcile_interval_minutes: number
+  summaries_enabled: boolean
+  categorization_enabled: boolean
 }
 
 export function createPlaylist(body: CreatePlaylistRequest): Promise<PlaylistListItem> {
@@ -118,15 +160,30 @@ export function previewChannel(channel: string): Promise<ChannelPreview> {
 /** Only the settings to change; an absent one keeps its stored value. */
 export interface UpdatePlaylistRequest {
   exclude_from_home?: boolean
+  hide_unwatched_count?: boolean
   reconcile_interval_minutes?: number
+  summaries_enabled?: boolean
+  categorization_enabled?: boolean
 }
 
-/** Changes whether a playlist's videos are left out of the home view and/or its reconcile interval. */
+/**
+ * Changes whether a playlist's videos are left out of the home view, whether
+ * its unwatched count is hidden and/or its reconcile interval.
+ */
 export function updatePlaylist(id: string, body: UpdatePlaylistRequest): Promise<PlaylistListItem> {
   return request(`/playlists/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     body,
     label: `update playlist ${id}`,
+  })
+}
+
+/** Moves a playlist's show folder to `path`, relative to the videos root. */
+export function movePlaylist(id: string, path: string): Promise<PlaylistListItem> {
+  return request(`/playlists/${encodeURIComponent(id)}/move`, {
+    method: 'POST',
+    body: { path },
+    label: `move playlist ${id}`,
   })
 }
 
@@ -165,6 +222,8 @@ export interface CreateChannelRequest {
   video_limit: number
   path: string
   reconcile_interval_minutes: number
+  summaries_enabled: boolean
+  categorization_enabled: boolean
 }
 
 export function createChannel(body: CreateChannelRequest): Promise<CreatedChannel> {
@@ -176,6 +235,8 @@ export interface UpdateChannelRequest {
   quality?: string
   video_limit?: number
   reconcile_interval_minutes?: number
+  summaries_enabled?: boolean
+  categorization_enabled?: boolean
 }
 
 /** Changes a channel's quality, video limit and/or reconcile interval. */
@@ -184,6 +245,15 @@ export function updateChannel(handle: string, body: UpdateChannelRequest): Promi
     method: 'PATCH',
     body,
     label: `update channel ${handle}`,
+  })
+}
+
+/** Moves a channel's show folder to `path`, relative to the videos root. */
+export function moveChannel(handle: string, path: string): Promise<CreatedChannel> {
+  return request(`/channels/${encodeURIComponent(handle)}/move`, {
+    method: 'POST',
+    body: { path },
+    label: `move channel ${handle}`,
   })
 }
 
@@ -198,6 +268,13 @@ export async function markChannelWatched(handle: string): Promise<void> {
   await send(`/channels/${encodeURIComponent(handle)}/watched`, {
     method: 'POST',
     label: `mark channel ${handle} watched`,
+  })
+}
+
+export async function markPlaylistWatched(id: string): Promise<void> {
+  await send(`/playlists/${encodeURIComponent(id)}/watched`, {
+    method: 'POST',
+    label: `mark playlist ${id} watched`,
   })
 }
 
@@ -226,6 +303,101 @@ export function recordVideoProgress(
 export function beaconVideoProgress(youtubeId: string, progress: VideoProgress): void {
   const body = new Blob([JSON.stringify(progress)], { type: 'application/json' })
   navigator.sendBeacon(`/api/videos/${encodeURIComponent(youtubeId)}/progress`, body)
+}
+
+export function listCategories(): Promise<CategoryList> {
+  return request('/categories')
+}
+
+/** Without a color, the daemon picks the least used palette color. */
+export function createCategory(
+  category: Pick<NewCategory, 'name'> & Partial<NewCategory>,
+): Promise<CreatedCategory> {
+  return request('/categories', { method: 'POST', body: category, label: '/categories' })
+}
+
+/** Renames, recolors and/or sets the AI prompt; absent fields are kept. */
+export async function updateCategory(
+  id: string,
+  update: { name?: string; color?: string; ai_prompt?: string },
+): Promise<void> {
+  await send(`/categories/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: update,
+    label: `update category ${id}`,
+  })
+}
+
+export async function deleteCategory(id: string): Promise<void> {
+  await send(`/categories/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    label: `delete category ${id}`,
+  })
+}
+
+/** Replaces the category's members with exactly `members`. */
+export async function setCategoryMembers(id: string, members: CategoryMembers): Promise<void> {
+  await send(`/categories/${encodeURIComponent(id)}/members`, {
+    method: 'PUT',
+    body: members,
+    label: `set members of category ${id}`,
+  })
+}
+
+export function listCategoryVideos(id: string): Promise<CategoryVideo[]> {
+  return request(`/categories/${encodeURIComponent(id)}/videos`)
+}
+
+export async function markCategoryWatched(id: string): Promise<void> {
+  await send(`/categories/${encodeURIComponent(id)}/watched`, {
+    method: 'POST',
+    label: `mark category ${id} watched`,
+  })
+}
+
+/** A video copy's categories, `recordId` being its `record_id`, never its YouTube id. */
+export function getVideoCategories(recordId: string): Promise<VideoCategories> {
+  return request(`/videos/${encodeURIComponent(recordId)}/categories`)
+}
+
+/** Sets a video copy's category by hand; responds with its categories as they are now. */
+export function setVideoCategory(
+  recordId: string,
+  categoryId: string,
+  belongs: boolean,
+): Promise<VideoCategories> {
+  return request(
+    `/videos/${encodeURIComponent(recordId)}/categories/${encodeURIComponent(categoryId)}`,
+    { method: 'PUT', body: { belongs }, label: `set category ${categoryId} of video ${recordId}` },
+  )
+}
+
+/** Deletes a video copy's AI verdicts so the AI is asked again. */
+export async function deleteVideoAiVerdicts(recordId: string): Promise<void> {
+  await send(`/videos/${encodeURIComponent(recordId)}/ai-verdicts`, {
+    method: 'DELETE',
+    label: `re-run AI for video ${recordId}`,
+  })
+}
+
+/** Deletes the AI verdicts of every video of a channel or playlist. */
+export async function deleteSourceAiVerdicts(source: {
+  kind: 'channel' | 'playlist'
+  id: string
+}): Promise<void> {
+  const collection = source.kind === 'channel' ? 'channels' : 'playlists'
+  await send(`/${collection}/${encodeURIComponent(source.id)}/ai-verdicts`, {
+    method: 'DELETE',
+    label: `delete AI verdicts of ${source.kind} ${source.id}`,
+  })
+}
+
+/** Deletes a category's AI verdicts so its videos are evaluated again. */
+export async function deleteCategoryAiVerdicts(categoryId: string): Promise<void> {
+  await send(`/categories/${encodeURIComponent(categoryId)}/ai-verdicts`, {
+    method: 'DELETE',
+    label: `re-evaluate category ${categoryId}`,
+  })
 }
 
 /** Published on the public repository's `main`, so it can be edited without a release. */

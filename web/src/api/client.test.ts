@@ -79,6 +79,8 @@ describe('mutations', () => {
       quality: 'high',
       exclude_from_home: false,
       reconcile_interval_minutes: 180,
+      summaries_enabled: false,
+      categorization_enabled: false,
     })
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
@@ -89,6 +91,8 @@ describe('mutations', () => {
       quality: 'high',
       exclude_from_home: false,
       reconcile_interval_minutes: 180,
+      summaries_enabled: false,
+      categorization_enabled: false,
     })
   })
 
@@ -101,6 +105,8 @@ describe('mutations', () => {
       video_limit: 3,
       path: 'channels/chan',
       reconcile_interval_minutes: 180,
+      summaries_enabled: false,
+      categorization_enabled: false,
     })
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
@@ -110,6 +116,8 @@ describe('mutations', () => {
       video_limit: 3,
       path: 'channels/chan',
       reconcile_interval_minutes: 180,
+      summaries_enabled: false,
+      categorization_enabled: false,
     })
   })
 

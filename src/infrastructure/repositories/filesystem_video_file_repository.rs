@@ -77,6 +77,17 @@ pub trait VideoFileRepository: Send + Sync {
         }
         Ok(())
     }
+    /// Reads the UTF-8 content of the file at `output_dir.join(filename)`.
+    /// A missing file is `Ok(None)`, not an error.
+    fn read_to_string(&self, output_dir: &Path, filename: &str) -> anyhow::Result<Option<String>>;
+
+    /// Returns whether a file or directory exists at `dir`.
+    fn dir_exists(&self, dir: &Path) -> bool;
+
+    /// Renames the directory `from` to `to`, creating `to`'s missing parents
+    /// first. A rename in place, never a copy: a `to` on another filesystem,
+    /// or one that already exists, fails with nothing moved.
+    fn rename_dir(&self, from: &Path, to: &Path) -> anyhow::Result<()>;
 }
 
 pub struct FilesystemVideoFileRepository;
@@ -140,13 +151,7 @@ impl VideoFileRepository for FilesystemVideoFileRepository {
     }
 
     fn move_file(&self, from: &Path, to: &Path) -> anyhow::Result<()> {
-        if let Some(parent) = to.parent() {
-            std::fs::create_dir_all(parent)
-                .inspect_err(
-                    |e| tracing::error!(dir = ?parent, error = %e, "failed to create directory"),
-                )
-                .map_err(|e| anyhow::anyhow!("failed to create directory {parent:?}: {e}"))?;
-        }
+        create_parent(to)?;
         std::fs::rename(from, to)
             .inspect_err(
                 |e| tracing::error!(from = ?from, to = ?to, error = %e, "failed to move file"),
@@ -169,6 +174,35 @@ impl VideoFileRepository for FilesystemVideoFileRepository {
         std::fs::remove_dir(dir)
             .inspect_err(|e| tracing::error!(dir = ?dir, error = %e, "failed to remove directory"))
             .map_err(|e| anyhow::anyhow!("failed to remove directory {dir:?}: {e}"))
+    }
+
+    fn read_to_string(&self, output_dir: &Path, filename: &str) -> anyhow::Result<Option<String>> {
+        let path = output_dir.join(filename);
+        match std::fs::read_to_string(&path) {
+            Ok(content) => Ok(Some(content)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => {
+                tracing::error!(path = ?path, error = %e, "failed to read file");
+                Err(anyhow::anyhow!("failed to read {path:?}: {e}"))
+            }
+        }
+    }
+
+    fn dir_exists(&self, dir: &Path) -> bool {
+        std::fs::symlink_metadata(dir).is_ok()
+    }
+
+    fn rename_dir(&self, from: &Path, to: &Path) -> anyhow::Result<()> {
+        // `rename` would silently replace an empty directory at `to`.
+        if self.dir_exists(to) {
+            anyhow::bail!("failed to rename {from:?} to {to:?}: destination already exists");
+        }
+        create_parent(to)?;
+        std::fs::rename(from, to)
+            .inspect_err(
+                |e| tracing::error!(from = ?from, to = ?to, error = %e, "failed to rename directory"),
+            )
+            .map_err(|e| anyhow::anyhow!("failed to rename {from:?} to {to:?}: {e}"))
     }
 }
 
@@ -206,6 +240,16 @@ fn list_entries(output_dir: &Path) -> anyhow::Result<Vec<String>> {
         .collect()
 }
 
+/// Creates the parent directory of `path` if it has one.
+fn create_parent(path: &Path) -> anyhow::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(parent)
+        .inspect_err(|e| tracing::error!(dir = ?parent, error = %e, "failed to create directory"))
+        .map_err(|e| anyhow::anyhow!("failed to create directory {parent:?}: {e}"))
+}
+
 fn is_in_progress_temp_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -234,6 +278,14 @@ pub struct FakeVideoFileRepository {
     pub(crate) on_move: Option<Box<dyn Fn(&Path, &Path) + Send + Sync>>,
     /// Sources whose `move_file` fails, as a permission error would.
     pub(crate) failing_moves: Vec<std::path::PathBuf>,
+    /// Files `read_to_string` finds, keyed by their full path.
+    pub(crate) files: Vec<(std::path::PathBuf, String)>,
+    /// Directories `dir_exists` finds.
+    pub(crate) dirs: Vec<std::path::PathBuf>,
+    /// Every successful `rename_dir`, in call order.
+    pub(crate) renamed_dirs: std::sync::Mutex<Vec<(std::path::PathBuf, std::path::PathBuf)>>,
+    /// Whether every `rename_dir` fails, as a cross-filesystem rename would.
+    pub(crate) failing_renames: bool,
 }
 
 #[cfg(test)]
@@ -275,6 +327,34 @@ impl FakeVideoFileRepository {
             failing_moves: [self.failing_moves, vec![from.into()]].concat(),
             ..self
         }
+    }
+
+    /// The same fake, holding a file at `path` with `content`.
+    pub fn with_file(self, path: impl Into<std::path::PathBuf>, content: &str) -> Self {
+        Self {
+            files: [self.files, vec![(path.into(), content.to_string())]].concat(),
+            ..self
+        }
+    }
+
+    /// The same fake, holding a directory at `dir`.
+    pub fn with_dir(self, dir: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            dirs: [self.dirs, vec![dir.into()]].concat(),
+            ..self
+        }
+    }
+
+    /// A fake whose every `rename_dir` fails.
+    pub fn with_failing_renames() -> Self {
+        Self {
+            failing_renames: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn renamed_dirs(&self) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
+        self.renamed_dirs.lock().unwrap().clone()
     }
 
     pub fn with_file_exists(exists: bool) -> Self {
@@ -345,6 +425,30 @@ impl VideoFileRepository for FakeVideoFileRepository {
             .lock()
             .unwrap()
             .push(dir.to_path_buf());
+        Ok(())
+    }
+
+    fn read_to_string(&self, output_dir: &Path, filename: &str) -> anyhow::Result<Option<String>> {
+        let path = output_dir.join(filename);
+        Ok(self
+            .files
+            .iter()
+            .find(|(file, _)| *file == path)
+            .map(|(_, content)| content.clone()))
+    }
+
+    fn dir_exists(&self, dir: &Path) -> bool {
+        self.dirs.iter().any(|existing| existing == dir)
+    }
+
+    fn rename_dir(&self, from: &Path, to: &Path) -> anyhow::Result<()> {
+        if self.failing_renames {
+            anyhow::bail!("cross-device link renaming {from:?}");
+        }
+        self.renamed_dirs
+            .lock()
+            .unwrap()
+            .push((from.to_path_buf(), to.to_path_buf()));
         Ok(())
     }
 }
@@ -662,6 +766,102 @@ mod tests {
         let exists = FilesystemVideoFileRepository.file_exists(&dir, "Nonexistent.mp4");
 
         assert!(!exists);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn it_should_read_a_files_content() {
+        let dir = unique_temp_dir("video-file-repository-read");
+        std::fs::create_dir_all(dir.join("Season 1")).unwrap();
+        std::fs::write(dir.join("Season 1/My Video.en.srt"), "1\nHello there\n").unwrap();
+
+        let content = FilesystemVideoFileRepository
+            .read_to_string(&dir, "Season 1/My Video.en.srt")
+            .unwrap();
+
+        assert_eq!(content, Some("1\nHello there\n".to_string()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn it_should_read_none_when_the_file_is_missing() {
+        let dir = unique_temp_dir("video-file-repository-read-missing");
+
+        let content =
+            FilesystemVideoFileRepository.read_to_string(&dir, "Season 1/My Video.en.srt");
+
+        assert_eq!(content.map_err(|e| e.to_string()), Ok(None));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn it_should_fail_to_read_a_file_that_is_not_utf8() {
+        let dir = unique_temp_dir("video-file-repository-read-not-utf8");
+        std::fs::create_dir_all(dir.join("Season 1")).unwrap();
+        let path = dir.join("Season 1/My Video.en.srt");
+        std::fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
+
+        let content =
+            FilesystemVideoFileRepository.read_to_string(&dir, "Season 1/My Video.en.srt");
+
+        assert_eq!(
+            content.map_err(|e| e.to_string()),
+            Err(format!(
+                "failed to read {path:?}: stream did not contain valid UTF-8"
+            ))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn it_should_rename_a_directory_creating_missing_parents() {
+        let dir = unique_temp_dir("video-file-repository-rename-dir");
+        std::fs::create_dir_all(dir.join("music/chill/Season 1")).unwrap();
+        std::fs::write(dir.join("music/chill/Season 1/S01E001 - One.mp4"), b"media").unwrap();
+
+        let result = FilesystemVideoFileRepository
+            .rename_dir(&dir.join("music/chill"), &dir.join("archive/2026/chill"));
+
+        assert!(result.is_ok());
+        assert_eq!(
+            std::fs::read(dir.join("archive/2026/chill/Season 1/S01E001 - One.mp4")).ok(),
+            Some(b"media".to_vec())
+        );
+        assert!(!dir.join("music/chill").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn it_should_fail_to_rename_onto_an_existing_directory() {
+        let dir = unique_temp_dir("video-file-repository-rename-dir-existing");
+        std::fs::create_dir_all(dir.join("music/chill")).unwrap();
+        std::fs::write(dir.join("music/chill/tvshow.nfo"), b"show").unwrap();
+        std::fs::create_dir_all(dir.join("music/lofi")).unwrap();
+
+        let result = FilesystemVideoFileRepository
+            .rename_dir(&dir.join("music/chill"), &dir.join("music/lofi"));
+
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(dir.join("music/chill/tvshow.nfo")).ok(),
+            Some(b"show".to_vec())
+        );
+        assert!(dir.join("music/lofi").is_dir());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn it_should_report_whether_a_directory_exists() {
+        let dir = unique_temp_dir("video-file-repository-dir-exists");
+        std::fs::create_dir_all(dir.join("music/chill")).unwrap();
+        std::fs::write(dir.join("music/notes.txt"), b"notes").unwrap();
+
+        let exists: Vec<bool> = ["music/chill", "music/notes.txt", "music/lofi"]
+            .iter()
+            .map(|path| FilesystemVideoFileRepository.dir_exists(&dir.join(path)))
+            .collect();
+
+        assert_eq!(exists, vec![true, true, false]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
