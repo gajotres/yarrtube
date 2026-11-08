@@ -3,6 +3,21 @@
 All notable changes to yarrtube are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.10.4] - 2026-11-08
+
+### Fork changes
+
+- Download videos independently of subtitles, so caption HTTP 429, conversion and
+  embedding errors cannot fail or re-download a successful video.
+- Replace the fork's caption selection with upstream's original-language fetch:
+  creator captions first, original automatic captions as fallback, no automatic
+  translations. Legacy subtitle source/language environment variables are ignored.
+- Extend the upstream subtitle task with optional embedding (enabled by default),
+  full language/source labels, retained SRTs and transcripts, and safe replacement
+  only after FFmpeg succeeds.
+- Save the exact SponsorBlock cuts with each download and apply them to later
+  captions. Older cut videos need one re-download before attaching new captions.
+
 ## [0.10.2] - 2026-11-08
 
 ### Fork release

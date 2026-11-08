@@ -87,7 +87,6 @@ use crate::infrastructure::shared::domain_events::event_repository::{
 use crate::infrastructure::shared::show_locks::ShowLocks;
 use crate::infrastructure::shared::sponsorblock::SponsorBlockConfig;
 use crate::infrastructure::shared::sqlite_connection;
-use crate::infrastructure::shared::subtitles::SubtitleConfig;
 use crate::infrastructure::shared::system_clock::{Clock, SystemClock};
 use crate::infrastructure::shared::video_lock::VideoLock;
 use anyhow::Result;
@@ -104,7 +103,7 @@ pub struct InfrastructureSettings {
     pub avatars_path: PathBuf,
     pub ytdlp_path: PathBuf,
     pub sponsorblock: SponsorBlockConfig,
-    pub subtitles: SubtitleConfig,
+    pub embed_subtitles: bool,
 }
 
 /// One production instance of every port implementation, shared by every
@@ -207,7 +206,7 @@ impl InfrastructureContainer {
             video_downloader_repository: Arc::new(
                 YtDlpVideoDownloaderRepository::new(settings.ytdlp_path)
                     .with_sponsorblock(settings.sponsorblock)
-                    .with_subtitles(settings.subtitles),
+                    .with_embedding(settings.embed_subtitles),
             ),
             video_file_repository: Arc::new(FilesystemVideoFileRepository),
             show_file_repository: Arc::new(FilesystemShowFileRepository),

@@ -1,6 +1,6 @@
 use crate::domain::event::DomainEvent;
 use crate::domain::shared::Quality;
-use crate::domain::video::{Video, VideoDownloaded, VideoRecordId, staging_dir};
+use crate::domain::video::{SubtitleState, Video, VideoDownloaded, VideoRecordId, staging_dir};
 use crate::infrastructure::repositories::filesystem_video_file_repository::VideoFileRepository;
 use crate::infrastructure::repositories::sqlite_video_repository::VideoRepository;
 use crate::infrastructure::repositories::youtube_video_downloader_repository::{
@@ -161,6 +161,20 @@ impl QualityUpgrader {
         }
         self.video_file_repository
             .move_file(&downloaded.media_path, &output_dir.join(filename))?;
+        // A fresh download can have different SponsorBlock cuts and contains
+        // no captions. Discard old sidecars and let the separate task fetch
+        // and embed captions against the new cut timeline.
+        self.video_file_repository
+            .delete_subtitles(&output_dir.join(filename))?;
+        self.video_repository
+            .store_download_cuts(&video.id, downloaded.subtitle_cuts.as_deref())?;
+        self.video_repository.update_subtitles(&Video {
+            subtitle_state: SubtitleState::Missing,
+            subtitle_filename: None,
+            subtitle_checks: Default::default(),
+            updated_at: self.clock.now(),
+            ..video.clone()
+        })?;
         let upgraded = video.clone().record_downloaded_quality(
             quality,
             downloaded.height,

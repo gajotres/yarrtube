@@ -3,7 +3,6 @@ use crate::domain::shared::Quality;
 use crate::domain::video::VideoChapter;
 use crate::domain::video_transcript::CaptionTrack;
 use crate::infrastructure::shared::sponsorblock::SponsorBlockConfig;
-use crate::infrastructure::shared::subtitles::SubtitleConfig;
 use crate::infrastructure::shared::ytdlp;
 pub use crate::infrastructure::shared::ytdlp::{
     CaptionProbe, ChaptersProbe, DownloadAttempt, DownloadedVideo, FetchedSubtitles,
@@ -55,10 +54,16 @@ pub trait VideoDownloaderRepository: Send + Sync {
     /// or systemic.
     fn probe_captions(&self, video_url: &str, staging_dir: &Path) -> anyhow::Result<CaptionProbe>;
 
-    /// Native transcript fetching must not overwrite the fork's selected,
-    /// retimed SRTs or recreate external subtitles after embedding.
-    fn retain_transcript_sidecar(&self) -> bool {
-        true
+    /// Retimes and optionally embeds the upstream-selected caption. Defaults
+    /// to no processing for test/in-memory adapters.
+    fn process_subtitles(
+        &self,
+        _media: &Path,
+        _subtitle: &Path,
+        _track: &CaptionTrack,
+        _cuts: Option<&str>,
+    ) -> anyhow::Result<()> {
+        Ok(())
     }
 
     /// Downloads only `track` of the probed video into `staging_dir`, as
@@ -82,7 +87,7 @@ pub trait VideoDownloaderRepository: Send + Sync {
 pub struct YtDlpVideoDownloaderRepository {
     ytdlp_path: PathBuf,
     sponsorblock: SponsorBlockConfig,
-    subtitles: SubtitleConfig,
+    embed_subtitles: bool,
 }
 
 impl YtDlpVideoDownloaderRepository {
@@ -90,12 +95,12 @@ impl YtDlpVideoDownloaderRepository {
         Self {
             ytdlp_path,
             sponsorblock: SponsorBlockConfig::default(),
-            subtitles: SubtitleConfig::default(),
+            embed_subtitles: true,
         }
     }
 
-    pub fn with_subtitles(mut self, subtitles: SubtitleConfig) -> Self {
-        self.subtitles = subtitles;
+    pub fn with_embedding(mut self, enabled: bool) -> Self {
+        self.embed_subtitles = enabled;
         self
     }
 
@@ -106,10 +111,31 @@ impl YtDlpVideoDownloaderRepository {
 }
 
 impl VideoDownloaderRepository for YtDlpVideoDownloaderRepository {
-    fn retain_transcript_sidecar(&self) -> bool {
-        !(self.subtitles.write_subs
-            || self.subtitles.write_auto_subs
-            || self.sponsorblock.categories().is_some())
+    fn process_subtitles(
+        &self,
+        media: &Path,
+        subtitle: &Path,
+        track: &CaptionTrack,
+        cuts: Option<&str>,
+    ) -> anyhow::Result<()> {
+        if cuts.is_none() && self.sponsorblock.categories().is_some() {
+            anyhow::bail!(
+                "SponsorBlock timing metadata is missing for this older download; re-download the video before attaching captions"
+            );
+        }
+        let text = std::fs::read_to_string(subtitle)?;
+        tracing::info!("Applying saved video cut timestamps to separately fetched captions");
+        let retimed = crate::infrastructure::shared::subtitle_timing::retime_subtitles(
+            &text,
+            cuts.unwrap_or("[]"),
+        )?;
+        std::fs::write(subtitle, retimed)?;
+        if self.embed_subtitles {
+            crate::infrastructure::shared::subtitle_embedding::embed_subtitle(
+                media, subtitle, track,
+            )?;
+        }
+        Ok(())
     }
 
     fn download(
@@ -124,7 +150,6 @@ impl VideoDownloaderRepository for YtDlpVideoDownloaderRepository {
             quality,
             staging_dir,
             &self.sponsorblock,
-            &self.subtitles,
         )
     }
 
@@ -174,7 +199,7 @@ pub(crate) enum DiagnoseOutcome {
 
 #[cfg(test)]
 pub struct FakeVideoDownloaderRepository {
-    pub(crate) retain_transcript_sidecar: bool,
+    pub(crate) subtitle_processing_error: bool,
     pub(crate) result: std::sync::Mutex<DownloadAttempt>,
     pub(crate) diagnose_result: std::sync::Mutex<DiagnoseOutcome>,
     #[allow(clippy::type_complexity)]
@@ -222,14 +247,10 @@ impl Default for FakeVideoDownloaderRepository {
 
 #[cfg(test)]
 impl FakeVideoDownloaderRepository {
-    pub fn with_transcript_sidecar(mut self, retain: bool) -> Self {
-        self.retain_transcript_sidecar = retain;
-        self
-    }
-
     pub fn new(succeeds: bool) -> Self {
         if succeeds {
             Self::with_result(DownloadAttempt::Succeeded(DownloadedVideo {
+                subtitle_cuts: None,
                 height: None,
                 media_path: PathBuf::from("fake-output.mp4"),
                 thumbnail_path: None,
@@ -265,6 +286,7 @@ impl FakeVideoDownloaderRepository {
     /// SABR-on-success behavior.
     pub fn succeeding_with_sabr(reason: &str) -> Self {
         Self::with_result(DownloadAttempt::Succeeded(DownloadedVideo {
+            subtitle_cuts: None,
             height: None,
             media_path: PathBuf::from("fake-output.mp4"),
             thumbnail_path: None,
@@ -391,7 +413,7 @@ impl FakeVideoDownloaderRepository {
 
     fn with_result(result: DownloadAttempt) -> Self {
         Self {
-            retain_transcript_sidecar: true,
+            subtitle_processing_error: false,
             result: std::sync::Mutex::new(result),
             diagnose_result: std::sync::Mutex::new(DiagnoseOutcome::Reason(None)),
             calls: Default::default(),
@@ -413,11 +435,18 @@ impl FakeVideoDownloaderRepository {
 
 #[cfg(test)]
 impl VideoDownloaderRepository for FakeVideoDownloaderRepository {
-    fn retain_transcript_sidecar(&self) -> bool {
-        self.retain_transcript_sidecar
+    fn process_subtitles(
+        &self,
+        _media: &Path,
+        _subtitle: &Path,
+        _track: &CaptionTrack,
+        _cuts: Option<&str>,
+    ) -> anyhow::Result<()> {
+        if self.subtitle_processing_error {
+            anyhow::bail!("subtitle embedding failed");
+        }
+        Ok(())
     }
-    /// A successful result's paths are relative to the staging dir it was
-    /// asked to download into, as `yt-dlp` would report them.
     fn download(
         &self,
         video_url: &str,
@@ -538,26 +567,40 @@ mod tests {
     use crate::infrastructure::shared::ytdlp::test_support;
 
     #[test]
-    fn transcript_sidecars_do_not_override_download_owned_captions() {
-        let make = || YtDlpVideoDownloaderRepository::new(PathBuf::from("yt-dlp"));
-        assert!(make().retain_transcript_sidecar());
-        for embed in ["true", "false"] {
-            assert!(
-                !make()
-                    .with_subtitles(
-                        SubtitleConfig::parse("true", "true", "en.*")
-                            .unwrap()
-                            .with_embedding(embed)
-                            .unwrap()
-                    )
-                    .retain_transcript_sidecar()
-            );
-        }
+    fn external_subtitles_use_saved_cuts_even_when_embedding_is_disabled() {
+        use crate::domain::video_transcript::{CaptionLanguage, CaptionSource};
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("video.mp4");
+        let subtitle = dir.path().join("video.en.srt");
+        std::fs::write(&media, "original video").unwrap();
+        std::fs::write(&subtitle, "1\n00:00:05,000 --> 00:00:07,000\nHello\n").unwrap();
+        let track = CaptionTrack {
+            key: "en-orig".into(),
+            language: CaptionLanguage::new("en").unwrap(),
+            source: CaptionSource::Automatic,
+        };
+        let repository = YtDlpVideoDownloaderRepository::new(PathBuf::from("unused"))
+            .with_sponsorblock(SponsorBlockConfig::parse("default").unwrap())
+            .with_embedding(false);
         assert!(
-            !make()
-                .with_sponsorblock(SponsorBlockConfig::parse("default").unwrap())
-                .retain_transcript_sidecar()
+            repository
+                .process_subtitles(&media, &subtitle, &track, None)
+                .is_err()
         );
+        repository
+            .process_subtitles(
+                &media,
+                &subtitle,
+                &track,
+                Some(r#"[{"start_time":2,"end_time":4}]"#),
+            )
+            .unwrap();
+        assert!(
+            std::fs::read_to_string(&subtitle)
+                .unwrap()
+                .contains("00:00:03,000 --> 00:00:05,000")
+        );
+        assert_eq!(std::fs::read_to_string(&media).unwrap(), "original video");
     }
 
     #[test]
@@ -590,6 +633,7 @@ mod tests {
         assert_eq!(
             result,
             DownloadAttempt::Succeeded(DownloadedVideo {
+                subtitle_cuts: None,
                 height: None,
                 media_path: output_dir.join(test_support::DEFAULT_PRINTED_FILENAME),
                 thumbnail_path: None,
@@ -722,6 +766,7 @@ mod youtube_contract_tests {
         assert_eq!(
             attempt,
             DownloadAttempt::Succeeded(DownloadedVideo {
+                subtitle_cuts: Some("[]".into()),
                 height: Some(480),
                 media_path: media_path.clone(),
                 thumbnail_path: Some(staging_dir.join(format!("{SHORT_VIDEO_ID}.jpg"))),

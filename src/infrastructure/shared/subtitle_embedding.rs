@@ -1,41 +1,16 @@
-use crate::domain::video::subtitle_sidecar::subtitle_suffix;
+use crate::domain::video_transcript::{CaptionSource, CaptionTrack};
 use anyhow::{Context, Result, bail};
 use isolang::Language;
-use serde_json::{Map, Value};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
-/// Embed the final, retimed SRTs while retaining them as external sidecars.
-/// Native yt-dlp embedding runs before our timing repair, so it is disabled.
-pub fn embed_subtitles(
-    media: &Path,
-    requested: Option<&str>,
-    manual: Option<&str>,
-    creator_enabled: bool,
-) -> Result<()> {
-    embed_with(
-        Path::new("ffmpeg"),
-        media,
-        requested,
-        manual,
-        creator_enabled,
-    )
+/// Called only by the separate upstream subtitle task. All output is written
+/// into that task's staging directory and atomically replaces the video on success.
+pub fn embed_subtitle(media: &Path, subtitle: &Path, track: &CaptionTrack) -> Result<()> {
+    embed_with(Path::new("ffmpeg"), media, subtitle, track)
 }
 
-struct Track {
-    path: PathBuf,
-    title: String,
-    language: String,
-}
-
-fn dictionary(raw: Option<&str>) -> Result<Map<String, Value>> {
-    match raw.map(str::trim) {
-        None | Some("NA" | "null" | "") => Ok(Map::new()),
-        Some(raw) => serde_json::from_str(raw).context("invalid subtitle track metadata"),
-    }
-}
-
-fn track_label(code: &str, metadata: &Value, generated: bool) -> (String, String) {
+fn track_label(code: &str, generated: bool) -> (String, String) {
     let base = code
         .split(['-', '_'])
         .next()
@@ -44,7 +19,6 @@ fn track_label(code: &str, metadata: &Value, generated: bool) -> (String, String
     let language = Language::from_639_1(&base).or_else(|| Language::from_639_3(&base));
     let name = language
         .map(|language| language.to_name())
-        .or_else(|| metadata["name"].as_str())
         .unwrap_or("Unknown");
     let name = name.replace(['\r', '\n', '\0'], "");
     let title = format!("{name}-{}SRT", if generated { "GENERATED-" } else { "" });
@@ -54,193 +28,192 @@ fn track_label(code: &str, metadata: &Value, generated: bool) -> (String, String
     (title, code)
 }
 
-fn embed_with(
-    ffmpeg: &Path,
-    media: &Path,
-    requested: Option<&str>,
-    manual: Option<&str>,
-    creator_enabled: bool,
-) -> Result<()> {
-    let parent = media.parent().context("subtitle media has no parent")?;
-    let mut sidecars = Vec::new();
-    for entry in std::fs::read_dir(parent)? {
-        let entry = entry?;
-        let path = entry.path();
-        if entry.file_type()?.is_file() && subtitle_suffix(media, &path).is_some() {
-            sidecars.push(path);
-        }
-    }
-    if sidecars.is_empty() {
-        tracing::warn!("Subtitle embedding skipped: no SRT subtitles found");
-        return Ok(());
-    }
-    sidecars.sort();
-    let requested = dictionary(requested)?;
-    let manual = dictionary(manual)?;
-    let tracks = sidecars
-        .into_iter()
-        .map(|path| {
-            let suffix = subtitle_suffix(media, &path).context("invalid subtitle filename")?;
-            let code = suffix
-                .trim_start_matches('.')
-                .strip_suffix(".srt")
-                .context("invalid SRT filename")?;
-            let metadata = requested
-                .get(code)
-                .with_context(|| format!("missing metadata for subtitle language {code}"))?;
-            // yt-dlp prefers creator captions for an exact language when requested.
-            let generated = !(creator_enabled && manual.contains_key(code));
-            let (title, language) = track_label(code, metadata, generated);
-            Ok(Track {
-                path,
-                title,
-                language,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    tracing::info!(tracks = tracks.len(), "Starting FFmpeg subtitle embedding");
-    for track in &tracks {
-        tracing::info!(title = %track.title, language = %track.language, "Embedding subtitle track");
-    }
-    let output_path = media.with_file_name(format!(
-        "{}.subtitle-embedded.mp4",
-        media
-            .file_stem()
-            .context("missing media filename")?
-            .to_string_lossy()
-    ));
-    let mut cmd = Command::new(ffmpeg);
-    cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"])
-        .arg(media);
-    for track in &tracks {
-        cmd.arg("-i").arg(&track.path);
-    }
-    // Retain video, audio, cover art and metadata; subtitle selection is owned here.
-    cmd.args(["-map", "0", "-map", "-0:s?"]);
-    for index in 0..tracks.len() {
-        cmd.arg("-map").arg(format!("{}:0", index + 1));
-    }
-    cmd.args([
-        "-c",
-        "copy",
-        "-c:s",
-        "mov_text",
-        "-disposition:s",
-        "0",
-        "-map_metadata",
-        "0",
-        "-map_chapters",
-        "0",
-        "-movflags",
-        "+faststart",
-    ]);
-    for (index, track) in tracks.iter().enumerate() {
-        for (key, value) in [
-            ("title", &track.title),
-            ("handler_name", &track.title),
-            ("language", &track.language),
-        ] {
-            cmd.arg(format!("-metadata:s:s:{index}"))
-                .arg(format!("{key}={value}"));
-        }
-    }
-    cmd.arg(&output_path);
-    let result = cmd
+fn embed_with(ffmpeg: &Path, media: &Path, subtitle: &Path, track: &CaptionTrack) -> Result<()> {
+    let (title, language) = track_label(
+        track.language.as_str(),
+        track.source == CaptionSource::Automatic,
+    );
+    let output = subtitle
+        .parent()
+        .context("subtitle has no staging directory")?
+        .join(format!("{}.embedded.mp4", uuid::Uuid::new_v4()));
+    tracing::info!(title = %title, language = %language, "Starting separate subtitle embedding");
+    let result = Command::new(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"])
+        .arg(media)
+        .arg("-i")
+        .arg(subtitle)
+        .args([
+            "-map",
+            "0",
+            "-map",
+            "-0:s?",
+            "-map",
+            "1:0",
+            "-c",
+            "copy",
+            "-c:s",
+            "mov_text",
+            "-disposition:s",
+            "0",
+            "-map_metadata",
+            "0",
+            "-map_chapters",
+            "0",
+            "-movflags",
+            "+faststart",
+            "-metadata:s:s:0",
+        ])
+        .arg(format!("title={title}"))
+        .arg("-metadata:s:s:0")
+        .arg(format!("handler_name={title}"))
+        .arg("-metadata:s:s:0")
+        .arg(format!("language={language}"))
+        .arg(&output)
         .output()
         .context("failed to start FFmpeg for subtitle embedding")?;
     if !result.status.success() {
-        let _ = std::fs::remove_file(&output_path);
+        let _ = std::fs::remove_file(&output);
         bail!(
             "subtitle embedding failed: {}",
             String::from_utf8_lossy(&result.stderr).trim()
         );
     }
-    std::fs::rename(&output_path, media).context("failed to place subtitle-embedded video")?;
-    tracing::info!(
-        tracks = tracks.len(),
-        "Subtitle embedding completed; external SRTs retained"
-    );
+    if let Err(error) = std::fs::rename(&output, media) {
+        let _ = std::fs::remove_file(&output);
+        return Err(error).context("failed to place subtitle-embedded video");
+    }
+    tracing::info!("Subtitle embedding completed; external SRT retained");
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::video_transcript::CaptionLanguage;
 
     #[test]
-    fn labels_use_long_language_names_and_generated_marker() {
+    #[ignore = "requires local ffmpeg and ffprobe; exercised explicitly during validation"]
+    fn real_ffmpeg_embeds_one_labelled_track_and_keeps_external_srt() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("video.mp4");
+        let subtitle = dir.path().join("video.en.srt");
+        let result = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:r=1:d=2",
+                "-c:v",
+                "mpeg4",
+                "-y",
+            ])
+            .arg(&media)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        std::fs::write(&subtitle, "1\n00:00:00,000 --> 00:00:01,000\nHello\n").unwrap();
+        let track = CaptionTrack {
+            key: "en-orig".into(),
+            language: CaptionLanguage::new("en").unwrap(),
+            source: CaptionSource::Automatic,
+        };
+        // Repeated processing replaces the subtitle stream instead of duplicating it.
+        for _ in 0..2 {
+            embed_subtitle(&media, &subtitle, &track).unwrap();
+        }
+        let output = Command::new("ffprobe")
+            .args(["-v", "error", "-show_streams", "-of", "json"])
+            .arg(&media)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let info: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let streams = info["streams"].as_array().unwrap();
         assert_eq!(
-            track_label("en-orig", &Value::Null, true),
+            streams
+                .iter()
+                .filter(|s| s["codec_type"] == "video")
+                .count(),
+            1
+        );
+        let subtitles: Vec<_> = streams
+            .iter()
+            .filter(|s| s["codec_type"] == "subtitle")
+            .collect();
+        assert_eq!(subtitles.len(), 1);
+        assert_eq!(subtitles[0]["codec_name"], "mov_text");
+        assert_eq!(subtitles[0]["tags"]["language"], "eng");
+        assert_eq!(
+            subtitles[0]["tags"]["handler_name"],
+            "English-GENERATED-SRT"
+        );
+        assert!(
+            std::fs::read_to_string(&subtitle)
+                .unwrap()
+                .contains("Hello")
+        );
+    }
+
+    #[test]
+    fn full_language_and_generated_labels_are_preserved() {
+        assert_eq!(
+            track_label("en", false),
+            ("English-SRT".into(), "eng".into())
+        );
+        assert_eq!(
+            track_label("en", true),
             ("English-GENERATED-SRT".into(), "eng".into())
         );
         assert_eq!(
-            track_label("de", &Value::Null, false),
-            ("German-SRT".into(), "deu".into())
-        );
-        assert_eq!(track_label("es-MX", &Value::Null, false).0, "Spanish-SRT");
-        assert_eq!(
-            track_label(
-                "custom",
-                &serde_json::json!({"name":"Custom Language"}),
-                true
-            )
-            .0,
-            "Custom Language-GENERATED-SRT"
+            track_label("de", true),
+            ("German-GENERATED-SRT".into(), "deu".into())
         );
     }
 
     #[test]
     #[cfg(unix)]
-    fn embeds_with_source_labels_and_retains_sidecars() {
+    fn failed_embedding_keeps_the_original_video_and_srt() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let media = dir.path().join("id.mp4");
-        std::fs::write(&media, "original video").unwrap();
-        std::fs::write(dir.path().join("id.en.srt"), "captions").unwrap();
-        std::fs::write(dir.path().join("id.de.srt"), "captions").unwrap();
+        let media = dir.path().join("video.mp4");
+        let subtitle = dir.path().join("video.en.srt");
         let ffmpeg = dir.path().join("ffmpeg");
-        let captured = dir.path().join("args");
-        std::fs::write(&ffmpeg, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nfor output do :; done\ncp '{}' \"$output\"\n", captured.display(), media.display())).unwrap();
+        std::fs::write(&media, "original media").unwrap();
+        std::fs::write(&subtitle, "original captions").unwrap();
+        std::fs::write(
+            &ffmpeg,
+            r#"#!/bin/sh
+for output do :; done
+echo partial > "$output"
+exit 1
+"#,
+        )
+        .unwrap();
         std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o755)).unwrap();
-        embed_with(
-            &ffmpeg,
-            &media,
-            Some(r#"{"en":{},"de":{}}"#),
-            Some(r#"{"en":[]}"#),
-            true,
-        )
-        .unwrap();
-        let args = std::fs::read_to_string(&captured).unwrap();
-        assert!(args.contains("handler_name=English-SRT"));
-        assert!(args.contains("handler_name=German-GENERATED-SRT"));
+        let track = CaptionTrack {
+            key: "en-orig".into(),
+            language: CaptionLanguage::new("en").unwrap(),
+            source: CaptionSource::Automatic,
+        };
+        let error = embed_with(&ffmpeg, &media, &subtitle, &track).unwrap_err();
+        assert!(error.to_string().contains("subtitle embedding failed"));
+        assert_eq!(std::fs::read_to_string(media).unwrap(), "original media");
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("id.en.srt")).unwrap(),
-            "captions"
+            std::fs::read_to_string(subtitle).unwrap(),
+            "original captions"
         );
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("id.de.srt")).unwrap(),
-            "captions"
-        );
-        assert_eq!(std::fs::read_to_string(&media).unwrap(), "original video");
-        // Creator metadata can be present even when only automatic captions were requested.
-        embed_with(
-            &ffmpeg,
-            &media,
-            Some(r#"{"en":{},"de":{}}"#),
-            Some(r#"{"en":[]}"#),
-            false,
-        )
-        .unwrap();
-        assert!(
-            std::fs::read_to_string(&captured)
-                .unwrap()
-                .contains("handler_name=English-GENERATED-SRT")
-        );
-        std::fs::write(&ffmpeg, "#!/bin/sh\necho failed >&2\nexit 7\n").unwrap();
-        assert!(embed_with(&ffmpeg, &media, Some(r#"{"en":{},"de":{}}"#), None, false).is_err());
-        assert!(dir.path().join("id.en.srt").is_file());
-        assert!(dir.path().join("id.de.srt").is_file());
-        assert_eq!(std::fs::read_to_string(&media).unwrap(), "original video");
+        assert!(!std::fs::read_dir(dir.path()).unwrap().any(|e| {
+            let path = e.unwrap().path();
+            path.extension().is_some_and(|ext| ext == "mp4")
+                && path.file_name().unwrap() != "video.mp4"
+        }));
     }
 }

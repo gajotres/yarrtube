@@ -1,33 +1,10 @@
-use crate::domain::video::subtitle_sidecar::subtitle_suffix;
 use anyhow::{Context, Result, bail};
-use std::path::Path;
 
-/// Rebuild sidecars from yt-dlp's preserved originals: FFmpeg concat can drop
-/// sparse subtitle streams. Originals exist only when ModifyChapters cut them.
-pub fn repair_cut_subtitles(media: &Path, chapters: Option<&str>) -> Result<()> {
-    let parent = media.parent().context("subtitle media has no parent")?;
-    let mut originals = Vec::new();
-    for entry in std::fs::read_dir(parent)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        let Some(base) = name.strip_suffix(".uncut.srt") else {
-            continue;
-        };
-        let target = parent.join(format!("{base}.srt"));
-        if subtitle_suffix(media, &target).is_some() && entry.file_type()?.is_file() {
-            originals.push((entry.path(), target));
-        }
-    }
-    if originals.is_empty() {
-        tracing::info!("No preserved SRTs to retime; yt-dlp may not have cut any segments");
-        return Ok(());
-    }
+/// Apply the exact cuts from the saved video to captions fetched later.
+/// Rebuild cues directly so FFmpeg concat cannot drop sparse subtitle streams.
+pub fn retime_subtitles(text: &str, chapters: &str) -> Result<String> {
     let raw: Vec<serde_json::Value> =
-        serde_json::from_str(chapters.context("missing SponsorBlock cut data")?)
-            .context("invalid SponsorBlock cut data")?;
+        serde_json::from_str(chapters).context("invalid SponsorBlock cut data")?;
     let mut cuts = Vec::new();
     for chapter in raw {
         let start = chapter["start_time"].as_f64().context("cut has no start")?;
@@ -49,16 +26,7 @@ pub fn repair_cut_subtitles(media: &Path, chapters: Option<&str>) -> Result<()> 
             merged.push((start, end));
         }
     }
-    tracing::info!(
-        tracks = originals.len(),
-        cut_ranges = merged.len(),
-        "Retiming subtitles from preserved originals"
-    );
-    for (source, target) in originals {
-        let text = std::fs::read_to_string(&source)?;
-        std::fs::write(&target, retime_srt(&text, &merged)?)?;
-    }
-    Ok(())
+    retime_srt(text, &merged)
 }
 
 fn retime_srt(text: &str, cuts: &[(i64, i64)]) -> Result<String> {
@@ -196,25 +164,11 @@ mod tests {
     }
 
     #[test]
-    fn repairs_empty_outputs_and_merges_overlapping_cut_ranges() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("id.en.uncut.srt"),
-            "1\n00:00:06,000 --> 00:00:08,000\nHello\n",
-        )
-        .unwrap();
-        std::fs::write(dir.path().join("id.en.srt"), "").unwrap();
-        repair_cut_subtitles(
-            &dir.path().join("id.mp4"),
-            Some(r#"[{"start_time":2,"end_time":4},{"start_time":3,"end_time":5}]"#),
-        )
-        .unwrap();
-        assert!(
-            std::fs::read_to_string(dir.path().join("id.en.srt"))
-                .unwrap()
-                .contains("00:00:03,000 --> 00:00:05,000")
-        );
-        // No originals means no cuts were applied, so missing API metadata is harmless.
-        repair_cut_subtitles(&dir.path().join("other.mp4"), None).unwrap();
+    fn deferred_subtitles_use_the_saved_download_cut_ranges() {
+        let original = "1\n00:00:05,000 --> 00:00:07,000\nHello\n";
+        let retimed = retime_subtitles(original, r#"[{"start_time":2,"end_time":4}]"#).unwrap();
+        assert!(retimed.contains("00:00:03,000 --> 00:00:05,000"));
+        assert!(retime_subtitles(original, "invalid").is_err());
+        assert!(retime_subtitles(original, r#"[{"start_time":4,"end_time":2}]"#).is_err());
     }
 }

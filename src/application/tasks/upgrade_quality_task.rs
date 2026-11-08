@@ -62,6 +62,7 @@ mod tests {
         let video_file_repository = Arc::new(FakeVideoFileRepository::default());
         let video_downloader_repository = Arc::new(
             FakeVideoDownloaderRepository::succeeding_with(DownloadedVideo {
+                subtitle_cuts: Some(r#"[{"start_time":2,"end_time":4}]"#.into()),
                 height: Some(1080),
                 ..staged_download()
             })
@@ -71,7 +72,7 @@ mod tests {
                 published_at: Some(published_yesterday()),
             })),
         );
-        let video = sd_video();
+        let video = sd_video().mark_subtitles_fetched("old.en.srt", now());
         video_repository.save(&video).unwrap();
         let task = UpgradeQualityTask::new(Arc::new(QualityUpgrader::new(
             video_repository.clone(),
@@ -92,6 +93,9 @@ mod tests {
             video_repository.list().unwrap(),
             vec![Video {
                 downloaded_height: Some(1080),
+                subtitle_state: crate::domain::video::SubtitleState::Missing,
+                subtitle_filename: None,
+                subtitle_checks: Default::default(),
                 quality_checks: LateDataChecks {
                     last_checked_at: Some(now()),
                     failed_attempts: 0,
@@ -100,6 +104,13 @@ mod tests {
                 updated_at: now(),
                 ..video.clone()
             }]
+        );
+        assert_eq!(
+            video_repository
+                .download_cuts(&video.id)
+                .unwrap()
+                .as_deref(),
+            Some(r#"[{"start_time":2,"end_time":4}]"#)
         );
         assert_eq!(
             *video_file_repository.moved.lock().unwrap(),
@@ -144,6 +155,7 @@ mod tests {
         let video_file_repository = Arc::new(FakeVideoFileRepository::default());
         let video_downloader_repository = Arc::new(
             FakeVideoDownloaderRepository::succeeding_with(DownloadedVideo {
+                subtitle_cuts: None,
                 height: Some(720),
                 sabr_notice: Some(
                     "YouTube may have enabled the SABR-only streaming experiment".to_string(),
@@ -177,6 +189,9 @@ mod tests {
             video_repository.list().unwrap(),
             vec![Video {
                 downloaded_height: Some(720),
+                subtitle_state: crate::domain::video::SubtitleState::Missing,
+                subtitle_filename: None,
+                subtitle_checks: Default::default(),
                 quality_checks: LateDataChecks {
                     last_checked_at: Some(now()),
                     failed_attempts: 1,
@@ -367,6 +382,7 @@ mod tests {
         let video_file_repository = Arc::new(FakeVideoFileRepository::default());
         let video_downloader_repository = Arc::new(
             FakeVideoDownloaderRepository::succeeding_with(DownloadedVideo {
+                subtitle_cuts: None,
                 height: Some(240),
                 ..staged_download()
             })
@@ -420,6 +436,7 @@ mod tests {
         let video_file_repository = Arc::new(FakeVideoFileRepository::default());
         let video_downloader_repository = Arc::new(
             FakeVideoDownloaderRepository::succeeding_with(DownloadedVideo {
+                subtitle_cuts: None,
                 height: Some(360),
                 ..staged_download()
             })
@@ -571,6 +588,7 @@ mod tests {
             let video_repository = video_repository.clone();
             let reset = reset.clone();
             FakeVideoDownloaderRepository::succeeding_with(DownloadedVideo {
+                subtitle_cuts: None,
                 height: Some(1080),
                 ..staged_download()
             })
@@ -620,6 +638,7 @@ mod tests {
             let video_repository = video_repository.clone();
             let redownloaded = redownloaded.clone();
             FakeVideoDownloaderRepository::succeeding_with(DownloadedVideo {
+                subtitle_cuts: None,
                 height: Some(1080),
                 ..staged_download()
             })
@@ -732,6 +751,7 @@ mod tests {
     /// The re-download `yt-dlp` staged for `yt1`.
     fn staged_download() -> DownloadedVideo {
         DownloadedVideo {
+            subtitle_cuts: None,
             media_path: PathBuf::from("yt1.mp4"),
             thumbnail_path: Some(PathBuf::from("yt1.jpg")),
             duration_seconds: Some(600),

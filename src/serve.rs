@@ -165,12 +165,14 @@ pub(crate) fn build_infrastructure() -> Result<InfrastructureContainer> {
         videos_path: PathBuf::from(videos_path()),
         avatars_path: avatars_path(),
         ytdlp_path: target_path(),
-        subtitles: crate::infrastructure::shared::subtitles::SubtitleConfig::parse(
-            &std::env::var("YARRTUBE_WRITE_SUBS").unwrap_or_default(),
-            &std::env::var("YARRTUBE_WRITE_AUTO_SUBS").unwrap_or_default(),
-            &std::env::var("YARRTUBE_SUB_LANGS").unwrap_or_default(),
-        )?
-        .with_embedding(&std::env::var("YARRTUBE_EMBED_SUBS").unwrap_or_default())?,
+        embed_subtitles: match std::env::var("YARRTUBE_EMBED_SUBS")
+            .unwrap_or_default()
+            .trim()
+        {
+            "" | "true" => true,
+            "false" => false,
+            _ => anyhow::bail!("YARRTUBE_EMBED_SUBS must be true or false"),
+        },
         sponsorblock: crate::infrastructure::shared::sponsorblock::SponsorBlockConfig::parse(
             &std::env::var("YARRTUBE_SPONSORBLOCK_REMOVE").unwrap_or_default(),
         )?,
@@ -905,15 +907,18 @@ fn quality_upgrader(infrastructure: &InfrastructureContainer) -> Arc<QualityUpgr
 }
 
 fn subtitle_fetcher(infrastructure: &InfrastructureContainer) -> Arc<SubtitleFetcher> {
-    Arc::new(SubtitleFetcher::new(
-        infrastructure.video_repository.clone(),
-        infrastructure.video_transcript_repository.clone(),
-        infrastructure.video_downloader_repository.clone(),
-        infrastructure.video_file_repository.clone(),
-        infrastructure.event_publisher.clone(),
-        infrastructure.clock.clone(),
-        videos_path(),
-    ))
+    Arc::new(
+        SubtitleFetcher::new(
+            infrastructure.video_repository.clone(),
+            infrastructure.video_transcript_repository.clone(),
+            infrastructure.video_downloader_repository.clone(),
+            infrastructure.video_file_repository.clone(),
+            infrastructure.event_publisher.clone(),
+            infrastructure.clock.clone(),
+            videos_path(),
+        )
+        .with_video_lock(infrastructure.video_lock.clone()),
+    )
 }
 
 async fn status() -> StatusCode {
@@ -1510,7 +1515,7 @@ mod tests {
             avatars_path: unique_temp_dir("serve-registry-avatars"),
             ytdlp_path: PathBuf::from("yt-dlp"),
             sponsorblock: Default::default(),
-            subtitles: Default::default(),
+            embed_subtitles: true,
         })
         .unwrap()
     }

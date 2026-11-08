@@ -282,6 +282,8 @@ impl VideoDownloader {
             }
             None => downloaded_video,
         };
+        self.video_repository
+            .store_download_cuts(&downloaded_video.id, downloaded.subtitle_cuts.as_deref())?;
         let downloaded_video = self.save(downloaded_video)?;
         info!(video_id = %downloaded_video.id, "video downloaded");
         Ok(downloaded_video)
