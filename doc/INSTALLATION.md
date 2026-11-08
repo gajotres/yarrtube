@@ -87,10 +87,7 @@ Environment variables read by Yarrtube are listed below. Every variable except `
 | `YARRTUBE_RETRY_BASE_DELAY_SECONDS`   | `150`                 | Delay before retrying a failed task; it grows exponentially with each further retry                                                                                                                           |
 | `YARRTUBE_AVATARS_PATH`               | `/config/avatars`     | Directory channel avatars are stored in (inside the container)                                                                                                                                                |
 | `YARRTUBE_SPONSORBLOCK_REMOVE` | empty (disabled) | SponsorBlock removal categories: `default`, `all`, or explicit comma-separated categories (see below). |
-| `YARRTUBE_WRITE_SUBS` | `false` | Download creator-provided captions in the selected languages. Converted to SRT before optional embedding. |
-| `YARRTUBE_WRITE_AUTO_SUBS` | `false` | Download automatic captions and automatic translations in the selected languages. Creator captions take precedence for the same language when both switches are enabled. |
-| `YARRTUBE_EMBED_SUBS` | `true` | Embed downloaded captions after SponsorBlock timing correction, with titles such as `English-SRT` or `English-GENERATED-SRT`. External SRTs are kept; `false` keeps external SRTs only. |
-| `YARRTUBE_SUB_LANGS` | `en.*` | Comma-separated yt-dlp language codes/patterns. `en.*` selects English variants only; `en.*,de.*` selects English and German. Live chat is always excluded. |
+| `YARRTUBE_EMBED_SUBS` | `true` | Embed the separately fetched original-language caption after SponsorBlock timing correction, with titles such as `English-SRT` or `English-GENERATED-SRT`. External SRTs are kept; `false` keeps external SRTs only. |
 | `YTDLP_PATH`                          | `/app/bin/yt-dlp`     | Path to the managed `yt-dlp` binary (also the path bundled into the image at build time)                                                                                                                      |
 | `RUST_LOG`                            | `info`                | Log verbosity (e.g. `RUST_LOG=debug`)                                                                                                                                                                         |
 | `YARRTUBE_PLEX_URL`                   | —                     | Base URL of your Plex server (e.g. `http://192.168.1.10:32400`). With the token and `YARRTUBE_PLEX_VIDEOS_PATH`, enables the [Plex scan trigger](#plex)                                                       |
@@ -138,45 +135,51 @@ task retry mechanism rather than silently delivering an uncut video.
 
 ## Subtitles
 
-Subtitle downloading is optional and disabled by default. Add these environment
-variables to the container to download creator captions and automatic captions:
+Videos download first, without requesting or embedding captions. Once the video
+is available, upstream's separate `fetch_subtitles` task probes the available
+tracks and downloads one original-language caption. It prefers creator-provided
+captions and falls back to original automatically generated captions (such as
+`en-orig`). It does not request automatic translations or all English variants.
+This uses the upstream selection, download, transcript and late-data retry policy.
+
+Caption HTTP errors (including YouTube 429 rate limits), missing captions,
+conversion errors and embedding errors never invalidate or re-download a saved
+video. Failures are logged and counted as subtitle checks; upstream's reconcilers
+schedule later checks under the late-data policy. Upstream cannot guarantee that
+YouTube will always serve subtitles.
+
+Embedding is enabled by default. The caption is converted to SRT, adjusted for
+the exact SponsorBlock cuts saved with that video download, and then embedded
+without re-encoding audio or video. The original video is replaced only after
+FFmpeg succeeds. The external language-tagged SRT is also retained for the web
+player and Plex, and its transcript remains available for AI features.
 
 ```yaml
-- YARRTUBE_WRITE_SUBS=true
-- YARRTUBE_WRITE_AUTO_SUBS=true
-- YARRTUBE_SUB_LANGS=en.*
 - YARRTUBE_EMBED_SUBS=true
 ```
 
-The two switches are independent (`true` or `false`). `YARRTUBE_SUB_LANGS`
-accepts yt-dlp language codes and patterns separated by commas: `en.*` (default),
-`en.*,de.*`, or `all`. Live chat is always excluded. When both sources offer the
-same language, yt-dlp prefers creator-provided captions. Missing captions or no
-matching languages do not by themselves fail the video download. Subtitle network
-or conversion errors follow the existing download retry mechanism.
+Set `YARRTUBE_EMBED_SUBS=false` to keep external SRTs only, such as
+`Season 1/S01E001 - A Video.en.srt`. Embedded track titles use full English
+language names: `English-SRT` for creator captions and
+`English-GENERATED-SRT` for original automatic captions. ISO language tags are
+also set. MP4 stores the SRT input as compatible timed text; players choose
+whether to display it.
 
-Subtitles are converted to SRT in the download staging folder. Embedding is
-enabled by default: the video and its external SRTs reach the library, and the
-video also contains embedded tracks. Set
-`YARRTUBE_EMBED_SUBS=false` for external-only language-tagged files, such as
-`Season 1/S01E001 - A Video.en.srt`, next to the video. Downloading still uses
-the two opt-in switches above.
+The former `YARRTUBE_WRITE_SUBS`, `YARRTUBE_WRITE_AUTO_SUBS` and
+`YARRTUBE_SUB_LANGS` settings are ignored and can be removed from existing
+container configurations. The original-language upstream fetch always runs.
+Recreate the container after changing `YARRTUBE_EMBED_SUBS`; existing fetched
+captions are not retroactively embedded just by changing this setting.
 
-Embedded track titles use full English language names: `English-SRT` for creator
-captions and `English-GENERATED-SRT` for automatic captions (including automatic
-translations). ISO language tags are also set. The SRT label describes the input
-format; MP4 stores these tracks as compatible timed text. Embedding runs after
-SponsorBlock timestamp repair, copies the
-video/audio without re-encoding, and leaves subtitle playback selection to the
-player. Sidecars are moved/renamed with the episode, retained during orphan
-cleanup, and removed with the video. Redownloading replaces old sidecars, since
-new SponsorBlock cuts could make old timestamps incorrect. Existing downloaded
-videos are not automatically fetched again just because these settings change.
+New downloads record their SponsorBlock cut timestamps in the database.
+Older videos without this metadata cannot safely receive freshly fetched
+captions while SponsorBlock is enabled: their subtitle task logs that they need
+a one-time video re-download. Existing videos and their existing captions remain
+available. Quality upgrades replace this metadata and fetch fresh captions so
+changed cuts cannot leave old subtitles attached to the new video.
 
-With SponsorBlock enabled, Yarrtube adjusts original SRT timestamps using the
-SponsorBlock cut ranges. Original intermediate files stay in staging until the
-download is placed, then are deleted. This avoids FFmpeg dropping sparse cues. Recreate the container after changing these
-settings; selecting many auto-translated languages can increase YouTube requests.
+Sidecars are moved/renamed with episodes, retained during orphan cleanup, and
+removed with their video.
 
 ## Videos on disk
 
@@ -268,47 +271,27 @@ container manager's **Logs** view, or run these commands on the Docker host
 (replace the container name if yours differs):
 
 ```sh
-docker logs --since 1h --timestamps sergigp-yarrtube
-docker logs --follow --since 5m --timestamps sergigp-yarrtube
+docker logs --since 1h --timestamps gajotres-yarrtube
+docker logs --follow --since 5m --timestamps gajotres-yarrtube
 ```
 
 After reproducing a failed subtitle download, export a file you can share:
 
 ```sh
-docker logs --since 1h --timestamps sergigp-yarrtube > yarrtube.log 2>&1
+docker logs --since 1h --timestamps gajotres-yarrtube > yarrtube.log 2>&1
 ```
 
-At the default `RUST_LOG=info` level, each download logs its effective creator,
-automatic, embedding, language and SponsorBlock settings; available and requested
-caption language codes; yt-dlp warnings even when the video download succeeds;
-SRT file counts and sizes; timing correction; and embedding track titles and
-completion. The `staging_dir` field correlates messages from concurrent downloads.
-`none` means an empty language inventory, while `unknown` means the tool did not
-provide readable metadata. Missing SRTs emit a warning rather than silently
-skipping embedding. Failed stages also appear in the task's error details.
+At the default `RUST_LOG=info` level, video downloads explicitly report that
+subtitles are fetched separately. The separate subtitle task logs failed probes,
+downloads, timing correction or embedding with the video ID and error. Embedding
+logs its track title and completion. A failed caption task does not turn a
+successful video download into an error.
 
-New yt-dlp diagnostic log lines redact URL-bearing tokens and the configured
-YouTube API key, and bound the output size. Raw caption metadata, signed caption
-URLs, cookies and the full process command are not dumped by these diagnostics.
-Review exported logs before sharing: other application messages can include
-video titles, local paths and source identifiers.
+Video-download yt-dlp diagnostic lines redact URL-bearing tokens and the
+configured YouTube API key, and bound the output size. Review exported logs
+before sharing: other application messages can include video titles, local
+paths, source identifiers and upstream error details.
 
-These logs cover **new download attempts**. Changing subtitle settings does not
-retroactively process videos already downloaded. Pull the updated image and
-recreate the container, then retry a download or add a new video before exporting.
-Docker retains the logs according to the host's logging driver and rotation
-settings; no additional Yarrtube log volume or environment variable is needed.
-
-
-### Fork subtitle settings and upstream transcripts
-
-When `YARRTUBE_WRITE_SUBS`, `YARRTUBE_WRITE_AUTO_SUBS`, or SponsorBlock removal
-is enabled, the download pipeline owns video subtitle files. The upstream
-original-language fetch still stores transcripts for AI summaries and categories,
-but does not create another external SRT or overwrite selected, retimed captions.
-With embedding enabled, downloaded SRTs remain next to the video as well as
-being embedded in it. The web player's separate subtitle selector requires an
-external sidecar matching the upstream original-language track; embedded MP4
-tracks remain available to compatible media players such as Plex.
-When all fork caption switches and SponsorBlock are off, upstream's automatic
-original-language sidecar and browser subtitle playback work normally.
+Pull the updated image and recreate the container before testing. Docker retains
+logs according to the host's logging driver and rotation settings; no additional
+Yarrtube log volume or environment variable is needed.

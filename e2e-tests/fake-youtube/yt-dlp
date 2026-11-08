@@ -104,13 +104,16 @@ function fetchThumbnail() {
   const video = videoOf(url)
   failIfBroken(video)
   copySample('jpg', `${video.id}.jpg`)
+  console.log('[]') // saved SponsorBlock cuts
+  console.log('240') // actual fixture height
+  console.log('[]') // chapters
   console.log(timestamp(video))
   console.log(uploadDate(video))
   console.log(`${video.id}.jpg`)
 }
 
-// The download: `<id>.mp4` and `<id>.jpg`, printing the publish time, the
-// duration and the media's filename.
+// The download: media and thumbnail, then the after_move metadata in the
+// same order as the production adapter (no SponsorBlock cuts or chapters).
 async function download() {
   const video = videoOf(url)
   const delay = { slow: SLOW_DOWNLOAD_MS, failing: FAILING_ATTEMPT_MS }[video.behaviour]
@@ -120,6 +123,9 @@ async function download() {
   failIfBroken(video)
   copySample('mp4', `${video.id}.mp4`)
   copySample('jpg', `${video.id}.jpg`)
+  console.log('[]') // saved SponsorBlock cuts
+  console.log('240') // actual fixture height
+  console.log('[]') // chapters
   console.log(timestamp(video))
   console.log(uploadDate(video))
   console.log(video.durationSeconds)

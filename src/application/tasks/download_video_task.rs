@@ -202,6 +202,7 @@ mod tests {
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::succeeding_with(
                 DownloadedVideo {
+                    subtitle_cuts: None,
                     height: Some(720),
                     ..staged_download()
                 },
@@ -259,6 +260,7 @@ mod tests {
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::succeeding_with(
                 DownloadedVideo {
+                    subtitle_cuts: None,
                     height: Some(1080),
                     ..staged_download()
                 },
@@ -317,6 +319,7 @@ mod tests {
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::succeeding_with(
                 DownloadedVideo {
+                    subtitle_cuts: None,
                     height: Some(1080),
                     published_at: Some(fixed_timestamp() - Duration::days(30)),
                     ..staged_download()
@@ -379,6 +382,7 @@ mod tests {
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::succeeding_with(
                 DownloadedVideo {
+                    subtitle_cuts: None,
                     height: Some(360),
                     sabr_notice: Some(
                         "YouTube may have enabled the SABR-only streaming experiment".to_string(),
@@ -443,6 +447,7 @@ mod tests {
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::succeeding_with(
                 DownloadedVideo {
+                    subtitle_cuts: None,
                     height: Some(360),
                     ..staged_download()
                 },
@@ -504,6 +509,7 @@ mod tests {
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::succeeding_with(
                 DownloadedVideo {
+                    subtitle_cuts: None,
                     height: Some(720),
                     ..staged_download()
                 },
@@ -2013,6 +2019,7 @@ mod tests {
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::succeeding_with(
                 DownloadedVideo {
+                    subtitle_cuts: None,
                     thumbnail_path: None,
                     ..staged_download()
                 },
@@ -2225,6 +2232,7 @@ mod tests {
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::succeeding_with(
                 DownloadedVideo {
+                    subtitle_cuts: None,
                     thumbnail_path: None,
                     ..staged_download()
                 },
@@ -2498,6 +2506,7 @@ mod tests {
     /// 2026-03-15, with its converted thumbnail.
     fn staged_download() -> DownloadedVideo {
         DownloadedVideo {
+            subtitle_cuts: None,
             height: None,
             media_path: PathBuf::from("yt1.mp4"),
             thumbnail_path: Some(PathBuf::from("yt1.jpg")),

@@ -47,6 +47,10 @@ struct VideoRow {
 }
 
 pub trait VideoRepository: Send + Sync {
+    /// Download-only timing metadata, kept outside the mutable Video fields.
+    fn store_download_cuts(&self, id: &VideoRecordId, cuts: Option<&str>) -> anyhow::Result<()>;
+    fn download_cuts(&self, id: &VideoRecordId) -> anyhow::Result<Option<String>>;
+
     /// Plain insert-or-full-replace of every column — no conflict-merge
     /// policy. Callers decide what `Video` value to persist.
     fn save(&self, video: &Video) -> anyhow::Result<()>;
@@ -146,6 +150,26 @@ impl SqliteVideoRepository {
 }
 
 impl VideoRepository for SqliteVideoRepository {
+    fn store_download_cuts(&self, id: &VideoRecordId, cuts: Option<&str>) -> anyhow::Result<()> {
+        self.db.write()?.execute(
+            "UPDATE videos SET subtitle_cuts = ?2 WHERE id = ?1",
+            params![id.as_str(), cuts],
+        )?;
+        Ok(())
+    }
+    fn download_cuts(&self, id: &VideoRecordId) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .db
+            .read()?
+            .query_row(
+                "SELECT subtitle_cuts FROM videos WHERE id = ?1",
+                [id.as_str()],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     fn save(&self, video: &Video) -> anyhow::Result<()> {
         let conn = self.db.write()?;
         conn.execute(
@@ -775,6 +799,31 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         crate::infrastructure::shared::sqlite_migrations::apply(&mut conn).unwrap();
         SqliteVideoRepository::new(Database::single(conn))
+    }
+
+    #[test]
+    fn saved_download_cuts_survive_other_video_updates_and_can_be_replaced() {
+        let db = TestDatabase::new();
+        let repository = SqliteVideoRepository::new(db.database());
+        let video = Video::create(VideoId::new("cuts-video").unwrap(), "Video", Utc::now());
+        repository.save(&video).unwrap();
+        assert_eq!(repository.download_cuts(&video.id).unwrap(), None);
+        let cuts = r#"[{"start_time":2,"end_time":4}]"#;
+        repository
+            .store_download_cuts(&video.id, Some(cuts))
+            .unwrap();
+        repository.update(&video).unwrap();
+        assert_eq!(
+            repository.download_cuts(&video.id).unwrap().as_deref(),
+            Some(cuts)
+        );
+        repository
+            .store_download_cuts(&video.id, Some("[]"))
+            .unwrap();
+        assert_eq!(
+            repository.download_cuts(&video.id).unwrap().as_deref(),
+            Some("[]")
+        );
     }
 
     #[test]

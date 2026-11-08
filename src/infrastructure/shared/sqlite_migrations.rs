@@ -69,6 +69,9 @@ pub fn apply(conn: &mut Connection) -> anyhow::Result<()> {
         M::up(VIDEO_SUMMARIES_SQL),
         M::up(AI_CATEGORIZATION_SQL),
         M::up(VIDEO_CATEGORY_VERDICTS_SQL),
+        M::up(include_str!(
+            "../../../migrations/0026_download_subtitle_cuts.sql"
+        )),
     ])
     .to_latest(conn)
     .inspect_err(|e| tracing::error!(error = %e, "failed to apply database migrations"))

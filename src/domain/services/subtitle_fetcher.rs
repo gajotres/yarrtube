@@ -11,6 +11,7 @@ use crate::infrastructure::repositories::youtube_video_downloader_repository::{
 };
 use crate::infrastructure::shared::domain_events::event_publisher::EventPublisher;
 use crate::infrastructure::shared::system_clock::Clock;
+use crate::infrastructure::shared::video_lock::VideoLock;
 use chrono::{DateTime, Utc};
 use std::path::Path;
 use std::sync::Arc;
@@ -29,9 +30,15 @@ pub struct SubtitleFetcher {
     event_publisher: Arc<dyn EventPublisher>,
     clock: Arc<dyn Clock>,
     videos_path: String,
+    video_lock: Arc<VideoLock>,
 }
 
 impl SubtitleFetcher {
+    pub fn with_video_lock(mut self, lock: Arc<VideoLock>) -> Self {
+        self.video_lock = lock;
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         video_repository: Arc<dyn VideoRepository>,
@@ -50,6 +57,7 @@ impl SubtitleFetcher {
             event_publisher,
             clock,
             videos_path: videos_path.into(),
+            video_lock: Arc::new(VideoLock::default()),
         }
     }
 }
@@ -154,18 +162,30 @@ impl SubtitleFetcher {
         staging: &Path,
         output_dir: &Path,
     ) -> anyhow::Result<()> {
+        tracing::info!(video_id = %video.id, language = %track.language.as_str(), source = ?track.source,
+            "Fetching upstream original-language caption separately from the video");
         let fetched = self
             .video_downloader_repository
             .fetch_subtitles(probe, track, staging)?;
+        let _guard = self.video_lock.lock(&video.id);
         if !self.is_still_downloaded_as(video)? {
             return Ok(());
         }
         let subtitle_filename = paths.subtitle(&track.language);
-        let retain_sidecar = self.video_downloader_repository.retain_transcript_sidecar();
-        if retain_sidecar {
-            self.video_file_repository
-                .move_file(&fetched.path, &output_dir.join(&subtitle_filename))?;
-        }
+        let cuts = self.video_repository.download_cuts(&video.id)?;
+        self.video_downloader_repository.process_subtitles(
+            &output_dir.join(
+                video
+                    .filename
+                    .as_deref()
+                    .expect("downloaded video has a filename"),
+            ),
+            &fetched.path,
+            track,
+            cuts.as_deref(),
+        )?;
+        self.video_file_repository
+            .move_file(&fetched.path, &output_dir.join(&subtitle_filename))?;
         let now = self.clock.now();
         self.video_transcript_repository
             .save(&VideoTranscript::create(
@@ -174,19 +194,10 @@ impl SubtitleFetcher {
                 TranscriptText::from_srt(&fetched.srt),
                 now,
             ))?;
-        let mut recorded = video
-            .clone()
-            .mark_subtitles_fetched(subtitle_filename.clone(), now);
-        if !retain_sidecar
-            && !self
-                .video_file_repository
-                .file_exists(output_dir, &subtitle_filename)
-        {
-            recorded.subtitle_filename = None;
-            tracing::info!(video_id = %video.id, "Transcript stored without an external SRT; download settings own subtitle files");
-        }
-        self.video_repository.update_subtitles(&recorded)?;
+        self.video_repository
+            .update_subtitles(&video.clone().mark_subtitles_fetched(subtitle_filename, now))?;
         self.publish_fetched(video, output_dir);
+        tracing::info!(video_id = %video.id, "Separate subtitle processing completed");
         Ok(())
     }
 
@@ -196,7 +207,12 @@ impl SubtitleFetcher {
         Ok(self
             .video_repository
             .find(&video.id)?
-            .is_some_and(|stored| stored.is_downloaded() && stored.filename == video.filename))
+            .is_some_and(|stored| {
+                stored.is_downloaded()
+                    && stored.filename == video.filename
+                    && stored.synced_at == video.synced_at
+                    && stored.downloaded_height == video.downloaded_height
+            }))
     }
 
     /// Best-effort, like `VideoDownloaded`: the subtitles are already

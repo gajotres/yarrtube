@@ -2,8 +2,7 @@ use crate::domain::shared::Quality;
 use crate::domain::video::VideoChapter;
 use crate::domain::video_transcript::{CaptionSource, CaptionTrack, CaptionTracks};
 use crate::infrastructure::shared::sponsorblock::SponsorBlockConfig;
-use crate::infrastructure::shared::subtitles::SubtitleConfig;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -77,6 +76,8 @@ pub struct DownloadedVideo {
     pub chapters: Option<Vec<VideoChapter>>,
     /// The downloaded file's height in pixels, when `yt-dlp` printed one.
     pub height: Option<u32>,
+    /// Exact SponsorBlock cuts from this download, for later caption retiming.
+    pub subtitle_cuts: Option<String>,
 }
 
 /// A video's chapters (`vec![]` for none) and its publish time, when known.
@@ -147,44 +148,17 @@ pub fn download_video(
     quality: Quality,
     staging_dir: &Path,
     sponsorblock: &SponsorBlockConfig,
-    subtitles: &SubtitleConfig,
 ) -> Result<DownloadAttempt> {
     let _span = tracing::info_span!("download", staging_dir = %staging_dir.display()).entered();
     tracing::info!(
-        creator = subtitles.write_subs,
-        automatic = subtitles.write_auto_subs,
-        embed = subtitles.embed,
-        languages = subtitles.languages(),
         sponsorblock = sponsorblock.categories().unwrap_or("disabled"),
-        "Starting video download with subtitle settings"
+        "Starting video download; subtitles are fetched separately"
     );
     ensure_output_dir(staging_dir)?;
     let mut args = args_for_quality(quality);
-    subtitles.append_args(&mut args);
-    let embed_subtitles = subtitles.embed && (subtitles.write_subs || subtitles.write_auto_subs);
-    let captions_enabled = subtitles.write_subs || subtitles.write_auto_subs;
-    if captions_enabled {
-        args.extend([
-            "--print".to_string(),
-            "after_move:%(automatic_captions)j".to_string(),
-            "--print".to_string(),
-            "after_move:%(requested_subtitles)j".to_string(),
-            "--print".to_string(),
-            "after_move:%(subtitles)j".to_string(),
-        ]);
-    }
-    let cut_subtitles =
-        sponsorblock.categories().is_some() && (subtitles.write_subs || subtitles.write_auto_subs);
-    if cut_subtitles {
-        // Preserve uncut SRTs for accurate retiming; the staging directory is
-        // discarded afterwards, including the intermediate uncut media.
-        args.extend([
-            "--keep-video".to_string(),
-            "--print".to_string(),
-            "after_move:%(sponsorblock_chapters)j".to_string(),
-        ]);
-    }
-
+    // Override ambient yt-dlp configuration: no caption HTTP request may
+    // prevent the media download from completing.
+    args.extend(["--no-write-subs", "--no-write-auto-subs", "--no-embed-subs"].map(String::from));
     if let Some(categories) = sponsorblock.categories() {
         args.extend(["--sponsorblock-remove".to_string(), categories.to_string()]);
     } else {
@@ -208,6 +182,8 @@ pub fn download_video(
         // `sabr_reason` can detect it. `--quiet` still gives us the clean
         // `--print` stdout. See the `log-sabr-detection` change.
         "--quiet".to_string(),
+        "--print".to_string(),
+        "after_move:%(sponsorblock_chapters)j".to_string(),
         "--print".to_string(),
         "after_move:%(height)s".to_string(),
         "--print".to_string(),
@@ -261,36 +237,11 @@ pub fn download_video(
     let height = line_before_last(&lines, 5).and_then(|line| line.trim().parse().ok());
 
     let media_path = staging_dir.join(filename);
-    if captions_enabled {
-        let extra = usize::from(cut_subtitles);
-        tracing::info!(
-            requested = %subtitle_language_keys(line_before_last(&lines, 7 + extra)),
-            available_creator = %subtitle_language_keys(line_before_last(&lines, 6 + extra)),
-            available_automatic = %subtitle_language_keys(line_before_last(&lines, 8 + extra)),
-            "yt-dlp subtitle language inventory"
-        );
-        log_subtitle_files(&media_path)?;
-    }
-    if cut_subtitles {
-        tracing::info!("Starting SponsorBlock subtitle timing correction");
-        crate::infrastructure::shared::subtitle_timing::repair_cut_subtitles(
-            &media_path,
-            line_before_last(&lines, 6),
-        )
-        .context("SponsorBlock subtitle timing correction failed")?;
-        tracing::info!("Subtitle timing correction completed");
-    }
-    if embed_subtitles {
-        let extra = usize::from(cut_subtitles);
-        crate::infrastructure::shared::subtitle_embedding::embed_subtitles(
-            &media_path,
-            line_before_last(&lines, 7 + extra),
-            line_before_last(&lines, 6 + extra),
-            subtitles.write_subs,
-        )
-        .context("Subtitle embedding stage failed")?;
-    }
-    tracing::info!("Video download and subtitle processing completed");
+    let subtitle_cuts = line_before_last(&lines, 6).map(|raw| match raw.trim() {
+        "NA" | "null" | "" => "[]".to_string(),
+        raw => raw.to_string(),
+    });
+    tracing::info!("Video download completed; subtitle processing will run in its own task");
     Ok(DownloadAttempt::Succeeded(DownloadedVideo {
         thumbnail_path: staged_thumbnail(&media_path),
         media_path,
@@ -299,6 +250,7 @@ pub fn download_video(
         sabr_notice,
         chapters,
         height,
+        subtitle_cuts,
     }))
 }
 
@@ -339,42 +291,6 @@ fn safe_diagnostic(line: &str) -> String {
         .filter(|c| !c.is_control())
         .take(2000)
         .collect()
-}
-
-fn subtitle_language_keys(raw: Option<&str>) -> String {
-    match raw.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()) {
-        Some(serde_json::Value::Object(map)) => {
-            let keys: Vec<_> = map.keys().map(String::as_str).collect();
-            if keys.is_empty() {
-                "none".into()
-            } else {
-                safe_diagnostic(&keys.join(","))
-            }
-        }
-        _ => "unknown".into(),
-    }
-}
-
-fn log_subtitle_files(media: &Path) -> Result<()> {
-    use crate::domain::video::subtitle_sidecar::subtitle_suffix;
-    let mut count = 0;
-    for entry in std::fs::read_dir(media.parent().context("missing media directory")?)? {
-        let entry = entry?;
-        if entry.file_type()?.is_file()
-            && let Some(suffix) = subtitle_suffix(media, &entry.path())
-        {
-            count += 1;
-            tracing::info!(subtitle = %suffix, bytes = entry.metadata()?.len(), "Downloaded SRT subtitle found");
-        }
-    }
-    if count == 0 {
-        tracing::warn!(
-            "No SRT subtitles produced; check available languages and yt-dlp diagnostics"
-        );
-    } else {
-        tracing::info!(count, "Subtitle file inventory completed");
-    }
-    Ok(())
 }
 
 /// Reads the video's chapters and publish time via `yt-dlp --print
@@ -1336,6 +1252,45 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn video_download_explicitly_disables_subtitles_and_keeps_saved_cut_metadata() {
+        let fake = test_support::FakeYtDlp::with_stdout(
+            "[{\"start_time\":2,\"end_time\":4}]\n1080\n[]\n1700000000\n20231114\n8\nvideo.mp4\n",
+        );
+        let dir = test_support::unique_temp_dir("separate-subtitles-download");
+        let result = unwrap_succeeded(
+            download_video(
+                &fake.path,
+                "https://example.test/video",
+                Quality::High,
+                &dir,
+                &SponsorBlockConfig::parse("default").unwrap(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            result.subtitle_cuts.as_deref(),
+            Some(r#"[{"start_time":2,"end_time":4}]"#)
+        );
+        assert_eq!(result.height, Some(1080));
+        assert_eq!(result.duration_seconds, Some(8));
+        let args = fake.captured_args();
+        for flag in ["--no-write-subs", "--no-write-auto-subs", "--no-embed-subs"] {
+            assert!(args.contains(&flag.to_string()));
+        }
+        for flag in [
+            "--write-subs",
+            "--write-auto-subs",
+            "--embed-subs",
+            "--sub-langs",
+            "--convert-subs",
+        ] {
+            assert!(!args.contains(&flag.to_string()));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn subtitle_diagnostics_exclude_caption_urls_and_metadata_values() {
         let line = safe_diagnostic(
             "WARNING: Unable to download en subtitles: HTTP Error 429 https://user:password@example.test/captions?token=secret",
@@ -1343,148 +1298,7 @@ mod tests {
         assert!(line.contains("HTTP Error 429"));
         assert!(!line.contains("secret"));
         assert!(!line.contains("password"));
-        assert_eq!(
-            subtitle_language_keys(Some(r#"{"en":{"url":"secret"},"de":[]}"#)),
-            "de,en"
-        );
-        assert_eq!(subtitle_language_keys(Some("{}")), "none");
-        assert_eq!(subtitle_language_keys(Some("NA")), "unknown");
         assert!(safe_diagnostic(&"é".repeat(3000)).chars().count() <= 2000);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn successful_download_surfaces_subtitle_warnings_and_missing_srts_in_both_modes() {
-        use crate::application::tasks::log_capture::captured_log_messages;
-        // Other parallel tests rebuild tracing's global callsite cache. Isolate
-        // this subscriber test so those rebuilds cannot suppress captured events.
-        const CHILD: &str = "YARRTUBE_TEST_SUBTITLE_LOG_CAPTURE";
-        if std::env::var_os(CHILD).is_none() {
-            let result = Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "infrastructure::shared::ytdlp::tests::successful_download_surfaces_subtitle_warnings_and_missing_srts_in_both_modes", "--test-threads=1"])
-                .env(CHILD, "1")
-                .output().unwrap();
-            assert!(
-                result.status.success(),
-                "{}",
-                String::from_utf8_lossy(&result.stdout)
-            );
-            return;
-        }
-        for embed in ["true", "false"] {
-            let fake = fake_ytdlp_writing_stdout_and_stderr(
-                "subtitle-diagnostics",
-                "{}\n{}\n{}\n720\n[]\nNA\n20260101\n10\nvideo.mp4\n",
-                "WARNING: Unable to download subtitles: HTTP Error 429\n",
-            );
-            let dir = test_support::unique_temp_dir("subtitle-diagnostics-out");
-            let config = SubtitleConfig::parse("true", "true", "en.*")
-                .unwrap()
-                .with_embedding(embed)
-                .unwrap();
-            let messages = captured_log_messages(|| {
-                assert!(matches!(
-                    download_video(
-                        &fake,
-                        "https://example.test/video",
-                        Quality::High,
-                        &dir,
-                        &SponsorBlockConfig::default(),
-                        &config
-                    )
-                    .unwrap(),
-                    DownloadAttempt::Succeeded(_)
-                ));
-            });
-            assert!(
-                messages
-                    .iter()
-                    .any(|m| m.contains("yt-dlp download diagnostic"))
-            );
-            assert!(
-                messages
-                    .iter()
-                    .any(|m| m.contains("No SRT subtitles produced"))
-            );
-            assert!(
-                messages
-                    .iter()
-                    .any(|m| m.contains("subtitle language inventory")),
-                "{messages:?}"
-            );
-            assert_eq!(
-                messages.iter().any(|m| m.contains("embedding skipped")),
-                embed == "true"
-            );
-            std::fs::remove_dir_all(dir).unwrap();
-        }
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn repairs_native_cut_subtitles_before_returning_a_successful_download() {
-        let fake = test_support::FakeYtDlp::with_stdout(
-            "[{\"start_time\":2,\"end_time\":4}]\n720\n[]\n1700000000\n20231114\n8\nid.mp4\n",
-        );
-        let dir = test_support::unique_temp_dir("cut-subtitle-download");
-        std::fs::write(
-            dir.join("id.en.uncut.srt"),
-            "1\n00:00:05,000 --> 00:00:07,000\nHello\n",
-        )
-        .unwrap();
-        std::fs::write(dir.join("id.en.srt"), "").unwrap();
-        download_video(
-            &fake.path,
-            "https://example.com/video",
-            Quality::High,
-            &dir,
-            &SponsorBlockConfig::parse("default").unwrap(),
-            &SubtitleConfig::parse("true", "false", "en")
-                .unwrap()
-                .with_embedding("false")
-                .unwrap(),
-        )
-        .unwrap();
-        assert!(
-            std::fs::read_to_string(dir.join("id.en.srt"))
-                .unwrap()
-                .contains("00:00:03,000 --> 00:00:05,000")
-        );
-        assert!(fake.captured_args().contains(&"--keep-video".to_string()));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn subtitle_options_reach_only_video_downloads_and_disable_native_embedding() {
-        let fake = test_support::FakeYtDlp::with_exit_code(0);
-        let dir = test_support::unique_temp_dir("subtitle-options");
-        let config = SubtitleConfig::parse("true", "true", "en.*,de.*").unwrap();
-        download_video(
-            &fake.path,
-            "https://example.com/video",
-            Quality::High,
-            &dir,
-            &SponsorBlockConfig::default(),
-            &config,
-        )
-        .unwrap();
-        let args = fake.captured_args();
-        for flag in ["--write-subs", "--write-auto-subs", "--no-embed-subs"] {
-            assert!(args.contains(&flag.to_string()));
-        }
-        assert!(!args.contains(&"--embed-subs".to_string()));
-        assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--sub-langs", "en.*,de.*,-live_chat"])
-        );
-        assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--convert-subs", "srt"])
-        );
-        fetch_thumbnail(&fake.path, "https://example.com/video", &dir).unwrap();
-        assert!(!fake.captured_args().contains(&"--write-subs".to_string()));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1502,7 +1316,6 @@ mod tests {
                     Quality::High,
                     &dir,
                     &config,
-                    &SubtitleConfig::default(),
                 )
                 .unwrap(),
             );
@@ -1545,13 +1358,13 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
-            &SubtitleConfig::default(),
         )
         .unwrap();
 
         assert_eq!(
             result,
             DownloadAttempt::Succeeded(DownloadedVideo {
+                subtitle_cuts: None,
                 height: None,
                 media_path: output_dir.join(DEFAULT_PRINTED_FILENAME),
                 thumbnail_path: None,
@@ -1579,7 +1392,6 @@ mod tests {
                 Quality::High,
                 &staging_dir,
                 &SponsorBlockConfig::default(),
-                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -1616,7 +1428,6 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
-            &SubtitleConfig::default(),
         )
         .unwrap();
 
@@ -1645,7 +1456,6 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
-            &SubtitleConfig::default(),
         )
         .unwrap();
 
@@ -1673,7 +1483,6 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
-            &SubtitleConfig::default(),
         )
         .unwrap();
 
@@ -1699,7 +1508,6 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
-            &SubtitleConfig::default(),
         );
 
         assert!(result.is_err());
@@ -1719,7 +1527,6 @@ mod tests {
                 Quality::High,
                 &output_dir,
                 &SponsorBlockConfig::default(),
-                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -1727,6 +1534,7 @@ mod tests {
         assert_eq!(
             result,
             DownloadedVideo {
+                subtitle_cuts: None,
                 height: None,
                 media_path: output_dir.join("My Video.mp4"),
                 thumbnail_path: None,
@@ -1752,7 +1560,6 @@ mod tests {
                 Quality::High,
                 &staging_dir,
                 &SponsorBlockConfig::default(),
-                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -1760,6 +1567,7 @@ mod tests {
         assert_eq!(
             result,
             DownloadedVideo {
+                subtitle_cuts: None,
                 height: Some(1080),
                 media_path: staging_dir.join("yt1.mp4"),
                 thumbnail_path: None,
@@ -1790,7 +1598,6 @@ mod tests {
                 Quality::High,
                 &staging_dir,
                 &SponsorBlockConfig::default(),
-                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -1798,6 +1605,7 @@ mod tests {
         assert_eq!(
             result,
             DownloadedVideo {
+                subtitle_cuts: None,
                 height: None,
                 media_path: staging_dir.join("yt1.mp4"),
                 thumbnail_path: None,
@@ -1836,7 +1644,6 @@ mod tests {
                 Quality::High,
                 &staging_dir,
                 &SponsorBlockConfig::default(),
-                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -1844,6 +1651,7 @@ mod tests {
         assert_eq!(
             result,
             DownloadedVideo {
+                subtitle_cuts: None,
                 height: None,
                 media_path: staging_dir.join("yt1.mp4"),
                 thumbnail_path: None,
@@ -1891,7 +1699,6 @@ mod tests {
                 Quality::High,
                 &staging_dir,
                 &SponsorBlockConfig::default(),
-                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -1899,6 +1706,7 @@ mod tests {
         assert_eq!(
             result,
             DownloadedVideo {
+                subtitle_cuts: None,
                 height: None,
                 media_path: staging_dir.join("yt1.mp4"),
                 thumbnail_path: None,
@@ -1930,7 +1738,6 @@ mod tests {
                 Quality::High,
                 &staging_dir,
                 &SponsorBlockConfig::default(),
-                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -1938,6 +1745,7 @@ mod tests {
         assert_eq!(
             result,
             DownloadedVideo {
+                subtitle_cuts: None,
                 height: None,
                 media_path: staging_dir.join("yt1.mp4"),
                 thumbnail_path: None,
@@ -1966,7 +1774,6 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
-            &SubtitleConfig::default(),
         )
         .unwrap();
 
@@ -2139,7 +1946,6 @@ mod tests {
                 Quality::High,
                 &staging_dir,
                 &SponsorBlockConfig::default(),
-                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -2562,7 +2368,6 @@ mod tests {
                 Quality::High,
                 &staging_dir,
                 &SponsorBlockConfig::default(),
-                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -2584,7 +2389,6 @@ mod tests {
                 Quality::High,
                 &output_dir,
                 &SponsorBlockConfig::default(),
-                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -2606,7 +2410,6 @@ mod tests {
                 Quality::High,
                 &output_dir,
                 &SponsorBlockConfig::default(),
-                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -2631,7 +2434,6 @@ mod tests {
                 Quality::High,
                 &output_dir,
                 &SponsorBlockConfig::default(),
-                &SubtitleConfig::default(),
             )
             .unwrap(),
         );
@@ -2654,7 +2456,6 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
-            &SubtitleConfig::default(),
         );
 
         assert!(result.is_err());
@@ -2674,7 +2475,6 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
-            &SubtitleConfig::default(),
         );
 
         assert_eq!(
@@ -2702,7 +2502,6 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
-            &SubtitleConfig::default(),
         );
 
         assert_eq!(
@@ -2839,13 +2638,13 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
-            &SubtitleConfig::default(),
         )
         .unwrap();
 
         assert_eq!(
             result,
             DownloadAttempt::Succeeded(DownloadedVideo {
+                subtitle_cuts: None,
                 height: None,
                 media_path: output_dir.join("My Video.mp4"),
                 thumbnail_path: None,
@@ -2874,7 +2673,6 @@ mod tests {
             Quality::High,
             &output_dir,
             &SponsorBlockConfig::default(),
-            &SubtitleConfig::default(),
         )
         .unwrap();
 
