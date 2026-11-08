@@ -5,8 +5,8 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Embed the final, retimed SRTs, removing sidecars only after successful placement. Native yt-dlp
-/// embedding is deliberately disabled because it runs before our timing repair.
+/// Embed the final, retimed SRTs while retaining them as external sidecars.
+/// Native yt-dlp embedding runs before our timing repair, so it is disabled.
 pub fn embed_subtitles(
     media: &Path,
     requested: Option<&str>,
@@ -157,16 +157,9 @@ fn embed_with(
         );
     }
     std::fs::rename(&output_path, media).context("failed to place subtitle-embedded video")?;
-    for track in &tracks {
-        match std::fs::remove_file(&track.path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).context("failed to remove embedded subtitle sidecar"),
-        }
-    }
     tracing::info!(
         tracks = tracks.len(),
-        "Subtitle embedding completed; external SRTs removed"
+        "Subtitle embedding completed; external SRTs retained"
     );
     Ok(())
 }
@@ -199,7 +192,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn embeds_with_source_labels_and_removes_sidecars_only_on_success() {
+    fn embeds_with_source_labels_and_retains_sidecars() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let media = dir.path().join("id.mp4");
@@ -221,12 +214,16 @@ mod tests {
         let args = std::fs::read_to_string(&captured).unwrap();
         assert!(args.contains("handler_name=English-SRT"));
         assert!(args.contains("handler_name=German-GENERATED-SRT"));
-        assert!(!dir.path().join("id.en.srt").exists());
-        assert!(!dir.path().join("id.de.srt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("id.en.srt")).unwrap(),
+            "captions"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("id.de.srt")).unwrap(),
+            "captions"
+        );
         assert_eq!(std::fs::read_to_string(&media).unwrap(), "original video");
         // Creator metadata can be present even when only automatic captions were requested.
-        std::fs::write(dir.path().join("id.en.srt"), "captions").unwrap();
-        std::fs::write(dir.path().join("id.de.srt"), "captions").unwrap();
         embed_with(
             &ffmpeg,
             &media,
@@ -240,8 +237,6 @@ mod tests {
                 .unwrap()
                 .contains("handler_name=English-GENERATED-SRT")
         );
-        std::fs::write(dir.path().join("id.en.srt"), "captions").unwrap();
-        std::fs::write(dir.path().join("id.de.srt"), "captions").unwrap();
         std::fs::write(&ffmpeg, "#!/bin/sh\necho failed >&2\nexit 7\n").unwrap();
         assert!(embed_with(&ffmpeg, &media, Some(r#"{"en":{},"de":{}}"#), None, false).is_err());
         assert!(dir.path().join("id.en.srt").is_file());

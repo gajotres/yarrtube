@@ -8,9 +8,9 @@ use crate::domain::category::CategoryId;
 use crate::domain::channel::ChannelHandle;
 use crate::domain::playlist::PlaylistId;
 use crate::domain::services::{
-    SubtitleReader, SubtitleReaderApi, VideoCategoryChoiceSearcher, VideoCategoryChoiceSearcherApi,
-    VideoCategoryEditor, VideoCategoryEditorApi, VideoSearcher, VideoSearcherApi,
-    VideoWatchStateUpdater, VideoWatchStateUpdaterApi,
+    RetryDownloadResult, SubtitleReader, SubtitleReaderApi, VideoCategoryChoiceSearcher,
+    VideoCategoryChoiceSearcherApi, VideoCategoryEditor, VideoCategoryEditorApi, VideoReconciler,
+    VideoSearcher, VideoSearcherApi, VideoWatchStateUpdater, VideoWatchStateUpdaterApi,
 };
 use crate::domain::video::{
     HomeLimits, ListVideosError, PlaybackPosition, ReadSubtitlesError, UpdateWatchStateError,
@@ -41,6 +41,26 @@ const HOME_LIMITS: HomeLimits = HomeLimits {
     quick_watches: 6,
     latest: 18,
 };
+
+pub async fn retry_download(
+    State(reconciler): State<VideoReconciler>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let id = VideoRecordId::new(id)?;
+    match run_blocking(move || reconciler.retry_failed_download(&id))
+        .await?
+        .map_err(ApiError::internal)?
+    {
+        RetryDownloadResult::Queued => Ok(StatusCode::NO_CONTENT),
+        RetryDownloadResult::NotFound => {
+            Err(ApiError::new(StatusCode::NOT_FOUND, "Video not found"))
+        }
+        RetryDownloadResult::NotFailed => Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "Video is not ready to retry",
+        )),
+    }
+}
 
 pub async fn list_videos_for_playlist(
     State(video_searcher): State<VideoSearcher>,

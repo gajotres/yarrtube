@@ -425,6 +425,7 @@ fn prepare_task_queue(
 
 fn api_services(infrastructure: &InfrastructureContainer) -> ApiServices {
     ApiServices {
+        video_reconciler: video_reconciler(infrastructure),
         playlist_creator: PlaylistCreator::new(
             infrastructure.playlist_repository.clone(),
             infrastructure.youtube_playlist_repository.clone(),

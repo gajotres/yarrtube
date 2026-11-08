@@ -26,4 +26,18 @@ test('a download that keeps failing is shown as errored with its reason', async 
     const videos = await (await page.request.get(`/api/playlists/${encodeURIComponent(playlist.id)}/videos`)).json()
     expect(videos.map(({ id, status }) => ({ id, status }))).toEqual([{ id: video, status: 'ERRORED' }])
   })
+
+  await test.step('retry the failed video from its row', async () => {
+    await expect.poll(async () => {
+      const tasks = await (await page.request.get('/api/tasks')).json()
+      return tasks.some((task) => task.task_type === 'download_video')
+    }).toBe(false)
+    const videos = await (await page.request.get(`/api/playlists/${encodeURIComponent(playlist.id)}/videos`)).json()
+    const response = page.waitForResponse((result) =>
+      result.url().endsWith('/retry-download') && result.request().method() === 'POST',
+    )
+    await page.getByRole('button', { name: `Retry download for ${videos[0].title}` }).click()
+    expect((await response).status()).toBe(204)
+    await waitForVideoStatus(page, { status: 'IN_PROGRESS', timeoutMs: 15_000 })
+  })
 })

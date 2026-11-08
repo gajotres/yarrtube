@@ -4,6 +4,7 @@ use crate::domain::services::{
     VideoCategoryAssigner, VideoCategoryAssignerApi, VideoOwnerFinder, VideoOwnerFinderApi,
     VideoRelocator, VideoRelocatorApi,
 };
+use crate::domain::task::Task;
 use crate::domain::video::{
     Video, VideoOwner, VideoRecordId, VideoStatus, VideoSyncPlan, VideoTarget, nfo_path_for,
 };
@@ -41,6 +42,36 @@ pub struct VideoReconciler {
 }
 
 impl VideoReconciler {
+    /// Queue a fresh sync before resetting, while holding the same lock that
+    /// the sync takes. This keeps a failed queue write from stranding a video.
+    pub fn retry_failed_download(
+        &self,
+        video_id: &VideoRecordId,
+    ) -> anyhow::Result<RetryDownloadResult> {
+        let _guard = self.video_lock.lock(video_id);
+        let Some(video) = self.video_repository.find(video_id)? else {
+            return Ok(RetryDownloadResult::NotFound);
+        };
+        if video.status != VideoStatus::Errored
+            || self
+                .task_repository
+                .find_non_completed_for_video(DOWNLOAD_VIDEO_TASK_TYPE, video_id)?
+                .is_some()
+        {
+            return Ok(RetryDownloadResult::NotFailed);
+        }
+        let now = self.clock.now();
+        self.task_repository.schedule(
+            &Task::SyncVideo {
+                video_id: video_id.to_string(),
+            },
+            now,
+        )?;
+        self.video_repository
+            .update(&video.reset_for_redownload(now))?;
+        Ok(RetryDownloadResult::Queued)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         video_repository: Arc<dyn VideoRepository>,
@@ -71,6 +102,12 @@ impl VideoReconciler {
             video_categorizer,
         }
     }
+}
+
+pub enum RetryDownloadResult {
+    Queued,
+    NotFound,
+    NotFailed,
 }
 
 pub trait VideoReconcilerApi: Send + Sync {

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { screen } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { VideoListPane } from './VideoListPane'
 import { aVideo, mockApi, renderWithProviders } from '@/test/helpers'
 import type { Video } from '@/api/types'
@@ -49,5 +50,25 @@ describe('VideoListPane', () => {
     expect(status).toHaveTextContent('Loading…')
     expect(status.closest('[aria-busy="true"]')).not.toBeNull()
     expect(screen.queryByText('Loading videos…')).not.toBeInTheDocument()
+  })
+
+  it('offers a retry for a failed video and sends its record id', async () => {
+    const fetchMock = mockApi({ 'POST /api/videos/record%20one/retry-download': null })
+    renderWithProviders(
+      <VideoListPane
+        noun="playlist"
+        basePathOf={() => 'playlists/test'}
+        sourceNameOf={() => 'Playlist'}
+        videos={[aVideo({ title: 'Failed video', record_id: 'record one', status: 'ERRORED' })]}
+        error={null}
+        selectedVideoId={null}
+        onSelect={() => {}}
+      />,
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Retry download for Failed video' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      '/api/videos/record%20one/retry-download',
+      expect.objectContaining({ method: 'POST' }),
+    ))
   })
 })

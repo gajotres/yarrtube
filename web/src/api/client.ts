@@ -67,6 +67,10 @@ export function fetchVideos(playlistId: string): Promise<Video[]> {
   return request(`/playlists/${encodeURIComponent(playlistId)}/videos`)
 }
 
+export async function retryVideoDownload(recordId: string): Promise<void> {
+  await send(`/videos/${encodeURIComponent(recordId)}/retry-download`, { method: 'POST' })
+}
+
 export function fetchHomeVideos(): Promise<HomeVideos> {
   return request('/videos/home')
 }

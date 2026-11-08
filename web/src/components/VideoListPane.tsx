@@ -1,5 +1,8 @@
-import { TriangleAlert } from 'lucide-react'
-import { videoMediaUrl } from '@/api/client'
+import { useState } from 'react'
+import { RefreshCw, TriangleAlert } from 'lucide-react'
+import { retryVideoDownload, videoMediaUrl } from '@/api/client'
+import { useInvalidateLibrary, useInvalidateTasks } from '@/api/queries'
+import { errorMessage } from '@/lib/errorMessage'
 import type { Video, VideoStatus } from '@/api/types'
 import { Thumbnail } from './Thumbnail'
 import { ThumbnailOverlay } from './ThumbnailOverlay'
@@ -13,6 +16,34 @@ const STATUS_MESSAGES: Record<string, string> = {
   PENDING: 'This video is pending.',
   ERRORED_RETRYING: 'This video failed to download and will be retried.',
   ERRORED: 'This video failed to download.',
+}
+
+function RetryDownloadButton({ recordId, title }: { recordId: string; title: string }) {
+  const [pending, setPending] = useState(false)
+  const invalidateLibrary = useInvalidateLibrary()
+  const invalidateTasks = useInvalidateTasks()
+  return (
+    <button
+      type="button"
+      aria-label={`Retry download for ${title}`}
+      title="Retry download"
+      disabled={pending}
+      className="mt-2 flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground disabled:opacity-50"
+      onClick={async () => {
+        setPending(true)
+        try {
+          await retryVideoDownload(recordId)
+          await Promise.all([invalidateLibrary(), invalidateTasks()])
+        } catch (err) {
+          window.alert(`Failed to retry "${title}": ${errorMessage(err)}`)
+        } finally {
+          setPending(false)
+        }
+      }}
+    >
+      <RefreshCw className="size-4" aria-hidden="true" />
+    </button>
+  )
 }
 
 function VideoStatusIndicator({ status }: { status: VideoStatus }) {
@@ -122,6 +153,9 @@ export function VideoListPane<T extends Video>({
                   </span>
                   <VideoStatusIndicator status={video.status} />
                 </button>
+                {video.status === 'ERRORED' && (
+                  <RetryDownloadButton recordId={video.record_id} title={video.title} />
+                )}
                 <VideoActionsMenu
                   videoId={video.id}
                   recordId={video.record_id}

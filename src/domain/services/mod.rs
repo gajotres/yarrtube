@@ -94,7 +94,7 @@ pub use video_category_editor::{VideoCategoryEditor, VideoCategoryEditorApi};
 pub use video_downloader::{VideoDownloader, VideoDownloaderApi};
 pub use video_file_deleter::{VideoFileDeleter, VideoFileDeleterApi};
 pub use video_owner_finder::{VideoOwnerFinder, VideoOwnerFinderApi};
-pub use video_reconciler::{VideoReconciler, VideoReconcilerApi};
+pub use video_reconciler::{RetryDownloadResult, VideoReconciler, VideoReconcilerApi};
 pub use video_relocator::{Relocation, SkipReason, VideoRelocator, VideoRelocatorApi};
 pub use video_searcher::{VideoSearcher, VideoSearcherApi};
 pub use video_summarizer::{VideoSummarizer, VideoSummarizerApi};

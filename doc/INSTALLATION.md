@@ -89,7 +89,7 @@ Environment variables read by Yarrtube are listed below. Every variable except `
 | `YARRTUBE_SPONSORBLOCK_REMOVE` | empty (disabled) | SponsorBlock removal categories: `default`, `all`, or explicit comma-separated categories (see below). |
 | `YARRTUBE_WRITE_SUBS` | `false` | Download creator-provided captions in the selected languages. Converted to SRT before optional embedding. |
 | `YARRTUBE_WRITE_AUTO_SUBS` | `false` | Download automatic captions and automatic translations in the selected languages. Creator captions take precedence for the same language when both switches are enabled. |
-| `YARRTUBE_EMBED_SUBS` | `true` | Embed downloaded captions after SponsorBlock timing correction, with titles such as `English-SRT` or `English-GENERATED-SRT`. Remove external SRTs after successful embedding; `false` keeps external SRTs only. |
+| `YARRTUBE_EMBED_SUBS` | `true` | Embed downloaded captions after SponsorBlock timing correction, with titles such as `English-SRT` or `English-GENERATED-SRT`. External SRTs are kept; `false` keeps external SRTs only. |
 | `YARRTUBE_SUB_LANGS` | `en.*` | Comma-separated yt-dlp language codes/patterns. `en.*` selects English variants only; `en.*,de.*` selects English and German. Live chat is always excluded. |
 | `YTDLP_PATH`                          | `/app/bin/yt-dlp`     | Path to the managed `yt-dlp` binary (also the path bundled into the image at build time)                                                                                                                      |
 | `RUST_LOG`                            | `info`                | Log verbosity (e.g. `RUST_LOG=debug`)                                                                                                                                                                         |
@@ -156,8 +156,8 @@ matching languages do not by themselves fail the video download. Subtitle networ
 or conversion errors follow the existing download retry mechanism.
 
 Subtitles are converted to SRT in the download staging folder. Embedding is
-enabled by default: after successful embedding, external SRTs are removed and
-only the video with its embedded tracks reaches the library. Set
+enabled by default: the video and its external SRTs reach the library, and the
+video also contains embedded tracks. Set
 `YARRTUBE_EMBED_SUBS=false` for external-only language-tagged files, such as
 `Season 1/S01E001 - A Video.en.srt`, next to the video. Downloading still uses
 the two opt-in switches above.
@@ -306,8 +306,9 @@ When `YARRTUBE_WRITE_SUBS`, `YARRTUBE_WRITE_AUTO_SUBS`, or SponsorBlock removal
 is enabled, the download pipeline owns video subtitle files. The upstream
 original-language fetch still stores transcripts for AI summaries and categories,
 but does not create another external SRT or overwrite selected, retimed captions.
-With embedding enabled, downloaded SRTs are removed after successful embedding.
-The web player's separate subtitle selector requires an upstream external sidecar;
-embedded MP4 tracks remain available to compatible media players such as Plex.
+With embedding enabled, downloaded SRTs remain next to the video as well as
+being embedded in it. The web player's separate subtitle selector requires an
+external sidecar matching the upstream original-language track; embedded MP4
+tracks remain available to compatible media players such as Plex.
 When all fork caption switches and SponsorBlock are off, upstream's automatic
 original-language sidecar and browser subtitle playback work normally.

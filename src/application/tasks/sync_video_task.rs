@@ -104,6 +104,61 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn manual_retry_resets_an_errored_video_and_schedules_a_fresh_download() {
+        let db = TestDatabase::new();
+        let videos = Arc::new(SqliteVideoRepository::new(db.database()));
+        let tasks = Arc::new(SqliteTaskRepository::new(
+            db.database(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let video = my_video().mark_errored(fixed_timestamp());
+        save_channel_video(
+            &videos,
+            &SqliteChannelRepository::new(db.database()),
+            &SqliteChannelVideoRepository::new(db.database()),
+            &video,
+        );
+        let task = sync_task_of_downloaded_video(
+            &db,
+            videos.clone(),
+            tasks.clone(),
+            Arc::new(SqlitePreferencesRepository::new(db.database())),
+        );
+
+        assert!(matches!(
+            task.video_reconciler
+                .retry_failed_download(&video.id)
+                .unwrap(),
+            crate::domain::services::RetryDownloadResult::Queued
+        ));
+        assert_eq!(
+            videos.find(&video.id).unwrap().unwrap().status,
+            VideoStatus::Pending
+        );
+        assert!(
+            tasks
+                .find_pending(&Task::SyncVideo {
+                    video_id: video.id.to_string(),
+                })
+                .unwrap()
+                .is_some()
+        );
+        run(&task, &payload_for(&video)).unwrap();
+        assert!(
+            tasks
+                .find_non_completed_for_video("download_video", &video.id)
+                .unwrap()
+                .is_some()
+        );
+        assert!(matches!(
+            task.video_reconciler
+                .retry_failed_download(&video.id)
+                .unwrap(),
+            crate::domain::services::RetryDownloadResult::NotFailed
+        ));
+    }
+
+    #[test]
     fn it_should_schedule_the_download_and_thumbnail_of_a_new_channel_video() {
         let db = TestDatabase::new();
         let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
