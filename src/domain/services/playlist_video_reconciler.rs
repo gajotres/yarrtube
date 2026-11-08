@@ -4,20 +4,26 @@ use crate::domain::playlist::PlaylistId;
 use crate::domain::playlist_video::PlaylistVideo;
 use crate::domain::playlist_video::{VideoAddedToPlaylist, VideoRemovedFromPlaylist};
 use crate::domain::services::{
-    DesiredState, InternalVideoReconciler, InternalVideoReconcilerApi, MembershipDelta,
-    ShowFileWriter, ShowFileWriterApi,
+    DesiredState, InternalVideoReconciler, InternalVideoReconcilerApi, ShowFileWriter,
+    ShowFileWriterApi,
 };
+use crate::domain::show::ShowKey;
 use crate::domain::task::Task;
 use crate::domain::video::{Video, VideoId, VideoRecordId, VideoStatus};
 use crate::infrastructure::repositories::sqlite_playlist_repository::PlaylistRepository;
 use crate::infrastructure::repositories::sqlite_playlist_video_repository::PlaylistVideoRepository;
 use crate::infrastructure::repositories::sqlite_task_repository::TaskRepository;
+use crate::infrastructure::repositories::sqlite_video_categories_repository::VideoCategoriesRepository;
+use crate::infrastructure::repositories::sqlite_video_category_verdict_repository::VideoCategoryVerdictRepository;
 use crate::infrastructure::repositories::sqlite_video_repository::VideoRepository;
+use crate::infrastructure::repositories::sqlite_video_summary_repository::VideoSummaryRepository;
+use crate::infrastructure::repositories::sqlite_video_transcript_repository::VideoTranscriptRepository;
 use crate::infrastructure::repositories::youtube_playlist_items_repository::{
     YoutubePlaylistItem, YoutubePlaylistItemsRepository,
 };
 use crate::infrastructure::shared::domain_events::event_publisher::EventPublisher;
 use crate::infrastructure::shared::error_report;
+use crate::infrastructure::shared::show_locks::{ShowLockGuard, ShowLocks};
 use crate::infrastructure::shared::system_clock::Clock;
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
@@ -31,6 +37,8 @@ use tracing::{debug, info, info_span, warn};
 pub struct PlaylistVideoReconciler {
     playlist_repository: Arc<dyn PlaylistRepository>,
     video_repository: Arc<dyn VideoRepository>,
+    video_transcript_repository: Arc<dyn VideoTranscriptRepository>,
+    video_summary_repository: Arc<dyn VideoSummaryRepository>,
     playlist_video_repository: Arc<dyn PlaylistVideoRepository>,
     youtube_playlist_items_repository: Arc<dyn YoutubePlaylistItemsRepository>,
     event_publisher: Arc<dyn EventPublisher>,
@@ -38,6 +46,9 @@ pub struct PlaylistVideoReconciler {
     internal_video_reconciler: Arc<InternalVideoReconciler>,
     show_file_writer: Arc<ShowFileWriter>,
     clock: Arc<dyn Clock>,
+    show_locks: Arc<ShowLocks>,
+    video_categories_repository: Arc<dyn VideoCategoriesRepository>,
+    video_category_verdict_repository: Arc<dyn VideoCategoryVerdictRepository>,
 }
 
 impl PlaylistVideoReconciler {
@@ -45,6 +56,8 @@ impl PlaylistVideoReconciler {
     pub fn new(
         playlist_repository: Arc<dyn PlaylistRepository>,
         video_repository: Arc<dyn VideoRepository>,
+        video_transcript_repository: Arc<dyn VideoTranscriptRepository>,
+        video_summary_repository: Arc<dyn VideoSummaryRepository>,
         playlist_video_repository: Arc<dyn PlaylistVideoRepository>,
         youtube_playlist_items_repository: Arc<dyn YoutubePlaylistItemsRepository>,
         event_publisher: Arc<dyn EventPublisher>,
@@ -52,10 +65,15 @@ impl PlaylistVideoReconciler {
         internal_video_reconciler: Arc<InternalVideoReconciler>,
         show_file_writer: Arc<ShowFileWriter>,
         clock: Arc<dyn Clock>,
+        show_locks: Arc<ShowLocks>,
+        video_categories_repository: Arc<dyn VideoCategoriesRepository>,
+        video_category_verdict_repository: Arc<dyn VideoCategoryVerdictRepository>,
     ) -> Self {
         Self {
             playlist_repository,
             video_repository,
+            video_transcript_repository,
+            video_summary_repository,
             playlist_video_repository,
             youtube_playlist_items_repository,
             event_publisher,
@@ -63,6 +81,9 @@ impl PlaylistVideoReconciler {
             internal_video_reconciler,
             show_file_writer,
             clock,
+            show_locks,
+            video_categories_repository,
+            video_category_verdict_repository,
         }
     }
 }
@@ -94,6 +115,7 @@ pub trait PlaylistVideoReconcilerApi: Send + Sync {
 
 impl PlaylistVideoReconcilerApi for PlaylistVideoReconciler {
     fn reconcile(&self, id: PlaylistId) -> anyhow::Result<()> {
+        let _guard = self.lock(&id);
         let Some(playlist) = self.find_playlist(&id)? else {
             return Ok(());
         };
@@ -103,6 +125,7 @@ impl PlaylistVideoReconcilerApi for PlaylistVideoReconciler {
     }
 
     fn initial_reconcile(&self, id: PlaylistId) -> anyhow::Result<()> {
+        let _guard = self.lock(&id);
         let Some(playlist) = self.find_playlist(&id)? else {
             return Ok(());
         };
@@ -112,6 +135,7 @@ impl PlaylistVideoReconcilerApi for PlaylistVideoReconciler {
     }
 
     fn force_reconcile(&self, id: PlaylistId) -> anyhow::Result<()> {
+        let _guard = self.lock(&id);
         let Some(playlist) = self.find_playlist(&id)? else {
             return Ok(());
         };
@@ -121,6 +145,12 @@ impl PlaylistVideoReconcilerApi for PlaylistVideoReconciler {
 }
 
 impl PlaylistVideoReconciler {
+    /// Waits for a move of the playlist to finish, so the pass reads the
+    /// playlist, and works in its folder, only once it has moved.
+    fn lock(&self, id: &PlaylistId) -> ShowLockGuard<'_> {
+        self.show_locks.lock(ShowKey::Playlist(id.clone()))
+    }
+
     fn find_playlist(&self, id: &PlaylistId) -> anyhow::Result<Option<Playlist>> {
         let playlist = self.playlist_repository.find(id)?;
         if playlist.is_none() {
@@ -146,9 +176,9 @@ impl PlaylistVideoReconciler {
         if let Err(e) = self.show_file_writer.write_playlist_show(playlist) {
             warn!(playlist_id = %playlist.id, error = %e, "failed to write show files");
         }
-        let delta = self.sync_membership_with_youtube(playlist, on_listing_failure)?;
+        self.sync_membership_with_youtube(playlist, on_listing_failure)?;
         let desired = self.desired_state(playlist)?;
-        self.internal_video_reconciler.reconcile(&desired, &delta)
+        self.internal_video_reconciler.reconcile(&desired)
     }
 
     /// Brings the stored membership in line with YouTube's playlist items:
@@ -161,9 +191,9 @@ impl PlaylistVideoReconciler {
         &self,
         playlist: &Playlist,
         on_listing_failure: ListingFailure,
-    ) -> anyhow::Result<MembershipDelta> {
+    ) -> anyhow::Result<()> {
         let Some(current_videos) = self.list_current_videos(playlist, on_listing_failure)? else {
-            return Ok(MembershipDelta::default());
+            return Ok(());
         };
         let stored_videos = self.list_stored_videos(playlist)?;
         let now = self.clock.now();
@@ -179,7 +209,6 @@ impl PlaylistVideoReconciler {
                 )
             })
             .collect();
-        let mut delta = MembershipDelta::default();
         let mut numbering = playlist.clone();
         for current in Self::in_position_order(&current_videos) {
             match known_videos.get(&current.video_id) {
@@ -187,7 +216,6 @@ impl PlaylistVideoReconciler {
                     let youtube_id = VideoId::new(&current.video_id)?;
                     let (numbered, added) = self.add_video(numbering, youtube_id, current, now)?;
                     numbering = numbered;
-                    delta.added_ids.push(added.1.id.clone());
                     known_videos.insert(current.video_id.clone(), added);
                 }
                 Some((existing, video)) => {
@@ -202,7 +230,7 @@ impl PlaylistVideoReconciler {
             .collect();
         self.remove_videos_not_in(playlist, &stored_videos, &current_youtube_ids)?;
 
-        Ok(delta)
+        Ok(())
     }
 
     /// The playlist's current items. When they can't be listed, e.g. the
@@ -260,7 +288,7 @@ impl PlaylistVideoReconciler {
 
     /// Stores a newly seen video as `PENDING` at its playlist position, under
     /// the playlist's next episode number, and announces it, which is what
-    /// triggers its download and thumbnail. Returns the playlist with that
+    /// schedules its video sync. Returns the playlist with that
     /// number recorded as its last.
     fn add_video(
         &self,
@@ -340,6 +368,11 @@ impl PlaylistVideoReconciler {
                 self.playlist_video_repository
                     .delete(&playlist.id, &video.youtube_id)?;
                 self.video_repository.delete(&video.id)?;
+                self.video_transcript_repository.delete(&video.id)?;
+                self.video_summary_repository.delete(&video.id)?;
+                self.video_categories_repository.delete(&video.id)?;
+                self.video_category_verdict_repository
+                    .delete_for_video(&video.id)?;
                 self.event_publisher
                     .publish(&DomainEvent::VideoRemovedFromPlaylist(
                         VideoRemovedFromPlaylist {
@@ -348,6 +381,7 @@ impl PlaylistVideoReconciler {
                             title: video.title.clone(),
                             filename: video.filename.clone(),
                             thumbnail_filename: video.thumbnail_filename.clone(),
+                            subtitle_filename: video.subtitle_filename.clone(),
                             was_downloaded: video.status == VideoStatus::Downloaded,
                         },
                     ))
@@ -364,20 +398,13 @@ impl PlaylistVideoReconciler {
 
     /// What the database says the playlist's folder should contain.
     fn desired_state(&self, playlist: &Playlist) -> anyhow::Result<DesiredState> {
-        let playlist_videos = self
-            .playlist_video_repository
-            .list_for_playlist(&playlist.id)?;
-
         Ok(DesiredState {
             path: playlist.path.clone(),
-            quality: playlist.quality,
-            video_ids: playlist_videos
-                .iter()
-                .map(|pv| pv.video_id.clone())
-                .collect(),
-            sort_positions: playlist_videos
+            video_ids: self
+                .playlist_video_repository
+                .list_for_playlist(&playlist.id)?
                 .into_iter()
-                .map(|pv| (pv.video_id, pv.position))
+                .map(|pv| pv.video_id)
                 .collect(),
         })
     }

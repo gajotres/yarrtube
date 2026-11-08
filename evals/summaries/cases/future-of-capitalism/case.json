@@ -1,0 +1,101 @@
+{
+  "youtube_id": "Aos-S3dulns",
+  "url": "https://www.youtube.com/watch?v=Aos-S3dulns",
+  "title": "¿Hay futuro en el capitalismo?",
+  "channel": "Alba Lafarga",
+  "published": "2026-02-01",
+  "lang": "es",
+  "duration_s": 992,
+  "chapters": [
+    {
+      "start_seconds": 0,
+      "end_seconds": 61,
+      "title": "Inicio"
+    },
+    {
+      "start_seconds": 61,
+      "end_seconds": 151,
+      "title": "Acuerdo de París"
+    },
+    {
+      "start_seconds": 151,
+      "end_seconds": 370,
+      "title": "¿Qué idea de futuro había detrás?"
+    },
+    {
+      "start_seconds": 370,
+      "end_seconds": 515,
+      "title": "¿Qué medidas se han implementado?"
+    },
+    {
+      "start_seconds": 515,
+      "end_seconds": 726,
+      "title": "¿Hay futuro en el capitalismo?"
+    },
+    {
+      "start_seconds": 726,
+      "end_seconds": 1001,
+      "title": "Otros enfoques de futuro"
+    }
+  ],
+  "description": "Este vídeo ha sido posible gracias a Panorama comunidad, que trabaja por la concienciación sobre el cambio climático. Y es que en cualquier escenario de futuro será necesario decrecer y seguir con la tansición energética a escala global. Y hay que hacerlo de forma equitativa, ayudando allí dónde no hay tantos recursos para aplicar nueva tecnología que pueda permitirnos generar energía sin emitir CO2. \n\n00:00 Inicio\n01:01 Acuerdo de París\n02:31 ¿Qué idea de futuro había detrás?\n06:10 ¿Qué medidas se han implementado?\n08:35 ¿Hay futuro en el capitalismo?\n12:06 Otros enfoques de futuro\n\n________________________\nSígueme en las redes:\n\n\n📸 Instagram:https://www.instagram.com/albalafarga.filo/\n🐘Mastodon: https://mastodon.social/@albalafarga/\n\n_________________________\n\n📚Referencias📚\n\nAyuso, S. \"Europa desinfla su política medioambiental en el momento más crítico de la lucha climática\", El País, 23/11/2025, https://archive.ph/LHXuN#selection-473.133-473.497\n\nÁlvarez, J. A., Hidalgo, M. \"Mapa de los paneles solares: la revolución que transforma el planeta de Badajoz al Tíbet\", El País, 24/11/2025, https://archive.ph/zHXza#selection-515.246-517.23\n\n\"Debunking common renewable energy myths\", 'Zero Carbon Analytics': https://zerocarbon-analytics.org/energy/debunking-common-renewable-energy-myths/\n\n\"The Late Marx and Degrowth Communism\", Kohei Saito at Columbia Center for Contemporary Critical Thought, 8/4/2025\n\nHickel, J., \"Menos es más\", Capitán Swing, 2021\n\nKallis, G. \"Límites: ecología y libertad\", Arcàdia, 2021\n\nKallis, G. curso \"En defensa del límite\", 2021: https://www.instituthumanitats.org/ca/cursos/en-defensa-del-limit-de-l-economia-a-l-ambientalisme-online#multimedia-content\n\nMuiño, E. S., Sesión curso: \"¿Cómo ganar la batalla política y cultural a la crisis energética?\", https://www.instituthumanitats.org/es/documentos/videos/4-5-como-ganar-la-batalla-politica-y-cultural-a-la-crisis-energetica\n\nSaito, K., \"Slow Down\", SINEQUANON, 2022\n\nSaito, K., El capital des de zero, Tigre de Paper, 2025\n\nTuriel, A., Sesión curso:  \"El Green New Deal: ideal inassumible\", 2021 https://www.instituthumanitats.org/ca/documents/videos/2-3-el-green-new-deal-un-ideal-inassolible",
+  "summary": {
+    "facts": [
+      {
+        "id": "paris-agreement-goals-and-weaknesses",
+        "fact": "The Paris Agreement (COP21) aimed to keep warming well below 2 °C, aspiring to 1.5 °C; it was a diplomatic success but its commitments are non-binding with no real sanctions.",
+        "critical": false,
+        "evidence": {
+          "at": "1:06",
+          "quote": "limitar el aumento de la temperatura media del planeta muy por debajo de los 2 gr respecto a niveles preindustriales, aspirando a no superar, eso sí, los 1,5ºC"
+        }
+      },
+      {
+        "id": "climate-policy-adapts-capitalism",
+        "fact": "Following philosopher Kohei Saito, the video argues that Paris and later policies (Green New Deal, Fit for 55, REPowerEU, Inflation Reduction Act) do not question the economic system but try to adapt capitalism via green growth and technology, a techno-optimism it considers insufficient.",
+        "critical": true,
+        "trap": "The video presents green growth / the Green New Deal as the solution to climate change.",
+        "note": "Captions spell Saito's first name 'Coge'; correct name is Kohei Saito.",
+        "evidence": {
+          "at": "2:50",
+          "quote": "Según Saito, el acuerdo de París no cuestiona el sistema económico dominante."
+        }
+      },
+      {
+        "id": "decoupling-would-come-too-late",
+        "fact": "Absolute decoupling of growth from emissions might take around 100 years, too late because cuts must happen in the next 10–20 years.",
+        "critical": true,
+        "trap": "Decoupling can be achieved within the next 10–20 years.",
+        "evidence": {
+          "at": "3:42",
+          "quote": "los estudios proponen que en 100 años esto se podría conseguir, pero para entonces ya será demasiado tarde"
+        }
+      },
+      {
+        "id": "north-externalizes-costs-to-south",
+        "fact": "Rich Global North countries keep their consumption by externalizing ecological and social costs to the Global South ('imperial mode of living'), and green policies reproduce this logic.",
+        "critical": false,
+        "note": "Captions write 'Ulrick Brand y Marcus Bisen'; correct names are Ulrich Brand and Markus Wissen.",
+        "evidence": {
+          "at": "5:02",
+          "quote": "los países del norte global mantienen su nivel de consumo externalizando costes ecológicos y sociales al sur global"
+        }
+      },
+      {
+        "id": "conclusion-embrace-degrowth",
+        "fact": "The video concludes that a future on Earth requires alternative ways of life that embrace degrowth, since Western consumption levels cannot be universalized; the ecological transition is a dispute between ideas of the future, not a technical question.",
+        "critical": true,
+        "trap": "The video concludes capitalism can be fixed with small adjustments or green technology.",
+        "evidence": {
+          "at": "15:04",
+          "quote": "Si realmente queremos que haya un futuro en la Tierra, lo primero será empezar a leer y a pensarnos en modelos de vida alternativos que abracen el decrecimiento."
+        }
+      }
+    ],
+    "review": {
+      "reviewed_on": "2026-11-01",
+      "by": "viewer",
+      "note": "Facts confirmed by a viewer. Preferred summaries: qwen3:4b (thinking) and qwen3:4b-instruct over gemma3:4b; all three judged acceptable."
+    }
+  }
+}

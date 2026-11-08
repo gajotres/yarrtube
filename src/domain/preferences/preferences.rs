@@ -1,0 +1,165 @@
+use super::{CategorizationSettings, PreferencesChange, SummarySettings, Theme};
+use crate::domain::llm_server::OllamaUrl;
+use crate::domain::shared::ValidationError;
+
+/// The user's daemon-wide preferences.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Preferences {
+    pub categories_enabled: bool,
+    pub home_show_continue_watching: bool,
+    pub home_show_categories: bool,
+    pub home_show_quick_watches: bool,
+    pub home_show_latest: bool,
+    pub theme: Theme,
+    pub ai_enabled: bool,
+    pub ollama_url: Option<OllamaUrl>,
+    pub summaries: SummarySettings,
+    pub categorization: CategorizationSettings,
+}
+
+impl Default for Preferences {
+    /// Every display preference on, in the light theme, with AI off.
+    fn default() -> Self {
+        Self {
+            categories_enabled: true,
+            home_show_continue_watching: true,
+            home_show_categories: true,
+            home_show_quick_watches: true,
+            home_show_latest: true,
+            theme: Theme::default(),
+            ai_enabled: false,
+            ollama_url: None,
+            summaries: SummarySettings::default(),
+            categorization: CategorizationSettings::default(),
+        }
+    }
+}
+
+impl Preferences {
+    /// Category sections on home need categories on as well.
+    pub fn shows_home_categories(&self) -> bool {
+        self.categories_enabled && self.home_show_categories
+    }
+
+    /// Whether sources can have their videos summarized: AI and summaries on.
+    pub fn summaries_available(&self) -> bool {
+        self.ai_enabled && self.summaries.enabled
+    }
+
+    /// Whether sources can have their videos categorized: AI, categories and
+    /// categorization on.
+    pub fn categorization_available(&self) -> bool {
+        self.ai_enabled && self.categories_enabled && self.categorization.enabled
+    }
+
+    /// Whether `other` generates summaries differently: another server or
+    /// other settings, not merely summaries turned on or off.
+    pub fn changes_summaries(&self, other: &Self) -> bool {
+        let settings = SummarySettings {
+            enabled: other.summaries.enabled,
+            ..self.summaries.clone()
+        };
+        self.ollama_url != other.ollama_url || settings != other.summaries
+    }
+
+    /// Whether `other` categorizes differently: another Ollama URL,
+    /// categorization model or prompt.
+    pub fn changes_categorization(&self, other: &Self) -> bool {
+        self.ollama_url != other.ollama_url
+            || self.categorization.model != other.categorization.model
+            || self.categorization.effective_prompt() != other.categorization.effective_prompt()
+    }
+
+    /// These preferences with `change` applied, as long as the result is
+    /// consistent: AI can't be on without an Ollama URL.
+    pub fn apply(self, change: PreferencesChange) -> Result<Self, ValidationError> {
+        let summaries = SummarySettings {
+            enabled: change.summaries_enabled.unwrap_or(self.summaries.enabled),
+            model: change.summaries_model.unwrap_or(self.summaries.model),
+            context_length: change
+                .summaries_context_length
+                .unwrap_or(self.summaries.context_length),
+            temperature: change
+                .summaries_temperature
+                .unwrap_or(self.summaries.temperature),
+            thinking: change.summaries_thinking.unwrap_or(self.summaries.thinking),
+            prompt: change.summaries_prompt.unwrap_or(self.summaries.prompt),
+        };
+        let categorization = CategorizationSettings {
+            enabled: change
+                .categorization_enabled
+                .unwrap_or(self.categorization.enabled),
+            model: change
+                .categorization_model
+                .unwrap_or(self.categorization.model),
+            context_length: change
+                .categorization_context_length
+                .unwrap_or(self.categorization.context_length),
+            temperature: change
+                .categorization_temperature
+                .unwrap_or(self.categorization.temperature),
+            thinking: change
+                .categorization_thinking
+                .unwrap_or(self.categorization.thinking),
+            prompt: change
+                .categorization_prompt
+                .unwrap_or(self.categorization.prompt),
+        };
+        Self {
+            categories_enabled: change.categories_enabled.unwrap_or(self.categories_enabled),
+            home_show_continue_watching: change
+                .home_show_continue_watching
+                .unwrap_or(self.home_show_continue_watching),
+            home_show_categories: change
+                .home_show_categories
+                .unwrap_or(self.home_show_categories),
+            home_show_quick_watches: change
+                .home_show_quick_watches
+                .unwrap_or(self.home_show_quick_watches),
+            home_show_latest: change.home_show_latest.unwrap_or(self.home_show_latest),
+            theme: change.theme.unwrap_or(self.theme),
+            ai_enabled: change.ai_enabled.unwrap_or(self.ai_enabled),
+            ollama_url: change.ollama_url.unwrap_or(self.ollama_url),
+            summaries,
+            categorization,
+        }
+        .ensure_ai_has_url()
+    }
+
+    fn ensure_ai_has_url(self) -> Result<Self, ValidationError> {
+        match (self.ai_enabled, &self.ollama_url) {
+            (true, None) => Err(ValidationError(
+                "Ollama URL must be set to enable AI".to_string(),
+            )),
+            _ => Ok(self),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn it_should_have_summaries_available_only_with_ai_and_summaries_on() {
+        let availability = [(false, false), (false, true), (true, false), (true, true)].map(
+            |(ai_enabled, summaries_enabled)| {
+                preferences(ai_enabled, summaries_enabled).summaries_available()
+            },
+        );
+
+        assert_eq!(availability, [false, false, false, true]);
+    }
+
+    fn preferences(ai_enabled: bool, summaries_enabled: bool) -> Preferences {
+        let preferences = Preferences::default();
+        Preferences {
+            ai_enabled,
+            summaries: SummarySettings {
+                enabled: summaries_enabled,
+                ..preferences.summaries.clone()
+            },
+            ..preferences
+        }
+    }
+}

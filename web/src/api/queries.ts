@@ -1,59 +1,110 @@
 import { useCallback } from 'react'
-import { useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
+import {
+  hashKey,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+  type QueryFunctionContext,
+  type QueryKey,
+  type UseQueryResult,
+} from '@tanstack/react-query'
 import {
   fetchAnnouncements,
   fetchChannels,
   fetchChannelVideos,
   fetchHomeVideos,
+  fetchOllama,
+  searchVideos,
   fetchPlaylists,
+  fetchPreferences,
   fetchTasks,
   fetchVersion,
   fetchVideos,
+  getVideoCategories,
+  listCategories,
+  listCategoryVideos,
+  markCategoryWatched,
   markVideoWatched,
   previewChannel,
   previewPlaylist,
+  patchPreferences,
   updateChannel,
   updatePlaylist,
+  setVideoCategory,
+  deleteVideoAiVerdicts,
   type UpdateChannelRequest,
   type UpdatePlaylistRequest,
 } from './client'
 import type {
   Announcement,
   AppVersion,
+  CategoryList,
+  CategoryVideo,
   ChannelListItem,
   ChannelPreview,
   HomeVideos,
+  OllamaServer,
+  VideoSearchResults,
   PlaylistListItem,
   PlaylistPreview,
+  Preferences,
+  PreferencesPatch,
   Task,
   Video,
+  VideoCategories,
 } from './types'
+import { anyWorkInProgress } from '@/lib/libraryPolling'
+import {
+  aiEnabled,
+  categoriesShown,
+  categorizationAvailable,
+  summariesAvailable,
+} from '@/lib/preferences'
 
 // The sidebar lists change rarely and are refetched right after the user's
 // own actions; views showing live download progress poll quickly.
 const LIBRARY_INTERVAL_MS = 60_000
 const LIVE_INTERVAL_MS = 3_000
+// Slower than the live views: each list reads every video and queued task.
+const BUSY_SOURCES_INTERVAL_MS = 5_000
+
+/**
+ * The channel and playlist lists poll faster while a source has work in
+ * progress, so its "Move…" enables within seconds of it settling.
+ */
+function sourcesInterval(items: { work_in_progress: boolean }[] | undefined): number {
+  return anyWorkInProgress(items) ? BUSY_SOURCES_INTERVAL_MS : LIBRARY_INTERVAL_MS
+}
 
 export const queryKeys = {
   channels: ['channels'] as const,
   playlists: ['playlists'] as const,
+  categories: ['categories'] as const,
+  categoryVideos: (id: string) => ['categories', id, 'videos'] as const,
   channelVideos: (handle: string) => ['channels', handle, 'videos'] as const,
   playlistVideos: (id: string) => ['playlists', id, 'videos'] as const,
   recentVideos: ['videos', 'recent'] as const,
   tasks: ['tasks'] as const,
   announcements: ['announcements'] as const,
   version: ['version'] as const,
+  preferences: ['preferences'] as const,
+  ollama: (url: string) => ['ollama', url] as const,
   // Outside the `['playlists']` and `['channels']` prefixes so refetching the
   // library leaves them be.
   playlistPreview: (value: string) => ['playlist-preview', value] as const,
   channelPreview: (value: string) => ['channel-preview', value] as const,
+  videoSearch: (text: string) => ['video-search', text] as const,
+  videoCategories: (recordId: string) => ['videos', recordId, 'categories'] as const,
 }
+
+/** Shortest trimmed text the daemon searches video titles for. */
+export const VIDEO_SEARCH_MIN_LENGTH = 2
 
 export function useChannels(): UseQueryResult<ChannelListItem[], Error> {
   return useQuery({
     queryKey: queryKeys.channels,
     queryFn: fetchChannels,
-    refetchInterval: LIBRARY_INTERVAL_MS,
+    refetchInterval: (query) => sourcesInterval(query.state.data),
   })
 }
 
@@ -61,7 +112,35 @@ export function usePlaylists(): UseQueryResult<PlaylistListItem[], Error> {
   return useQuery({
     queryKey: queryKeys.playlists,
     queryFn: fetchPlaylists,
+    refetchInterval: (query) => sourcesInterval(query.state.data),
+  })
+}
+
+export function useCategories(): UseQueryResult<CategoryList, Error> {
+  return useQuery({
+    queryKey: queryKeys.categories,
+    queryFn: listCategories,
     refetchInterval: LIBRARY_INTERVAL_MS,
+  })
+}
+
+export function useCategoryVideos(id: string): UseQueryResult<CategoryVideo[], Error> {
+  return useQuery({
+    queryKey: queryKeys.categoryVideos(id),
+    queryFn: () => listCategoryVideos(id),
+    refetchInterval: LIVE_INTERVAL_MS,
+  })
+}
+
+/** A video copy's categories with where each comes from; idle until `enabled`. */
+export function useVideoCategories(
+  recordId: string,
+  enabled: boolean,
+): UseQueryResult<VideoCategories, Error> {
+  return useQuery({
+    queryKey: queryKeys.videoCategories(recordId),
+    queryFn: () => getVideoCategories(recordId),
+    enabled,
   })
 }
 
@@ -96,7 +175,7 @@ export function useChannelPreview(value: string): UseQueryResult<ChannelPreview,
 export function useChannelVideos(handle: string): UseQueryResult<Video[], Error> {
   return useQuery({
     queryKey: queryKeys.channelVideos(handle),
-    queryFn: () => fetchChannelVideos(handle),
+    queryFn: liveVideos(() => fetchChannelVideos(handle)),
     refetchInterval: LIVE_INTERVAL_MS,
   })
 }
@@ -104,7 +183,7 @@ export function useChannelVideos(handle: string): UseQueryResult<Video[], Error>
 export function usePlaylistVideos(id: string): UseQueryResult<Video[], Error> {
   return useQuery({
     queryKey: queryKeys.playlistVideos(id),
-    queryFn: () => fetchVideos(id),
+    queryFn: liveVideos(() => fetchVideos(id)),
     refetchInterval: LIVE_INTERVAL_MS,
   })
 }
@@ -114,6 +193,21 @@ export function useRecentVideos(): UseQueryResult<HomeVideos, Error> {
     queryKey: queryKeys.recentVideos,
     queryFn: fetchHomeVideos,
     refetchInterval: LIVE_INTERVAL_MS,
+  })
+}
+
+/**
+ * Searches downloaded video titles for `text`, the caller's debounced input.
+ * Idle below `VIDEO_SEARCH_MIN_LENGTH` trimmed characters.
+ */
+export function useVideoSearch(text: string): UseQueryResult<VideoSearchResults, Error> {
+  const trimmed = text.trim()
+  return useQuery({
+    queryKey: queryKeys.videoSearch(trimmed),
+    queryFn: () => searchVideos(trimmed),
+    enabled: trimmed.length >= VIDEO_SEARCH_MIN_LENGTH,
+    retry: false,
+    staleTime: 30_000,
   })
 }
 
@@ -147,9 +241,112 @@ export function useVersion(): UseQueryResult<AppVersion, Error> {
   })
 }
 
+export function usePreferences(): UseQueryResult<Preferences, Error> {
+  return useQuery({
+    queryKey: queryKeys.preferences,
+    queryFn: fetchPreferences,
+  })
+}
+
 /**
- * Returns a function that refetches the channel and playlist lists (and,
- * by prefix, their video lists) after an action that changed them.
+ * The Ollama server at `url` (none while `url` is null), checked once: a
+ * failed check isn't retried, the user tests the connection again instead.
+ */
+export function useOllama(url: string | null): UseQueryResult<OllamaServer, Error> {
+  return useQuery({
+    queryKey: queryKeys.ollama(url ?? ''),
+    queryFn: () => fetchOllama(url ?? ''),
+    enabled: url !== null,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    retry: false,
+  })
+}
+
+/**
+ * Returns a function that checks the Ollama server at `url` now, keeping the
+ * answer as that URL's `useOllama` data.
+ */
+export function useCheckOllama(): (url: string) => Promise<OllamaServer> {
+  const queryClient = useQueryClient()
+  return useCallback(
+    async (url: string) => {
+      const server = await fetchOllama(url)
+      queryClient.setQueryData(queryKeys.ollama(url), server)
+      return server
+    },
+    [queryClient],
+  )
+}
+
+/** Whether category UI shows, as decided by `categoriesShown`. */
+export function useCategoriesShown(): boolean {
+  const { data, isError } = usePreferences()
+  return categoriesShown(data, isError)
+}
+
+/** Whether AI is on, per the preferences. */
+export function useAiEnabled(): boolean {
+  return aiEnabled(usePreferences().data)
+}
+
+/** Whether sources can have their videos summarized, per the preferences. */
+export function useSummariesAvailable(): boolean {
+  return summariesAvailable(usePreferences().data)
+}
+
+/** Whether sources can have their videos categorized, per the preferences. */
+export function useCategorizationAvailable(): boolean {
+  return categorizationAvailable(usePreferences().data)
+}
+
+/**
+ * Returns a function that saves the preferences in `patch`, then shows the
+ * saved ones everywhere and refetches the home videos, whose sections follow
+ * them, and the library with its video lists, whose summaries do. Resolves
+ * with every preference as saved.
+ */
+export function useSavePreferences(): (patch: PreferencesPatch) => Promise<Preferences> {
+  const queryClient = useQueryClient()
+  return useCallback(
+    async (patch: PreferencesPatch) => {
+      const saved = await patchPreferences(patch)
+      queryClient.setQueryData(queryKeys.preferences, saved)
+      // Refetched even while they aren't shown, so going back to one doesn't
+      // first show sections or summaries from before the change.
+      await Promise.all(
+        [
+          queryKeys.recentVideos,
+          queryKeys.channels,
+          queryKeys.playlists,
+          queryKeys.categories,
+        ].map((queryKey) => queryClient.invalidateQueries({ queryKey, refetchType: 'all' })),
+      )
+      return saved
+    },
+    [queryClient],
+  )
+}
+
+/**
+ * Returns a function that saves the theme, then shows the saved preferences
+ * everywhere. Unlike `useSavePreferences`, home videos aren't refetched: the
+ * theme doesn't change them.
+ */
+export function useSaveTheme(): (theme: Preferences['theme']) => Promise<void> {
+  const queryClient = useQueryClient()
+  return useCallback(
+    async (theme: Preferences['theme']) => {
+      const saved = await patchPreferences({ theme })
+      queryClient.setQueryData(queryKeys.preferences, saved)
+    },
+    [queryClient],
+  )
+}
+
+/**
+ * Returns a function that refetches the channel, playlist and category lists
+ * (and, by prefix, their video lists) after an action that changed them.
  */
 export function useInvalidateLibrary(): () => Promise<unknown> {
   const queryClient = useQueryClient()
@@ -158,6 +355,7 @@ export function useInvalidateLibrary(): () => Promise<unknown> {
       Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.channels }),
         queryClient.invalidateQueries({ queryKey: queryKeys.playlists }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.categories }),
       ]),
     [queryClient],
   )
@@ -204,6 +402,21 @@ export function useMarkVideoWatched(): (youtubeId: string) => Promise<void> {
 }
 
 /**
+ * Returns a function that marks every downloaded video of a category watched,
+ * then refetches the library (category videos included) and the home videos.
+ */
+export function useMarkCategoryWatched(): (id: string) => Promise<void> {
+  const invalidateLibraryAndHome = useInvalidateLibraryAndHome()
+  return useCallback(
+    async (id: string) => {
+      await markCategoryWatched(id)
+      await invalidateLibraryAndHome()
+    },
+    [invalidateLibraryAndHome],
+  )
+}
+
+/**
  * Returns a function that sets whether a playlist is excluded from home, then
  * refetches the channel and playlist lists and the home videos.
  */
@@ -215,6 +428,18 @@ export function useSetPlaylistExcludedFromHome(): (id: string, excluded: boolean
       await invalidateLibraryAndHome()
     },
     [invalidateLibraryAndHome],
+  )
+}
+
+/** Sets whether a playlist's unwatched count is hidden, then refetches the library. */
+export function useSetPlaylistUnwatchedCountHidden(): (id: string, hidden: boolean) => Promise<void> {
+  const invalidateLibrary = useInvalidateLibrary()
+  return useCallback(
+    async (id: string, hidden: boolean) => {
+      await updatePlaylist(id, { hide_unwatched_count: hidden })
+      await invalidateLibrary()
+    },
+    [invalidateLibrary],
   )
 }
 
@@ -254,6 +479,46 @@ export function useUpdatePlaylistSettings(): (
   )
 }
 
+/**
+ * Returns a function that sets a video copy's category by hand, showing the
+ * categories it responds with, then refetches the library and the home videos.
+ */
+export function useSetVideoCategory(): (
+  recordId: string,
+  categoryId: string,
+  belongs: boolean,
+) => Promise<void> {
+  const queryClient = useQueryClient()
+  const invalidateLibraryAndHome = useInvalidateLibraryAndHome()
+  return useCallback(
+    async (recordId: string, categoryId: string, belongs: boolean) => {
+      const categories = await setVideoCategory(recordId, categoryId, belongs)
+      queryClient.setQueryData(queryKeys.videoCategories(recordId), categories)
+      await invalidateLibraryAndHome()
+    },
+    [queryClient, invalidateLibraryAndHome],
+  )
+}
+
+/**
+ * Returns a function that deletes a video copy's AI verdicts, then refetches
+ * its categories, the library and the home videos.
+ */
+export function useRerunVideoAi(): (recordId: string) => Promise<void> {
+  const queryClient = useQueryClient()
+  const invalidateLibraryAndHome = useInvalidateLibraryAndHome()
+  return useCallback(
+    async (recordId: string) => {
+      await deleteVideoAiVerdicts(recordId)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.videoCategories(recordId) }),
+        invalidateLibraryAndHome(),
+      ])
+    },
+    [queryClient, invalidateLibraryAndHome],
+  )
+}
+
 /** Refetches the channel and playlist lists (and their video lists) and the home videos. */
 function useInvalidateLibraryAndHome(): () => Promise<unknown> {
   const queryClient = useQueryClient()
@@ -269,15 +534,72 @@ function useInvalidateLibraryAndHome(): () => Promise<unknown> {
 }
 
 /**
- * Returns a function that drops a cached query outright, e.g. a deleted
- * entry's video list, so refetching the library doesn't request it again.
+ * Returns a function that deletes a channel or playlist (`remove`), given its
+ * video list's key. The list stops polling while the delete is in flight and
+ * is dropped once no page shows it, so a page still open on the source never
+ * asks the server for it after it's gone. A failed delete leaves it polling.
  */
-export function useRemoveQuery(): (queryKey: readonly unknown[]) => void {
+export function useDeleteSource(): (
+  videosKey: QueryKey,
+  remove: () => Promise<unknown>,
+) => Promise<void> {
   const queryClient = useQueryClient()
   return useCallback(
-    (queryKey: readonly unknown[]) => {
-      queryClient.removeQueries({ queryKey, exact: true })
+    async (videosKey: QueryKey, remove: () => Promise<unknown>) => {
+      const deleting = videoListsBeingDeleted(queryClient)
+      const hash = hashKey(videosKey)
+      deleting.add(hash)
+      try {
+        await queryClient.cancelQueries({ queryKey: videosKey, exact: true })
+        await remove()
+      } catch (error) {
+        deleting.delete(hash)
+        throw error
+      }
+      whenUnobserved(queryClient, videosKey, () => {
+        queryClient.removeQueries({ queryKey: videosKey, exact: true })
+        deleting.delete(hash)
+      })
     },
     [queryClient],
   )
+}
+
+// The video lists of the sources being deleted, per client (see
+// `useDeleteSource`).
+const beingDeleted = new WeakMap<QueryClient, Set<string>>()
+
+function videoListsBeingDeleted(client: QueryClient): Set<string> {
+  let hashes = beingDeleted.get(client)
+  if (!hashes) {
+    hashes = new Set()
+    beingDeleted.set(client, hashes)
+  }
+  return hashes
+}
+
+/** A video list's query function: it keeps what it has while its source is being deleted. */
+function liveVideos(
+  fetch: () => Promise<Video[]>,
+): (context: QueryFunctionContext) => Promise<Video[]> {
+  return ({ client, queryKey }) =>
+    videoListsBeingDeleted(client).has(hashKey(queryKey))
+      ? Promise.resolve(client.getQueryData<Video[]>(queryKey) ?? [])
+      : fetch()
+}
+
+/** Runs `then` once no observer (a mounted page) is subscribed to the query. */
+function whenUnobserved(client: QueryClient, queryKey: QueryKey, then: () => void): void {
+  const cache = client.getQueryCache()
+  const query = cache.find({ queryKey, exact: true })
+  if (!query || query.getObserversCount() === 0) {
+    then()
+    return
+  }
+  const unsubscribe = cache.subscribe((event) => {
+    if (event.query === query && event.type === 'observerRemoved' && query.getObserversCount() === 0) {
+      unsubscribe()
+      then()
+    }
+  })
 }

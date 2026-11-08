@@ -39,6 +39,15 @@ Then you can open `http://<YOUR_NAS_IP>:8080/` or `http://localhost:8080/`.
 > web UI and its API, including the folder browser. Keep it on your LAN, or
 > put it behind a reverse proxy that handles authentication.
 
+### Image tags
+
+| Tag                        | What it is                                                                 |
+| -------------------------- | -------------------------------------------------------------------------- |
+| `latest`                   | The latest stable release. Recommended.                                    |
+| `X.Y.Z` (e.g. `0.9.5`)     | One exact release, to pin a version.                                       |
+| `X.Y` (e.g. `0.9`)         | The latest patch release of a minor version.                               |
+| `edge`                     | Manual test builds of a selected ref. |
+
 ## Docker Compose
 
 If you run a Docker Compose stack, add:
@@ -87,6 +96,14 @@ Environment variables read by Yarrtube are listed below. Every variable except `
 | `YARRTUBE_PLEX_URL`                   | —                     | Base URL of your Plex server (e.g. `http://192.168.1.10:32400`). With the token and `YARRTUBE_PLEX_VIDEOS_PATH`, enables the [Plex scan trigger](#plex)                                                       |
 | `YARRTUBE_PLEX_TOKEN`                 | —                     | Plex authentication token (`X-Plex-Token`)                                                                                                                                                                    |
 | `YARRTUBE_PLEX_VIDEOS_PATH`           | —                     | Where the Plex server sees yarrtube's videos root (`YARRTUBE_VIDEOS_PATH`), e.g. the host path `/volume1/data/media/yarrtube` mounted at `/videos`. Plex is asked to scan a show's folder after each download |
+
+Three more variables exist only for running Yarrtube against a fake
+YouTube in its own tests; leave them unset:
+`YARRTUBE_YOUTUBE_API_URL` (where YouTube Data API requests go, default
+`https://www.googleapis.com/youtube/v3`), `YARRTUBE_YTDLP_SELF_UPDATE`
+(`false` stops the hourly `yt-dlp` self-update) and
+`YARRTUBE_BACKGROUND_POLL_INTERVAL_MS` (how often background work is
+picked up, default `5000`).
 
 How often each channel and playlist is checked for new videos is not an
 environment variable: it is set per source in the web UI ("Check for new
@@ -168,6 +185,32 @@ Each playlist and channel is saved as a TV show (layout in
 filesystem: downloads are staged in a hidden `.downloads` folder there and
 moved into place when complete.
 
+### Moving a playlist or channel
+
+To put a playlist's or channel's videos somewhere else, open its edit
+dialog (the source's menu → "Edit settings"), check its current
+**Location** and choose **Move…**. Pick the new parent folder under "Save
+to" (or "Choose another folder…") and the folder name, then **Move**. Its
+show folder is renamed in place: nothing is downloaded again, and every
+episode keeps its number and watch progress.
+
+While the source still has downloads or fetches in progress, "Move…" is
+disabled with "Downloads in progress — you can move it once they finish."
+and becomes available by itself a few seconds after they do.
+
+A move is refused, with nothing changed, while:
+
+- any of its videos is still waiting to download or downloading, or a
+  thumbnail, subtitle fetch or file deletion for it is queued or running
+  (failed and excluded videos don't count);
+- the source is being synced (try again once the sync finishes);
+- the new path is the current one, is used by another playlist or channel,
+  sits inside one's folder or contains one (its own included);
+- a file or folder already exists at the new path.
+
+Moves are renames within the videos root's filesystem: a destination on
+another mount is rejected, and the files stay where they were.
+
 ## Plex
 
 Point a Plex **TV Shows** library (Plex NFO Series agent) at your videos
@@ -184,6 +227,7 @@ image tag, such as `1.0.1`, from the same multi-architecture image. The release
 version is also shown in the web UI. The release script uses `Cargo.toml` for a
 major/minor version increase, otherwise increments the latest release's patch
 number. Pushing a release tag manually also publishes that version and `latest`.
+A GitHub release is created after both Docker architectures have been published.
 SHA image tags are not published. The former
 `sponsorblock` tag is no longer updated. Manual workflow runs publish `edge` for
 testing without moving `latest`.
@@ -254,3 +298,16 @@ retroactively process videos already downloaded. Pull the updated image and
 recreate the container, then retry a download or add a new video before exporting.
 Docker retains the logs according to the host's logging driver and rotation
 settings; no additional Yarrtube log volume or environment variable is needed.
+
+
+### Fork subtitle settings and upstream transcripts
+
+When `YARRTUBE_WRITE_SUBS`, `YARRTUBE_WRITE_AUTO_SUBS`, or SponsorBlock removal
+is enabled, the download pipeline owns video subtitle files. The upstream
+original-language fetch still stores transcripts for AI summaries and categories,
+but does not create another external SRT or overwrite selected, retimed captions.
+With embedding enabled, downloaded SRTs are removed after successful embedding.
+The web player's separate subtitle selector requires an upstream external sidecar;
+embedded MP4 tracks remain available to compatible media players such as Plex.
+When all fork caption switches and SponsorBlock are off, upstream's automatic
+original-language sidecar and browser subtitle playback work normally.

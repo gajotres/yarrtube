@@ -1,6 +1,8 @@
 use anyhow::Context;
 use rusqlite::Connection;
-use rusqlite_migration::{M, Migrations};
+use rusqlite_migration::{HookResult, M, Migrations};
+
+use crate::domain::category::CategoryColor;
 
 const BASELINE_SQL: &str = include_str!("../../../migrations/0001_baseline.sql");
 const WATCH_STATE_SQL: &str = include_str!("../../../migrations/0002_watch_state.sql");
@@ -15,6 +17,27 @@ const PLAYLIST_EXCLUDE_FROM_HOME_SQL: &str =
 const EPISODE_NUMBERS_SQL: &str = include_str!("../../../migrations/0008_episode_numbers.sql");
 const RECONCILE_INTERVAL_SQL: &str =
     include_str!("../../../migrations/0009_reconcile_interval.sql");
+const VIDEO_SUBTITLES_SQL: &str = include_str!("../../../migrations/0010_video_subtitles.sql");
+const CATEGORIES_SQL: &str = include_str!("../../../migrations/0011_categories.sql");
+const PLAYLIST_HIDE_UNWATCHED_COUNT_SQL: &str =
+    include_str!("../../../migrations/0012_playlist_hide_unwatched_count.sql");
+const CATEGORY_COLOR_SQL: &str = include_str!("../../../migrations/0013_category_color.sql");
+const VIDEO_CATEGORIES_SQL: &str = include_str!("../../../migrations/0014_video_categories.sql");
+const PLEX_LABELS_SQL: &str = include_str!("../../../migrations/0015_plex_labels.sql");
+const EPISODE_LABELS_GENERATION_SQL: &str =
+    include_str!("../../../migrations/0016_episode_labels_generation.sql");
+const PREFERENCES_SQL: &str = include_str!("../../../migrations/0017_preferences.sql");
+const CATEGORY_COLOR_STRENGTHEN_SQL: &str =
+    include_str!("../../../migrations/0018_category_color_strengthen.sql");
+const CATEGORY_PALETTE_REFRESH_SQL: &str =
+    include_str!("../../../migrations/0019_category_palette_refresh.sql");
+const VIDEO_CHAPTERS_SQL: &str = include_str!("../../../migrations/0020_video_chapters.sql");
+const LATE_VIDEO_DATA_SQL: &str = include_str!("../../../migrations/0021_late_video_data.sql");
+const SOURCE_SUMMARIES_SQL: &str = include_str!("../../../migrations/0022_source_summaries.sql");
+const VIDEO_SUMMARIES_SQL: &str = include_str!("../../../migrations/0023_video_summaries.sql");
+const AI_CATEGORIZATION_SQL: &str = include_str!("../../../migrations/0024_ai_categorization.sql");
+const VIDEO_CATEGORY_VERDICTS_SQL: &str =
+    include_str!("../../../migrations/0025_video_category_verdicts.sql");
 
 pub fn apply(conn: &mut Connection) -> anyhow::Result<()> {
     Migrations::new(vec![
@@ -27,10 +50,55 @@ pub fn apply(conn: &mut Connection) -> anyhow::Result<()> {
         M::up(PLAYLIST_EXCLUDE_FROM_HOME_SQL),
         M::up(EPISODE_NUMBERS_SQL),
         M::up(RECONCILE_INTERVAL_SQL),
+        M::up(VIDEO_SUBTITLES_SQL),
+        M::up(CATEGORIES_SQL),
+        M::up(PLAYLIST_HIDE_UNWATCHED_COUNT_SQL),
+        M::up(CATEGORY_COLOR_SQL),
+        M::up(VIDEO_CATEGORIES_SQL),
+        M::up(PLEX_LABELS_SQL),
+        M::up(EPISODE_LABELS_GENERATION_SQL),
+        M::up(PREFERENCES_SQL),
+        M::up_with_hook(
+            CATEGORY_COLOR_STRENGTHEN_SQL,
+            strengthen_light_category_colors,
+        ),
+        M::up(CATEGORY_PALETTE_REFRESH_SQL),
+        M::up(VIDEO_CHAPTERS_SQL),
+        M::up(LATE_VIDEO_DATA_SQL),
+        M::up(SOURCE_SUMMARIES_SQL),
+        M::up(VIDEO_SUMMARIES_SQL),
+        M::up(AI_CATEGORIZATION_SQL),
+        M::up(VIDEO_CATEGORY_VERDICTS_SQL),
     ])
     .to_latest(conn)
     .inspect_err(|e| tracing::error!(error = %e, "failed to apply database migrations"))
     .context("failed to apply database migrations")
+}
+
+/// Rewrites every light category color (OKLCH lightness above 0.85) left after
+/// the palette mapping to the solid color of the same hue.
+fn strengthen_light_category_colors(tx: &rusqlite::Transaction) -> HookResult {
+    let colors = tx
+        .prepare("SELECT id, color FROM categories")?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    colors
+        .into_iter()
+        .filter_map(|(id, color)| {
+            let color = CategoryColor::new(color).ok()?;
+            let strong = color.clone().strengthened();
+            (strong != color).then_some((id, strong))
+        })
+        .try_for_each(|(id, color)| {
+            tx.execute(
+                "UPDATE categories SET color = ?1 WHERE id = ?2",
+                rusqlite::params![color.as_str(), id],
+            )
+            .map(|_| ())
+        })?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -59,15 +127,24 @@ mod tests {
         assert_eq!(
             tables,
             vec![
+                "categories",
+                "category_members",
+                "category_playlists",
                 "channel_videos",
                 "channels",
                 "domain_events_dead_letter",
+                "episode_labels",
                 "events",
                 "playlist_videos",
                 "playlists",
+                "preferences",
                 "tasks",
                 "tasks_dead_letter",
+                "video_categories",
+                "video_category_verdicts",
                 "video_metadata",
+                "video_summaries",
+                "video_transcripts",
                 "videos",
             ]
         );
@@ -221,6 +298,251 @@ mod tests {
             |row| row.get::<_, i64>(0),
         );
         assert_eq!(exclude_from_home, Ok(0));
+    }
+
+    #[test]
+    fn it_should_default_existing_playlists_to_show_their_unwatched_count_when_migrating() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::new(vec![
+            M::up(BASELINE_SQL),
+            M::up(WATCH_STATE_SQL),
+            M::up(PUBLISHED_AT_AND_SYNCED_AT_SQL),
+            M::up(LAST_ERRORED_AT_SQL),
+            M::up(LAST_PLAYED_AT_SQL),
+            M::up(PLAYLIST_VIDEO_POSITION_REQUIRED_SQL),
+            M::up(PLAYLIST_EXCLUDE_FROM_HOME_SQL),
+            M::up(EPISODE_NUMBERS_SQL),
+            M::up(RECONCILE_INTERVAL_SQL),
+            M::up(VIDEO_SUBTITLES_SQL),
+        ])
+        .to_latest(&mut conn)
+        .unwrap();
+        conn.execute(
+            "INSERT INTO playlists (id, name, path, quality, kind, created_at)
+             VALUES ('PL1', 'My Playlist', 'my-playlist', 'high', 'youtube_linked', '2024-01-01T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+
+        apply(&mut conn).unwrap();
+
+        let hide_unwatched_count = conn.query_row(
+            "SELECT hide_unwatched_count FROM playlists WHERE id = 'PL1'",
+            [],
+            |row| row.get::<_, i64>(0),
+        );
+        assert_eq!(hide_unwatched_count, Ok(0));
+    }
+
+    #[test]
+    fn it_should_backfill_existing_categories_with_palette_colors_in_creation_order() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::new(vec![
+            M::up(BASELINE_SQL),
+            M::up(WATCH_STATE_SQL),
+            M::up(PUBLISHED_AT_AND_SYNCED_AT_SQL),
+            M::up(LAST_ERRORED_AT_SQL),
+            M::up(LAST_PLAYED_AT_SQL),
+            M::up(PLAYLIST_VIDEO_POSITION_REQUIRED_SQL),
+            M::up(PLAYLIST_EXCLUDE_FROM_HOME_SQL),
+            M::up(EPISODE_NUMBERS_SQL),
+            M::up(RECONCILE_INTERVAL_SQL),
+            M::up(VIDEO_SUBTITLES_SQL),
+            M::up(CATEGORIES_SQL),
+            M::up(PLAYLIST_HIDE_UNWATCHED_COUNT_SQL),
+        ])
+        .to_latest(&mut conn)
+        .unwrap();
+        // Inserted out of creation order, named so name order differs too.
+        let created_minutes = [2, 0, 1, 3, 4, 5, 6, 7, 8, 9, 10];
+        created_minutes.iter().for_each(|minute| {
+            conn.execute(
+                "INSERT INTO categories (id, name, created_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    format!("category-{minute:02}"),
+                    format!("Category {}", 10 - minute),
+                    format!("2024-01-01T00:{minute:02}:00+00:00"),
+                ],
+            )
+            .unwrap();
+        });
+
+        apply(&mut conn).unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT color FROM categories ORDER BY id")
+            .unwrap();
+        let colors: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            colors,
+            vec![
+                "#f59e0b", "#f97316", "#ef4444", "#ec4899", "#8b5cf6", "#3b82f6", "#0ea5e9",
+                "#14b8a6", "#22c55e", "#64748b", "#f59e0b",
+            ]
+        );
+    }
+
+    #[test]
+    fn it_should_strengthen_a_former_palette_color() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to_preferences(&mut conn);
+        insert_colored_category(&conn, "Chess", "#d3ecf8");
+
+        apply(&mut conn).unwrap();
+
+        assert_eq!(category_colors(&conn), vec!["#0ea5e9"]);
+    }
+
+    #[test]
+    fn it_should_strengthen_a_custom_pastel_keeping_its_hue() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to_preferences(&mut conn);
+        insert_colored_category(&conn, "Garden", "#d9f3dd");
+
+        apply(&mut conn).unwrap();
+
+        assert_eq!(category_colors(&conn), vec!["#429b5a"]);
+    }
+
+    #[test]
+    fn it_should_leave_an_already_strong_color_unchanged() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to_preferences(&mut conn);
+        insert_colored_category(&conn, "Sports", "#03999f");
+
+        apply(&mut conn).unwrap();
+
+        assert_eq!(category_colors(&conn), vec!["#03999f"]);
+    }
+
+    #[test]
+    fn it_should_refresh_a_former_solid_palette_color() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to_category_color_strengthen(&mut conn);
+        insert_colored_category(&conn, "Chess", "#0193bf");
+
+        apply(&mut conn).unwrap();
+
+        assert_eq!(category_colors(&conn), vec!["#0ea5e9"]);
+    }
+
+    #[test]
+    fn it_should_refresh_every_former_solid_palette_color_by_position() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to_category_color_strengthen(&mut conn);
+        let former = [
+            "#9f8401", "#bd7123", "#c8645b", "#bd6396", "#9870c5", "#6a80d4", "#0193bf", "#019b8d",
+            "#79922c", "#978364",
+        ];
+        former
+            .iter()
+            .enumerate()
+            .for_each(|(index, color)| insert_colored_category(&conn, &format!("c{index}"), color));
+
+        apply(&mut conn).unwrap();
+
+        assert_eq!(
+            category_colors(&conn),
+            vec![
+                "#f59e0b", "#f97316", "#ef4444", "#ec4899", "#8b5cf6", "#3b82f6", "#0ea5e9",
+                "#14b8a6", "#22c55e", "#64748b",
+            ]
+        );
+    }
+
+    #[test]
+    fn it_should_backfill_video_categories_from_members() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::new(vec![
+            M::up(BASELINE_SQL),
+            M::up(WATCH_STATE_SQL),
+            M::up(PUBLISHED_AT_AND_SYNCED_AT_SQL),
+            M::up(LAST_ERRORED_AT_SQL),
+            M::up(LAST_PLAYED_AT_SQL),
+            M::up(PLAYLIST_VIDEO_POSITION_REQUIRED_SQL),
+            M::up(PLAYLIST_EXCLUDE_FROM_HOME_SQL),
+            M::up(EPISODE_NUMBERS_SQL),
+            M::up(RECONCILE_INTERVAL_SQL),
+            M::up(VIDEO_SUBTITLES_SQL),
+            M::up(CATEGORIES_SQL),
+            M::up(PLAYLIST_HIDE_UNWATCHED_COUNT_SQL),
+            M::up(CATEGORY_COLOR_SQL),
+        ])
+        .to_latest(&mut conn)
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO channel_videos (channel_id, video_id, position, created_at)
+             VALUES ('@GothamChess', 'chess-rec1', 0, '2024-01-01T00:00:00+00:00'),
+                    ('@GothamChess', 'chess-rec2', 1, '2024-01-01T00:00:00+00:00'),
+                    ('@Uncategorized', 'other-rec1', 0, '2024-01-01T00:00:00+00:00');
+             INSERT INTO playlist_videos (playlist_id, video_id, position, created_at)
+             VALUES ('PLendgames', 'endgames-rec1', 0, '2024-01-01T00:00:00+00:00'),
+                    ('PLuntracked', 'untracked-rec1', 0, '2024-01-01T00:00:00+00:00');
+             INSERT INTO category_members (category_id, member_kind, member_id)
+             VALUES ('chess', 'channel', '@GothamChess'),
+                    ('chess', 'playlist', 'PLendgames'),
+                    ('funny', 'channel', '@GothamChess');",
+        )
+        .unwrap();
+
+        apply(&mut conn).unwrap();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT video_id, category_id FROM video_categories ORDER BY video_id, category_id",
+            )
+            .unwrap();
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let expected = [
+            ("chess-rec1", "chess"),
+            ("chess-rec1", "funny"),
+            ("chess-rec2", "chess"),
+            ("chess-rec2", "funny"),
+            ("endgames-rec1", "chess"),
+        ]
+        .map(|(video_id, category_id)| (video_id.to_string(), category_id.to_string()));
+        assert_eq!(rows, expected.to_vec());
+    }
+
+    #[test]
+    fn it_should_default_existing_videos_to_missing_subtitles() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::new(vec![
+            M::up(BASELINE_SQL),
+            M::up(WATCH_STATE_SQL),
+            M::up(PUBLISHED_AT_AND_SYNCED_AT_SQL),
+            M::up(LAST_ERRORED_AT_SQL),
+            M::up(LAST_PLAYED_AT_SQL),
+            M::up(PLAYLIST_VIDEO_POSITION_REQUIRED_SQL),
+            M::up(PLAYLIST_EXCLUDE_FROM_HOME_SQL),
+            M::up(EPISODE_NUMBERS_SQL),
+            M::up(RECONCILE_INTERVAL_SQL),
+        ])
+        .to_latest(&mut conn)
+        .unwrap();
+        conn.execute(
+            "INSERT INTO videos (id, youtube_id, title, status, created_at, updated_at)
+             VALUES ('rec1', 'yt1', 'My Video', 'DOWNLOADED', '2024-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+
+        apply(&mut conn).unwrap();
+
+        let subtitles = conn.query_row(
+            "SELECT subtitle_state, subtitle_filename FROM videos WHERE id = 'rec1'",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        );
+        assert_eq!(subtitles, Ok(("MISSING".to_string(), None)));
     }
 
     #[test]
@@ -555,5 +877,289 @@ mod tests {
                 "2024-02-01T00:00:00+00:00".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn it_should_default_existing_sources_and_categories_after_the_ai_categorization_migration() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to_late_video_data(&mut conn);
+        conn.execute_batch(
+            "INSERT INTO channels (id, name, youtube_channel_id, quality, video_limit, path, created_at)
+             VALUES ('@chan', 'Chan', 'UC1', 'high', 3, 'channels/chan', '2024-01-01T00:00:00+00:00');
+             INSERT INTO playlists (id, name, path, quality, kind, created_at)
+             VALUES ('PL1', 'Mix', 'playlists/mix', 'high', 'youtube_linked', '2024-01-01T00:00:00+00:00');",
+        )
+        .unwrap();
+        insert_colored_category(&conn, "Chess", "#0ea5e9");
+
+        apply(&mut conn).unwrap();
+
+        let categorization_enabled = conn
+            .prepare(
+                "SELECT id, categorization_enabled FROM channels
+                 UNION ALL SELECT id, categorization_enabled FROM playlists",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>();
+        let ai_prompt = conn.query_row("SELECT ai_prompt FROM categories", [], |row| {
+            row.get::<_, Option<String>>(0)
+        });
+        assert_eq!(
+            categorization_enabled,
+            Ok(vec![
+                ("@chan".to_string(), false),
+                ("PL1".to_string(), false)
+            ])
+        );
+        assert_eq!(ai_prompt, Ok(None));
+    }
+
+    #[test]
+    fn it_should_disable_summaries_for_sources_stored_before_the_setting() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to_late_video_data(&mut conn);
+        conn.execute_batch(
+            "INSERT INTO channels (id, name, youtube_channel_id, quality, video_limit, path, created_at)
+             VALUES ('@chan', 'Chan', 'UC1', 'high', 3, 'channels/chan', '2024-01-01T00:00:00+00:00');
+             INSERT INTO playlists (id, name, path, quality, kind, created_at)
+             VALUES ('PL1', 'Mix', 'playlists/mix', 'high', 'youtube_linked', '2024-01-01T00:00:00+00:00');",
+        )
+        .unwrap();
+
+        apply(&mut conn).unwrap();
+
+        let summaries_enabled = conn
+            .prepare(
+                "SELECT id, summaries_enabled FROM channels
+                 UNION ALL SELECT id, summaries_enabled FROM playlists",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>();
+        assert_eq!(
+            summaries_enabled,
+            Ok(vec![
+                ("@chan".to_string(), false),
+                ("PL1".to_string(), false)
+            ])
+        );
+    }
+
+    #[test]
+    fn it_should_start_stored_videos_with_a_missing_summary() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to_late_video_data(&mut conn);
+        conn.execute_batch(
+            "INSERT INTO videos (id, youtube_id, title, status, created_at, updated_at)
+             VALUES ('rec1', 'yt1', 'Title', 'DOWNLOADED', '2024-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00');",
+        )
+        .unwrap();
+
+        apply(&mut conn).unwrap();
+
+        let summary = conn.query_row("SELECT summary_state FROM videos", [], |row| {
+            row.get::<_, String>(0)
+        });
+        assert_eq!(summary, Ok("MISSING".to_string()));
+    }
+
+    #[test]
+    fn it_should_settle_checked_chapters_and_downloaded_quality() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to_video_chapters(&mut conn);
+        conn.execute_batch(
+            "INSERT INTO videos (id, youtube_id, title, status, created_at, updated_at, chapters)
+             VALUES ('checked', 'yt1', 'Checked', 'DOWNLOADED', '2024-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00', '[]');
+             INSERT INTO videos (id, youtube_id, title, status, created_at, updated_at, chapters)
+             VALUES ('unchecked', 'yt2', 'Unchecked', 'DOWNLOADED', '2024-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00', NULL);
+             INSERT INTO videos (id, youtube_id, title, status, created_at, updated_at, chapters)
+             VALUES ('pending', 'yt3', 'Pending', 'PENDING', '2024-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00', NULL);",
+        )
+        .unwrap();
+
+        apply(&mut conn).unwrap();
+
+        let settled = conn
+            .prepare("SELECT id, chapters_settled, quality_settled FROM videos ORDER BY id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>();
+        assert_eq!(
+            settled,
+            Ok(vec![
+                ("checked".to_string(), true, true),
+                ("pending".to_string(), false, false),
+                ("unchecked".to_string(), false, true),
+            ])
+        );
+    }
+
+    #[test]
+    fn it_should_keep_the_first_missing_time_as_the_last_subtitles_check() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to_video_chapters(&mut conn);
+        conn.execute(
+            "INSERT INTO videos (id, youtube_id, title, status, created_at, updated_at, subtitles_first_missing_at)
+             VALUES ('rec1', 'yt1', 'My Video', 'DOWNLOADED', '2024-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00', '2026-10-31T12:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+
+        apply(&mut conn).unwrap();
+
+        let checks = conn.query_row(
+            "SELECT subtitles_last_checked_at, subtitles_failed_attempts FROM videos WHERE id = 'rec1'",
+            [],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, u32>(1)?)),
+        );
+        assert_eq!(
+            checks,
+            Ok((Some("2026-10-31T12:00:00+00:00".to_string()), 0))
+        );
+    }
+
+    fn migrate_to_video_chapters(conn: &mut Connection) {
+        Migrations::new(vec![
+            M::up(BASELINE_SQL),
+            M::up(WATCH_STATE_SQL),
+            M::up(PUBLISHED_AT_AND_SYNCED_AT_SQL),
+            M::up(LAST_ERRORED_AT_SQL),
+            M::up(LAST_PLAYED_AT_SQL),
+            M::up(PLAYLIST_VIDEO_POSITION_REQUIRED_SQL),
+            M::up(PLAYLIST_EXCLUDE_FROM_HOME_SQL),
+            M::up(EPISODE_NUMBERS_SQL),
+            M::up(RECONCILE_INTERVAL_SQL),
+            M::up(VIDEO_SUBTITLES_SQL),
+            M::up(CATEGORIES_SQL),
+            M::up(PLAYLIST_HIDE_UNWATCHED_COUNT_SQL),
+            M::up(CATEGORY_COLOR_SQL),
+            M::up(VIDEO_CATEGORIES_SQL),
+            M::up(PLEX_LABELS_SQL),
+            M::up(EPISODE_LABELS_GENERATION_SQL),
+            M::up(PREFERENCES_SQL),
+            M::up_with_hook(
+                CATEGORY_COLOR_STRENGTHEN_SQL,
+                strengthen_light_category_colors,
+            ),
+            M::up(CATEGORY_PALETTE_REFRESH_SQL),
+            M::up(VIDEO_CHAPTERS_SQL),
+        ])
+        .to_latest(conn)
+        .unwrap();
+    }
+
+    fn migrate_to_late_video_data(conn: &mut Connection) {
+        Migrations::new(vec![
+            M::up(BASELINE_SQL),
+            M::up(WATCH_STATE_SQL),
+            M::up(PUBLISHED_AT_AND_SYNCED_AT_SQL),
+            M::up(LAST_ERRORED_AT_SQL),
+            M::up(LAST_PLAYED_AT_SQL),
+            M::up(PLAYLIST_VIDEO_POSITION_REQUIRED_SQL),
+            M::up(PLAYLIST_EXCLUDE_FROM_HOME_SQL),
+            M::up(EPISODE_NUMBERS_SQL),
+            M::up(RECONCILE_INTERVAL_SQL),
+            M::up(VIDEO_SUBTITLES_SQL),
+            M::up(CATEGORIES_SQL),
+            M::up(PLAYLIST_HIDE_UNWATCHED_COUNT_SQL),
+            M::up(CATEGORY_COLOR_SQL),
+            M::up(VIDEO_CATEGORIES_SQL),
+            M::up(PLEX_LABELS_SQL),
+            M::up(EPISODE_LABELS_GENERATION_SQL),
+            M::up(PREFERENCES_SQL),
+            M::up_with_hook(
+                CATEGORY_COLOR_STRENGTHEN_SQL,
+                strengthen_light_category_colors,
+            ),
+            M::up(CATEGORY_PALETTE_REFRESH_SQL),
+            M::up(VIDEO_CHAPTERS_SQL),
+            M::up(LATE_VIDEO_DATA_SQL),
+        ])
+        .to_latest(conn)
+        .unwrap();
+    }
+
+    fn migrate_to_preferences(conn: &mut Connection) {
+        Migrations::new(vec![
+            M::up(BASELINE_SQL),
+            M::up(WATCH_STATE_SQL),
+            M::up(PUBLISHED_AT_AND_SYNCED_AT_SQL),
+            M::up(LAST_ERRORED_AT_SQL),
+            M::up(LAST_PLAYED_AT_SQL),
+            M::up(PLAYLIST_VIDEO_POSITION_REQUIRED_SQL),
+            M::up(PLAYLIST_EXCLUDE_FROM_HOME_SQL),
+            M::up(EPISODE_NUMBERS_SQL),
+            M::up(RECONCILE_INTERVAL_SQL),
+            M::up(VIDEO_SUBTITLES_SQL),
+            M::up(CATEGORIES_SQL),
+            M::up(PLAYLIST_HIDE_UNWATCHED_COUNT_SQL),
+            M::up(CATEGORY_COLOR_SQL),
+            M::up(VIDEO_CATEGORIES_SQL),
+            M::up(PLEX_LABELS_SQL),
+            M::up(EPISODE_LABELS_GENERATION_SQL),
+            M::up(PREFERENCES_SQL),
+        ])
+        .to_latest(conn)
+        .unwrap();
+    }
+
+    fn migrate_to_category_color_strengthen(conn: &mut Connection) {
+        Migrations::new(vec![
+            M::up(BASELINE_SQL),
+            M::up(WATCH_STATE_SQL),
+            M::up(PUBLISHED_AT_AND_SYNCED_AT_SQL),
+            M::up(LAST_ERRORED_AT_SQL),
+            M::up(LAST_PLAYED_AT_SQL),
+            M::up(PLAYLIST_VIDEO_POSITION_REQUIRED_SQL),
+            M::up(PLAYLIST_EXCLUDE_FROM_HOME_SQL),
+            M::up(EPISODE_NUMBERS_SQL),
+            M::up(RECONCILE_INTERVAL_SQL),
+            M::up(VIDEO_SUBTITLES_SQL),
+            M::up(CATEGORIES_SQL),
+            M::up(PLAYLIST_HIDE_UNWATCHED_COUNT_SQL),
+            M::up(CATEGORY_COLOR_SQL),
+            M::up(VIDEO_CATEGORIES_SQL),
+            M::up(PLEX_LABELS_SQL),
+            M::up(EPISODE_LABELS_GENERATION_SQL),
+            M::up(PREFERENCES_SQL),
+            M::up_with_hook(
+                CATEGORY_COLOR_STRENGTHEN_SQL,
+                strengthen_light_category_colors,
+            ),
+        ])
+        .to_latest(conn)
+        .unwrap();
+    }
+
+    fn insert_colored_category(conn: &Connection, name: &str, color: &str) {
+        conn.execute(
+            "INSERT INTO categories (id, name, created_at, color) VALUES (?1, ?1, ?2, ?3)",
+            rusqlite::params![name, "2024-01-01T00:00:00+00:00", color],
+        )
+        .unwrap();
+    }
+
+    fn category_colors(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT color FROM categories ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
     }
 }

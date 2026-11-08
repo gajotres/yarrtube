@@ -57,18 +57,34 @@ Clicking the application's logo, from any view, SHALL navigate to the home view.
 - **THEN** the application navigates to the home view
 
 ### Requirement: Persistent Header
-The application header SHALL remain fixed in place (visible, non-scrolling) as the user scrolls any view, at all viewport sizes, including mobile.
+At or above the small breakpoint, the application header SHALL remain fixed in place (visible, non-scrolling) as the user scrolls any view. Below the small breakpoint, the header SHALL be 56 pixels tall and SHALL slide out of view while the user scrolls the document down, and slide back as soon as the user scrolls up. It SHALL stay visible while the document is at its top, while the mobile sidebar is open, and while a video player is pinned below it. The header's logo SHALL occupy its final size before the logo image loads, so the header's contents do not shift when it appears.
 
 #### Scenario: Scrolling a view with a tall content area
-- **WHEN** a user scrolls a view whose content exceeds the visible viewport height
+- **WHEN** a user on a desktop-width viewport scrolls a view whose content exceeds the visible viewport height
 - **THEN** the header remains visible in place and does not move with the scrolled content
+
+#### Scenario: Scrolling down on a phone
+- **WHEN** a user on a phone-width viewport scrolls the home view down
+- **THEN** the header slides out of view
+
+#### Scenario: Scrolling back up on a phone
+- **WHEN** a user on a phone-width viewport whose header is hidden scrolls up
+- **THEN** the header slides back into view straight away
+
+#### Scenario: Pinned player on a phone
+- **WHEN** a user on a phone-width viewport scrolls a channel view whose player is pinned below the header
+- **THEN** the header stays visible
 
 #### Scenario: Scrolling on a mobile viewport as the browser's UI chrome shows or hides
 - **WHEN** a user on a mobile browser scrolls a view while the browser's own toolbar collapses or expands
-- **THEN** the header remains visible in place and does not move with the scrolled content
+- **THEN** the header hides and returns only with the user's scroll direction, and is not displaced by the toolbar's movement
+
+#### Scenario: Logo loading
+- **WHEN** the application loads and the logo image has not arrived yet
+- **THEN** the space for the logo is already reserved, and the header's other contents do not move when it arrives
 
 ### Requirement: Home Page Layout
-The home view SHALL display up to three sections, in this order: "Continue watching", "Quick watches" and "Latest videos", loaded together in one request. A video SHALL appear in at most one section. "Latest videos" SHALL display up to 18 recently synced videos. "Continue watching" SHALL display up to 6 videos the user has started and not finished recently, and SHALL show on each card how far the video has been watched. "Quick watches" SHALL display up to 6 short unwatched videos. "Continue watching" and "Quick watches" SHALL be hidden when they have no videos, including while their videos are loading or when they cannot be loaded. Each section SHALL display its videos as a grid of cards, each showing the video's thumbnail with its title below it. For videos from a tracked channel, the card SHALL also show the channel's avatar and name.
+The home view SHALL display its sections in this order: "Continue watching", up to 3 category sections, "Quick watches" and "Latest videos", loaded together in one request. A video SHALL appear in at most one section. "Latest videos" SHALL display up to 18 recently synced videos. "Continue watching" SHALL display up to 6 videos the user has started and not finished recently. "Quick watches" SHALL display up to 6 short unwatched videos. Each category section SHALL display up to 6 videos, as described in "Home Category Sections". "Continue watching", the category sections and "Quick watches" SHALL be laid out as described in "Home Shelves"; "Latest videos" as a grid, and below the small breakpoint as described in "Mobile Latest Videos Feed". Cards SHALL be presented as described in "Video Card Presentation". "Latest videos" SHALL be hidden when it has no videos while another section has videos; when no section has videos, "Latest videos" SHALL be shown saying no videos have been synced yet. "Continue watching", the category sections and "Quick watches" SHALL be hidden when they have no videos or when they cannot be loaded. While the home videos are loading, the view SHALL show placeholders as described in "Loading Placeholders" and no section heading. Section headings SHALL be set in the heading typeface, larger and bolder than card titles.
 
 #### Scenario: Home view with recent videos
 - **WHEN** one or more videos have been synced
@@ -76,11 +92,11 @@ The home view SHALL display up to three sections, in this order: "Continue watch
 
 #### Scenario: Channel video card
 - **WHEN** a video in any home section comes from a tracked channel
-- **THEN** its card shows the channel's avatar and name below the title
+- **THEN** its card shows the channel's avatar beside the title and the channel's name on its meta line
 
 #### Scenario: Playlist video card
 - **WHEN** a video in any home section comes from a tracked playlist
-- **THEN** its card shows no channel avatar or name
+- **THEN** its card shows a playlist icon beside the title and the playlist's name on its meta line
 
 #### Scenario: Continue watching shown first
 - **WHEN** at least one video has been started and not finished recently
@@ -91,12 +107,12 @@ The home view SHALL display up to three sections, in this order: "Continue watch
 - **THEN** its thumbnail shows a progress bar proportional to its saved playback position over its duration
 
 #### Scenario: Quick watches shown above latest videos
-- **WHEN** at least one short unwatched video has been downloaded
-- **THEN** the home view shows a "Quick watches" section below "Continue watching" and above "Latest videos", listing that video
+- **WHEN** at least one short unwatched video has been downloaded and is not shown in a category section
+- **THEN** the home view shows a "Quick watches" section below "Continue watching" and the category sections, and above "Latest videos", listing that video
 
 #### Scenario: Sections show a bounded number of videos
 - **WHEN** more videos qualify for a section than it shows
-- **THEN** "Continue watching" and "Quick watches" each show at most 6 videos, and "Latest videos" shows at most 18
+- **THEN** "Continue watching", each category section and "Quick watches" each hold at most 6 videos, and "Latest videos" shows at most 18
 
 #### Scenario: A video appears in one section only
 - **WHEN** a video qualifies for more than one home section
@@ -106,9 +122,21 @@ The home view SHALL display up to three sections, in this order: "Continue watch
 - **WHEN** no video qualifies for "Continue watching" or "Quick watches"
 - **THEN** that section, including its heading, is not shown
 
+#### Scenario: Empty latest videos hidden
+- **WHEN** every video is shown under "Continue watching", a category section or "Quick watches"
+- **THEN** "Latest videos", including its heading, is not shown
+
+#### Scenario: Nothing synced yet
+- **WHEN** no section has videos
+- **THEN** "Latest videos" is shown with "No videos synced yet."
+
+#### Scenario: Home videos loading
+- **WHEN** the home videos are still loading
+- **THEN** the view shows placeholder sections and no section heading, "Latest videos" included
+
 #### Scenario: Optional sections that fail to load are hidden
-- **WHEN** the videos for "Continue watching" or "Quick watches" are still loading or cannot be loaded
-- **THEN** that section, including its heading, is not shown, and "Latest videos" still renders (showing the load error when there is one)
+- **WHEN** the home videos cannot be loaded
+- **THEN** "Continue watching", the category sections and "Quick watches" are not shown, and "Latest videos" shows the load error
 
 ### Requirement: Persistent Channels And Playlists Sidebar
 The application SHALL display a sidebar listing the titles of tracked channels and tracked playlists, each as a separate section, visible from every top-level view rather than only the home view. When the user is on a playlist's or channel's detail view, the sidebar SHALL mark that entry as active.
@@ -128,57 +156,6 @@ The application SHALL display a sidebar listing the titles of tracked channels a
 #### Scenario: Active sidebar entry
 - **WHEN** a user is on a playlist's or channel's detail view
 - **THEN** the sidebar marks that playlist's or channel's entry as active
-
-### Requirement: Sidebar Row Actions
-Each tracked channel or playlist row in the sidebar SHALL provide an always-visible menu control that does not depend on hover. The menu SHALL offer an action to trigger a sync (reconcile), an "Edit settings" action, and an action to delete the entry. "Edit settings" SHALL open the edit channel dialog for a channel row and the edit playlist dialog for a playlist row. For channel rows it SHALL also offer an action to mark the channel watched. For playlist rows it SHALL also offer an action labeled "Exclude from home" when the playlist is shown on home, or "Include in home" when it is excluded, which changes that setting without confirmation and refreshes the home view's sections. When changing the setting fails, the application SHALL tell the user and leave the playlist as it was. The row's unwatched badge SHALL sit at the row's trailing edge, next to the menu control, with no reserved blank space between them. Deleting SHALL require the user to confirm before it takes effect. Marking a channel watched SHALL take effect without confirmation. Deleting the channel or playlist whose detail view is currently open SHALL return the user to the home view.
-
-#### Scenario: Opening a row's menu on a touch device
-- **WHEN** a user on a touch device taps a sidebar row's menu control
-- **THEN** a menu opens listing the row's actions, without navigating to the row's detail view
-
-#### Scenario: Syncing from the sidebar
-- **WHEN** a user chooses the sync action from a sidebar row's menu
-- **THEN** the application triggers a reconcile for that channel or playlist
-
-#### Scenario: Deleting from the sidebar requires confirmation
-- **WHEN** a user chooses the delete action from a sidebar row's menu
-- **THEN** the application prompts for confirmation before deleting that channel or playlist
-
-#### Scenario: Deleting the currently viewed entry
-- **WHEN** a user confirms deletion of the channel or playlist whose detail view is currently open
-- **THEN** the application navigates to the home view
-
-#### Scenario: Marking a channel watched from the sidebar
-- **WHEN** a user chooses the mark-watched action from a channel row's menu
-- **THEN** the application marks that channel watched, and its unwatched badge disappears
-
-#### Scenario: Editing a channel's settings from the sidebar
-- **WHEN** a user chooses "Edit settings" from a channel row's menu
-- **THEN** the edit channel dialog opens for that channel, and saving it behaves as when opened from the channel's page header
-
-#### Scenario: Editing a playlist's settings from the sidebar
-- **WHEN** a user chooses "Edit settings" from a playlist row's menu
-- **THEN** the edit playlist dialog opens for that playlist, and saving it behaves as when opened from the playlist's page header
-
-#### Scenario: Channel row menu order
-- **WHEN** a user opens a channel row's menu
-- **THEN** it offers, in order, sync, mark-watched, "Edit settings" and delete
-
-#### Scenario: Playlist rows have no mark-watched action
-- **WHEN** a user opens a playlist row's menu
-- **THEN** it offers, in order, sync, the exclude or include in home action, "Edit settings" and delete, and no mark-watched action
-
-#### Scenario: Excluding a playlist from home from the sidebar
-- **WHEN** a user chooses "Exclude from home" from the menu of a playlist shown on home
-- **THEN** the playlist's videos leave the home view, and the row's menu now offers "Include in home"
-
-#### Scenario: Including a playlist in home from the sidebar
-- **WHEN** a user chooses "Include in home" from the menu of a playlist excluded from home
-- **THEN** the playlist's videos appear in the home view's sections they qualify for, and the row's menu now offers "Exclude from home"
-
-#### Scenario: Channel rows have no home exclusion action
-- **WHEN** a user opens a channel row's menu
-- **THEN** it offers neither "Exclude from home" nor "Include in home"
 
 ### Requirement: Collapsible Mobile Sidebar
 On viewports narrower than the desktop breakpoint, the sidebar (channels and playlists navigation) SHALL be hidden by default and SHALL NOT occupy permanent layout space. The user SHALL be able to reveal it via a control in the header. That same header control SHALL dismiss it while it is open, SHALL indicate whether the sidebar is open (both visually, by showing a close icon while open, and to assistive technology), and SHALL be the sidebar's only close control. While the sidebar is open, the header SHALL remain visible and usable above it and its backdrop. The sidebar SHALL also be dismissed by a backdrop tap, pressing Escape, selecting a navigation item within it, activating the header's home link, or any other navigation to a different view. When open, it SHALL cover no more than about two thirds of a typical phone's width, leaving the view behind it visible. While it is open, the page behind it SHALL NOT scroll, whatever the sidebar contains. On viewports at or above the desktop breakpoint, the sidebar SHALL remain a persistent, always-visible panel, unaffected by this open/closed state.
@@ -214,7 +191,7 @@ On viewports narrower than the desktop breakpoint, the sidebar (channels and pla
 - **THEN** the sidebar is always visible as a persistent side panel, regardless of the open/closed state used on mobile
 
 ### Requirement: Sidebar Add Entries
-The sidebar's Channels section SHALL offer an "Add channel" control and its Playlists section an "Add playlist" control, each placed between the section heading and the section's list and always visible regardless of the section's rows or collapsed state. "Add channel" SHALL open the add channel dialog and "Add playlist" SHALL open the add playlist dialog. On viewports narrower than the desktop breakpoint, activating either control SHALL close the sidebar before the dialog is shown.
+The sidebar's Channels section SHALL offer an "Add channel" control and its Playlists section an "Add playlist" control, visible whenever the section is unfolded. When the section has loaded with nothing tracked, the control SHALL be a full-width labelled row placed beneath the section heading. Otherwise (the section has rows, is still loading, or failed to load) the control SHALL be a compact "+" button at the trailing edge of the section heading, outside the heading's fold toggle, with the accessible name "Add channel" or "Add playlist" and that name as its tooltip. A folded section SHALL NOT show its add control. "Add channel" SHALL open the add channel dialog and "Add playlist" SHALL open the add playlist dialog. On viewports narrower than the desktop breakpoint, activating either control SHALL close the sidebar before the dialog is shown.
 
 #### Scenario: Opening the add channel dialog from the sidebar
 - **WHEN** a user activates "Add channel" in the sidebar's Channels section
@@ -225,23 +202,88 @@ The sidebar's Channels section SHALL offer an "Add channel" control and its Play
 - **THEN** the add playlist dialog opens
 
 #### Scenario: Add entries with nothing tracked
-- **WHEN** no channels or playlists are tracked
-- **THEN** both sections still show their add control beneath their heading
+- **WHEN** no channels or playlists are tracked and both sections are unfolded
+- **THEN** both sections show a full-width labelled add row beneath their heading
+
+#### Scenario: Heading add control once tracked
+- **WHEN** at least one channel is tracked and the Channels section is unfolded
+- **THEN** the "Channels" heading shows a "+" control named "Add channel", and no "Add channel" row is shown
+
+#### Scenario: Folded section hides its add entry
+- **WHEN** the Channels section is folded
+- **THEN** no "Add channel" control is shown
 
 #### Scenario: Adding from the mobile sidebar
 - **WHEN** a user on a mobile-width viewport opens the sidebar and activates "Add channel" or "Add playlist"
 - **THEN** the sidebar closes and the matching add dialog is shown
 
 ### Requirement: Header Settings Menu
-The header SHALL offer, at its trailing edge, a settings control shown as a gear icon with the accessible name "Settings". Activating it SHALL open a menu whose items are navigation to other views. The menu SHALL contain a "Tasks" item that navigates to the tasks view. The header SHALL NOT show any other control for adding channels or playlists or for reaching the tasks view.
+The header SHALL offer, at its trailing edge, a settings control shown as a gear icon with the accessible name "Settings". Activating it SHALL open a menu with, in order, "Tasks", which navigates to the tasks view, "Preferences", which navigates to the preferences view, "AI", which navigates to the AI page, and "Report a bug", which opens `https://github.com/sergigp/yarrtube/issues/new` in a new browser tab. The header SHALL NOT show any other control for adding channels or playlists or for reaching the tasks view.
 
 #### Scenario: Reaching the tasks view
 - **WHEN** a user activates the header's settings control and chooses "Tasks"
 - **THEN** the application navigates to the tasks view
 
+#### Scenario: Reaching the preferences view
+- **WHEN** a user activates the header's settings control and chooses "Preferences"
+- **THEN** the application navigates to the preferences view
+
+#### Scenario: Reaching the AI page
+- **WHEN** a user activates the header's settings control and chooses "AI"
+- **THEN** the application navigates to the AI page
+
+#### Scenario: Reporting a bug
+- **WHEN** a user activates the header's settings control and chooses "Report a bug"
+- **THEN** the GitHub new issue page for yarrtube opens in a new tab and the application stays where it was
+
 #### Scenario: Header controls
 - **WHEN** a user views any page
 - **THEN** the header shows the settings control and no "Add" or "Tasks" button
+
+### Requirement: Header Dark Mode Switch
+The header SHALL show, immediately before the settings control, a switch with the accessible name "Dark mode", checked while the UI is drawn in the dark theme. It SHALL be drawn as a pill-shaped track with a round knob: in light mode the knob sits at the start of a neutral track and shows a sun; in dark mode it sits at the end of a track in the primary green and shows a moon. Activating it SHALL draw the UI in the other theme at once and save that theme as the `theme` preference. When the save fails, the UI SHALL be drawn in the saved theme again. The switch SHALL be disabled until the preferences have loaded.
+
+#### Scenario: Turning dark mode on
+- **WHEN** a user in light mode activates the "Dark mode" switch
+- **THEN** the UI is drawn in the dark theme, the switch is checked and shows a moon, and the `theme` preference is saved as `"dark"` along with every other preference unchanged
+
+#### Scenario: Turning dark mode off
+- **WHEN** a user in dark mode activates the "Dark mode" switch
+- **THEN** the UI is drawn in the light theme, the switch is unchecked and shows a sun, and the `theme` preference is saved as `"light"`
+
+#### Scenario: Save fails
+- **WHEN** a user activates the "Dark mode" switch and saving the preferences fails
+- **THEN** the UI returns to the theme it had before and the switch to its previous state
+
+#### Scenario: Preferences still loading
+- **WHEN** the preferences have not loaded yet
+- **THEN** the "Dark mode" switch is disabled
+
+### Requirement: Saved Theme
+The web UI SHALL be drawn in the theme saved as the `theme` preference, on every browser and device, once the preferences load. To avoid a flash of the wrong theme on load, the browser SHALL remember the last theme it drew and draw it before the first paint; when the saved preference differs, the saved preference SHALL win as soon as it loads. In the dark theme, the browser's theme color SHALL match the dark header background.
+
+#### Scenario: Another device chose dark mode
+- **WHEN** the `theme` preference is `"dark"` and a user opens the web UI in a browser that has never drawn it
+- **THEN** the UI is drawn in the dark theme once the preferences load and the "Dark mode" switch is checked
+
+#### Scenario: Reloading in dark mode
+- **WHEN** a user whose `theme` preference is `"dark"` reloads the page
+- **THEN** the page is drawn dark from its first paint, without showing the light theme first
+
+#### Scenario: Saved theme overrides the browser's last one
+- **WHEN** a browser last drew the dark theme and the `theme` preference has since been saved as `"light"` elsewhere
+- **THEN** the UI is drawn in the light theme once the preferences load
+
+### Requirement: Category Tints In Dark Mode
+In the dark theme, every place that fills a chip or header with the soft tint of a category's hue (home card chips, the chosen chips of the "Categories" field, a category view's header) SHALL instead use a dark tint of that hue, and every chip name drawn in the dark shade of that hue SHALL instead use a light shade of it. For every palette color, the light shade on the dark tint SHALL have a contrast ratio of at least 4.5:1, and the dark tint SHALL keep the category's hue.
+
+#### Scenario: Home card chip in dark mode
+- **WHEN** a user in dark mode views a home card for a video in the "Chess" category whose color is Sky
+- **THEN** the "Chess" chip is filled with a dark tint of sky blue and its name is in a light shade of sky blue
+
+#### Scenario: Category header in dark mode
+- **WHEN** a user in dark mode opens the "Chess" category view
+- **THEN** its header is filled with a dark tint of the category's hue
 
 ### Requirement: Add Dialog Save To Suggestions
 Both add dialogs SHALL show a "Save to" control directly below the ID/URL field, visible from the moment the dialog opens, whether or not anything has been entered. It SHALL present a single-choice list of candidate parent folders, exactly one of which is selected at any time:
@@ -568,11 +610,15 @@ In a playlist or channel detail view on viewports at or above the desktop breakp
 - **THEN** the page content extends behind the browser's toolbars and the browser is able to collapse them, as it does for any normally scrolling page
 
 ### Requirement: Video Detail Links To YouTube
-A selected video's detail pane SHALL include a link that opens that video on YouTube in a new tab.
+A selected video's detail pane SHALL show, at the end of its title row, an icon-only link whose accessible name and tooltip are "Open video on YouTube", which opens that video on YouTube in a new tab.
 
 #### Scenario: Opening a video on YouTube
-- **WHEN** a user activates the "Open on YouTube" link for a selected video
+- **WHEN** a user activates the "Open video on YouTube" link for a selected video
 - **THEN** a new tab opens to that video's page on youtube.com
+
+#### Scenario: Visible while details are collapsed
+- **WHEN** a user on a mobile-width viewport selects a video
+- **THEN** the "Open video on YouTube" link is visible in the title row
 
 ### Requirement: Resume Playback
 When a user plays a video in a playlist or channel detail view, the player SHALL start from the video's saved playback position if it is unwatched and has a saved position above 0. Otherwise it SHALL start from the beginning.
@@ -620,10 +666,10 @@ A playlist or channel detail view's player SHALL track playback in sessions. A s
 - **THEN** playback starts from the beginning
 
 ### Requirement: Watched Tick On Video Thumbnails
-Every video thumbnail in the playlist detail, channel detail and home views SHALL display a tick when that video is watched, and SHALL NOT display one when it is unwatched.
+Every video thumbnail in the playlist detail, channel detail, category and home views SHALL display a tick when that video is watched, and SHALL NOT display one when it is unwatched.
 
 #### Scenario: Watched video thumbnail
-- **WHEN** a watched video is listed in a playlist, channel or home view
+- **WHEN** a watched video is listed in a playlist, channel, category or home view
 - **THEN** its thumbnail displays a tick
 
 #### Scenario: Unwatched video thumbnail
@@ -631,7 +677,7 @@ Every video thumbnail in the playlist detail, channel detail and home views SHAL
 - **THEN** its thumbnail does not display a tick
 
 ### Requirement: Unwatched Badge On Sidebar Channels
-Each channel row in the sidebar SHALL display a badge with the channel's unwatched video count when that count is above 0, and no badge when it is 0. The badge SHALL update without a manual page reload. After an action in the application that changes a channel's unwatched count, the badge and the channel's sidebar position SHALL update promptly, without waiting for the periodic refresh. Such actions are: a video becoming watched or unwatched during playback, marking a single video watched, marking the channel watched, syncing, and adding or deleting a channel. During playback, the channel list SHALL be refetched only when a progress report changes the video's watched state.
+Each channel row in the sidebar SHALL display a badge with the channel's unwatched video count when that count is above 0, and no badge when it is 0. The badge SHALL update without a manual page reload. After an action in the application that changes a channel's unwatched count, the badge and the channel's sidebar position SHALL update promptly, without waiting for the periodic refresh. Such actions are: a video becoming watched or unwatched during playback, marking a single video watched, marking the channel watched, marking a playlist sharing its videos watched, syncing, and adding or deleting a channel. During playback, the channel and playlist lists SHALL be refetched only when a progress report changes the video's watched state.
 
 #### Scenario: Channel with unwatched videos
 - **WHEN** a channel has 3 downloaded, unwatched videos
@@ -647,7 +693,7 @@ Each channel row in the sidebar SHALL display a badge with the channel's unwatch
 
 #### Scenario: Progress that leaves the watched state unchanged
 - **WHEN** a progress report during playback leaves the video's watched state as it was
-- **THEN** the application does not refetch the channel list because of it
+- **THEN** the application refetches neither the channel list nor the playlist list because of it
 
 #### Scenario: Badge updates after marking watched
 - **WHEN** a user marks a channel watched from its sidebar row or its detail view
@@ -658,14 +704,14 @@ Each channel row in the sidebar SHALL display a badge with the channel's unwatch
 - **THEN** the channel's badge count decreases by one promptly without a page reload
 
 ### Requirement: Mark Channel Watched From Channel View
-A channel detail view SHALL provide an action to mark the channel watched, which takes effect without confirmation. The action SHALL sit in the page header's "⋮" actions menu.
+A channel detail view SHALL provide an action to mark the channel watched, which asks for confirmation as described in "Confirm Bulk Mark Watched". The action SHALL sit among the page header's actions.
 
 #### Scenario: Marking a channel watched from its view
-- **WHEN** a user chooses the mark-watched action from the page header's "⋮" menu in a channel's detail view
+- **WHEN** a user chooses the mark-watched action from a channel's page header and confirms
 - **THEN** every downloaded video in the list shows a tick, and the channel's sidebar badge disappears
 
 ### Requirement: Video Actions Menu
-Every video card on the home view, every row of a playlist or channel detail view's video list except the selected video's row, and the title row of the video detail pane SHALL show an always-visible vertical "⋮" control to the right of the video's title. Activating it SHALL open a menu with a "Mark as watched" item, without selecting or navigating to the video. Choosing the item SHALL mark the video watched without confirmation. The item SHALL be disabled when the video is already watched or has not finished downloading. When marking fails, the application SHALL tell the user and leave the video as it was. On a home card whose source is a playlist, the menu SHALL also offer an item labeled `Exclude "<playlist name>" from home`, which excludes that playlist from home without confirmation and refreshes the home view's sections; when it fails, the application SHALL tell the user and leave the playlist as it was. Home cards whose source is a channel, list rows and the video detail pane SHALL NOT offer it. The selected video's row SHALL keep the space the control would take, so rows stay aligned when the selection changes.
+Every video card on the home view and every row of a playlist or channel detail view's video list, the selected video's row included, SHALL show an always-visible vertical "⋮" control to the right of the video's title. Activating it SHALL open a menu with a "Mark as watched" item, without selecting or navigating to the video. Choosing the item SHALL mark the video watched without confirmation. The item SHALL be disabled when the video is already watched or has not finished downloading. When marking fails, the application SHALL tell the user and leave the video as it was. On a home card whose source is a playlist, the menu SHALL also offer an item labeled `Exclude "<playlist name>" from home`, which excludes that playlist from home without confirmation and refreshes the home view's sections; when it fails, the application SHALL tell the user and leave the playlist as it was. Home cards whose source is a channel and list rows SHALL NOT offer it. The video detail pane SHALL NOT show a "⋮" control; the selected video can also be marked watched from its "Mark watched" button, as described in "Video Detail Watched Control".
 
 #### Scenario: Marking a video watched from a home card
 - **WHEN** a user chooses "Mark as watched" from the menu of a "Continue watching" card
@@ -676,12 +722,12 @@ Every video card on the home view, every row of a playlist or channel detail vie
 - **THEN** the row's thumbnail shows a tick, and the selected video does not change
 
 #### Scenario: Marking the selected video watched from its detail pane
-- **WHEN** a user chooses "Mark as watched" from the menu in the video detail pane
+- **WHEN** a user activates "Mark watched" in the video detail pane
 - **THEN** the selected video is watched and its row in the list shows a tick
 
 #### Scenario: The selected row leaves the menu to the detail pane
 - **WHEN** a video is selected in a playlist or channel detail view
-- **THEN** its row in the list shows no "⋮" control, while the detail pane shows one
+- **THEN** its row in the list shows a "⋮" control like every other row, and the detail pane shows none
 
 #### Scenario: Opening the menu doesn't navigate
 - **WHEN** a user opens the menu on a home card or a list row
@@ -704,11 +750,38 @@ Every video card on the home view, every row of a playlist or channel detail vie
 - **THEN** the menu offers "Mark as watched" only
 
 #### Scenario: List rows and the detail pane have no exclude item
-- **WHEN** a user opens the menu of a row in a playlist's video list, or of the video detail pane
-- **THEN** the menu offers "Mark as watched" only
+- **WHEN** a user opens the menu of a row in a playlist's video list
+- **THEN** the menu offers "Mark as watched" only, and the video detail pane offers no menu at all
+
+### Requirement: Video Detail Watched Control
+The video detail pane's title row SHALL show, to the right of the title and before the playback speed control, a "Mark watched" button for the selected video while it is downloaded and unwatched, which marks the video watched without confirmation. At or above the desktop breakpoint the button SHALL show a tick and the label "Mark watched"; below it, only the tick, keeping "Mark watched" as its accessible name. The button SHALL NOT be shown once the video is watched or while it has not finished downloading; a watched video is shown as such on the meta line, as described in "Video Detail Meta Line".
+
+#### Scenario: Marking the selected video watched
+- **WHEN** a user activates "Mark watched" in the detail pane of a downloaded, unwatched video
+- **THEN** the selected video is watched, its row in the list shows a tick, the button disappears and the meta line starts with "Watched"
+
+#### Scenario: Watched video
+- **WHEN** a user selects a watched video
+- **THEN** the detail pane shows no "Mark watched" button and its meta line starts with "Watched"
+
+#### Scenario: Rewatching resets the control
+- **WHEN** a user replays a watched video past 10% of its duration
+- **THEN** the video becomes unwatched and the "Mark watched" button shows again, without a page reload
+
+#### Scenario: Video not downloaded yet
+- **WHEN** the selected video is pending, downloading or errored
+- **THEN** the detail pane shows no "Mark watched" button
+
+#### Scenario: Marking fails
+- **WHEN** a user activates "Mark watched" and the request fails
+- **THEN** the application tells the user and the video stays unwatched
+
+#### Scenario: Visible on a mobile viewport
+- **WHEN** a user selects a downloaded, unwatched video below the desktop breakpoint
+- **THEN** the title row shows the button as a tick without its label, named "Mark watched" for assistive technology, and it is reachable without opening any menu
 
 ### Requirement: Playback Speed Control
-The title row of a playlist or channel detail view's video detail pane SHALL show a playback speed control next to the "⋮" actions menu, labelled with the current playback speed (e.g. "1x", "1.5x"). Activating it SHALL open a menu offering the speeds 1x, 1.1x, 1.25x, 1.5x and 2x, with the current speed marked. Choosing a speed SHALL change the playing video's speed immediately without interrupting playback. The speed SHALL apply only to the selected video: selecting another video, or reloading the application, SHALL start playback at 1x. When the speed is changed through the browser's own player controls, the control SHALL show that speed, even when it is not one of the offered speeds. The control SHALL be disabled while the selected video has not finished downloading.
+The title row of a playlist or channel detail view's video detail pane SHALL show a playback speed control to the right of the title, labelled with the current playback speed (e.g. "1x", "1.5x"). Activating it SHALL open a menu offering the speeds 1x, 1.1x, 1.25x, 1.5x and 2x, with the current speed marked. Choosing a speed SHALL change the playing video's speed immediately without interrupting playback. The speed SHALL apply only to the selected video: selecting another video, or reloading the application, SHALL start playback at 1x. When the speed is changed through the browser's own player controls, the control SHALL show that speed, even when it is not one of the offered speeds. The control SHALL be disabled while the selected video has not finished downloading.
 
 #### Scenario: Choosing a faster speed
 - **WHEN** a user opens the speed control of a downloaded video and chooses "1.5x"
@@ -750,26 +823,22 @@ Wherever the application shows a channel's avatar or name, outside the sidebar r
 - **THEN** the application navigates to that channel's detail view
 
 ### Requirement: Video Detail Title Prominence
-In the video detail pane, the video's title SHALL occupy its own full-width row. No other elements SHALL share that row at any viewport size, apart from the channel avatar in a channel detail view.
+In the video detail pane, the video's title SHALL occupy its own row, taking all of its width except what the channel avatar (to its left, in a channel detail view) and the video's actions (to its right: the "Mark watched" button when shown, the playback speed control and the "Open video on YouTube" link) need. No other elements SHALL share that row at any viewport size.
 
 #### Scenario: Long title on a mobile viewport
 - **WHEN** a user on a mobile-width viewport selects a video with a long title
-- **THEN** the title wraps across the full width of the detail pane, and the meta line appears below it
+- **THEN** the title wraps across the width of the detail pane left by the video's actions, and the meta line appears below it
 
-### Requirement: Collapsible Video Details
-The video detail pane SHALL always show the video's title and its meta line. The rest of the pane (the status indicator when the video is not downloaded, the description, the storage location and the "Open on YouTube" link) SHALL sit in a section the user can expand and collapse. The storage location SHALL be the folder holding the video's file (its source's storage path joined with the file's folder, for example `channels/some-channel/Season 2026`), never the file name itself, so episode codes do not appear in the UI. This section SHALL start collapsed on viewports narrower than the desktop breakpoint and expanded at or above it. The pane SHALL NOT show a quality indicator, and SHALL NOT show a status indicator for a downloaded video.
+### Requirement: Video Detail Status And Location
+The video detail pane SHALL always show, below the meta line, the video's storage location and, when the video is not downloaded, a status indicator, at every viewport size and with no control to expand or collapse them. The storage location SHALL be the folder holding the video's file, never the file name itself, so episode codes do not appear in the UI. The pane SHALL NOT show a quality indicator, a status indicator for a downloaded video, or the video's YouTube description.
 
-#### Scenario: Details start collapsed on mobile
+#### Scenario: Details on a mobile viewport
 - **WHEN** a user on a mobile-width viewport opens a playlist or channel detail view
-- **THEN** the detail pane shows the video's title, its meta line and an expand control, and hides the description, storage location and YouTube link
+- **THEN** the detail pane shows the video's title, its meta line and its storage location, with no "More" or "Less" control
 
-#### Scenario: Expanding details
-- **WHEN** a user activates the expand control in a collapsed detail pane
-- **THEN** the description, storage location and "Open on YouTube" link become visible, and the control collapses them again when activated
-
-#### Scenario: Details start expanded on desktop
+#### Scenario: Details on a desktop viewport
 - **WHEN** a user on a desktop-width viewport opens a playlist or channel detail view
-- **THEN** the detail pane shows the title, meta line, description, storage location and YouTube link without needing to be expanded
+- **THEN** the detail pane shows the video's title, its meta line and its storage location, with no "More" or "Less" control
 
 #### Scenario: Storage location of a downloaded episode
 - **WHEN** a downloaded video's recorded filename is `Season 2026/S2026E031501 - Title.mp4` in a channel stored at `channels/some-channel`
@@ -780,54 +849,44 @@ The video detail pane SHALL always show the video's title and its meta line. The
 - **THEN** the detail pane shows its source's storage path
 
 #### Scenario: Downloaded video shows no status indicator
-- **WHEN** a user expands the details of a downloaded video
+- **WHEN** a user selects a downloaded video
 - **THEN** no status or quality indicator is shown
 
 #### Scenario: Pending video shows its status
-- **WHEN** a user expands the details of a video that is pending, downloading, retrying or errored
+- **WHEN** a user selects a video that is pending, downloading, retrying or errored
 - **THEN** a status indicator shows that state, and no quality indicator is shown
 
 ### Requirement: Video Detail Meta Line
-The video detail pane SHALL show a meta line directly below the title, visible whether the details section is expanded or collapsed. The line SHALL read `<channel name> · Published <date> · Synced <relative time>`:
+The video detail pane SHALL show a meta line directly below the title. The line SHALL read `Watched · <channel name> · Published <date> · Synced <relative time>`:
+- "Watched" SHALL appear only when the video is watched.
 - The channel name SHALL appear only in a playlist detail view.
 - The publish time SHALL be shown as a date, without a time of day.
-- The sync time SHALL be shown relative to now (for example "2d ago"), and its full date and time SHALL be available on hover.
+- The sync time SHALL be shown relative to now (for example "2d ago"), and its full date and time SHALL be available on hover. It SHALL be shown only at or above the desktop breakpoint.
 - Any part whose value is absent SHALL be omitted along with its separator. When every part is absent, the line SHALL not be shown.
 
 #### Scenario: Downloaded video in a playlist view
-- **WHEN** a user selects a downloaded video with generated metadata in a playlist detail view
+- **WHEN** a user on a desktop-width viewport selects a downloaded, unwatched video with generated metadata in a playlist detail view
 - **THEN** the meta line shows the video's channel name, "Published" followed by its publish date, and "Synced" followed by how long ago it was synced
 
 #### Scenario: Downloaded video in a channel view
-- **WHEN** a user selects a downloaded video with generated metadata in a channel detail view
+- **WHEN** a user on a desktop-width viewport selects a downloaded, unwatched video with generated metadata in a channel detail view
 - **THEN** the meta line shows "Published" with its publish date and "Synced" with how long ago it was synced, without the channel name
 
+#### Scenario: Watched video
+- **WHEN** a user selects a watched video
+- **THEN** the meta line starts with "Watched", followed by the other parts
+
+#### Scenario: Sync time hidden on a mobile viewport
+- **WHEN** a user on a mobile-width viewport selects a synced video
+- **THEN** the meta line shows no "Synced" part and no separator for it
+
 #### Scenario: Meta line on a collapsed mobile pane
-- **WHEN** a user on a mobile-width viewport opens a detail view with the details section collapsed
+- **WHEN** a user on a mobile-width viewport opens a detail view
 - **THEN** the meta line is visible below the title
 
 #### Scenario: Video without metadata or sync time
 - **WHEN** a user selects a pending video that has neither generated metadata nor a sync time
 - **THEN** no meta line is shown
-
-### Requirement: Video Detail Description
-The expandable section of the video detail pane SHALL show the video's description, preserving its line breaks and rendering web URLs in it as links that open in a new tab. The description SHALL be clamped to about four lines, with a "Show more" control, shown only when the text exceeds the clamp, that reveals the rest and can collapse it again. When the video has no description, or an empty one, no description block SHALL be shown.
-
-#### Scenario: Long description
-- **WHEN** a user expands the details of a video whose description is longer than four lines
-- **THEN** the first four lines are shown followed by a "Show more" control, and activating it reveals the whole description
-
-#### Scenario: Short description
-- **WHEN** a user expands the details of a video whose description fits in four lines
-- **THEN** the whole description is shown and no "Show more" control is present
-
-#### Scenario: Link in the description
-- **WHEN** a user activates a URL inside a video's description
-- **THEN** that URL opens in a new tab
-
-#### Scenario: Video without a description
-- **WHEN** a user expands the details of a video with no description
-- **THEN** no description block is shown
 
 ### Requirement: Compact Mobile Player
 On viewports narrower than the desktop breakpoint, the video player area SHALL be sized to the video's own aspect ratio, with no blank padding above or below the video. The player SHALL start one standard page gutter below the detail view's page header. While the page scrolls, the page header SHALL scroll away and the player SHALL stay pinned directly below the application header.
@@ -856,18 +915,42 @@ The application SHALL serve its own Yarrtube icon as the browser favicon and as 
 - **THEN** the home screen shows the Yarrtube icon, and the application opens without Safari's address bar and toolbar
 
 ### Requirement: Detail View Page Header
-A playlist or channel detail view SHALL open with a page header showing the playlist's or channel's name, with the channel's avatar beside it for channels. Below the name it SHALL show a summary of the number of videos and, when above 0, the number of unwatched videos. The header SHALL provide a visible sync (reconcile) control and, beside it, an always-visible vertical "⋮" control opening an actions menu. The menu SHALL offer, for channels, an action to mark the channel watched and an "Edit settings" action that opens the edit channel dialog; for playlists, an action labeled "Exclude from home" when the playlist is shown on home or "Include in home" when it is excluded, which changes that setting without confirmation, and an "Edit settings" action that opens the edit playlist dialog; and, for both, last and set apart from the others, an action to delete the entry. Deleting SHALL require confirmation and, once confirmed, SHALL return the user to the home view. When changing the home setting fails, the application SHALL tell the user and leave the playlist as it was. On viewports narrower than the small breakpoint, the sync control SHALL show as an icon only, keeping its accessible label.
+A playlist or channel detail view SHALL open with a page header showing the playlist's or channel's name, with the channel's avatar beside it for channels. Below the name it SHALL show a summary of the number of videos and, when above 0, the number of unwatched videos, also for a playlist whose count is hidden. The header SHALL offer, in this order, a sync (reconcile) action; for both, an action to mark the entry watched; for playlists an action labeled "Exclude from home" when the playlist is shown on home or "Include in home" when it is excluded, which changes that setting without confirmation, and the hide or show unwatched count action; for both, an "Edit settings" action that opens the edit channel or playlist dialog; for channels a link labeled "Open channel on YouTube" and for playlists a link labeled "Open playlist on YouTube", which opens the channel's or playlist's page on youtube.com in a new tab; and last, an action to delete the entry. At or above the desktop breakpoint every action but mark-watched and delete SHALL be a square icon-only button whose accessible name and tooltip are the action's label, followed by a vertical "⋮" control, named "More actions for <name>", whose menu offers the mark-watched action, labeled "Mark all watched", and, set apart, delete, styled as destructive. Below the desktop breakpoint the header SHALL show only that "⋮" control, always visible, whose menu offers every action, sync included, with delete set apart from the others. Deleting SHALL require confirmation and, once confirmed, SHALL return the user to the home view. When syncing or changing the home setting fails, the application SHALL tell the user and leave the entry as it was.
 
 #### Scenario: Channel page header
 - **WHEN** a user opens a channel's detail view
-- **THEN** the page header shows the channel's avatar, its name, a video count summary, a sync control, and a "⋮" menu offering mark-watched, "Edit settings" and delete
+- **THEN** the page header shows the channel's avatar, its name, a video count summary, and the sync, mark-watched, "Edit settings", "Open channel on YouTube" and delete actions
 
 #### Scenario: Playlist page header
 - **WHEN** a user opens a playlist's detail view
-- **THEN** the page header shows the playlist's name, a video count summary, a sync control, and a "⋮" menu offering the exclude or include in home action, "Edit settings" and delete, with no avatar and no mark-watched action
+- **THEN** the page header shows the playlist's name, a video count summary, and the sync, mark-watched, exclude or include in home, hide or show unwatched count, "Edit settings", "Open playlist on YouTube" and delete actions, with no avatar
+
+#### Scenario: Opening the source on YouTube
+- **WHEN** a user activates "Open channel on YouTube" in the page header of the channel `@somechannel`
+- **THEN** a new tab opens to `https://www.youtube.com/@somechannel`
+
+#### Scenario: Header actions on a desktop viewport
+- **WHEN** a user views a playlist's detail view at or above the desktop breakpoint
+- **THEN** each action but mark-watched and delete shows as a square icon-only button, hovering one shows its label in a tooltip, and a "⋮" control follows them whose menu offers "Mark all watched" and, set apart, delete
+
+#### Scenario: Mark all watched is not a header button on desktop
+- **WHEN** a user views a channel's, playlist's or category's view at or above the desktop breakpoint
+- **THEN** no icon button in the header marks the entry watched; "Mark all watched" is reached only through the "⋮" menu
+
+#### Scenario: Page header actions on a narrow viewport
+- **WHEN** a user views a playlist's detail view below the desktop breakpoint
+- **THEN** the header shows only the "⋮" control beside the name, and its menu offers sync, mark-watched, the home and unwatched count actions, "Edit settings", "Open playlist on YouTube" and, set apart, delete
+
+#### Scenario: Playlist summary includes its unwatched count
+- **WHEN** a user opens the detail view of a playlist with 3 videos, 2 of them downloaded and unwatched
+- **THEN** the summary shows "3 videos · 2 unwatched", whether or not the playlist's count is hidden
+
+#### Scenario: Marking a playlist watched from its view
+- **WHEN** a user chooses the mark-watched action from a playlist's page header
+- **THEN** every downloaded video in the list shows a tick, and the playlist's sidebar badge disappears
 
 #### Scenario: Editing a playlist's settings from its page header
-- **WHEN** a user chooses "Edit settings" from a playlist's page header "⋮" menu
+- **WHEN** a user chooses "Edit settings" from a playlist's page header
 - **THEN** the edit playlist dialog opens for that playlist
 
 #### Scenario: Summary omits unwatched count when nothing is unwatched
@@ -879,20 +962,16 @@ A playlist or channel detail view SHALL open with a page header showing the play
 - **THEN** the application triggers a reconcile for that channel or playlist and shows it as in progress until it completes
 
 #### Scenario: Deleting from the page header
-- **WHEN** a user chooses the delete action from a detail view's page header "⋮" menu and confirms
+- **WHEN** a user chooses the delete action from a detail view's "More actions" menu and confirms
 - **THEN** the application deletes that channel or playlist and navigates to the home view
 
-#### Scenario: Page header actions on a narrow viewport
-- **WHEN** a user views a detail view on a viewport narrower than the small breakpoint
-- **THEN** the sync control shows as an icon only, and the name remains visible beside it and the "⋮" control
-
 #### Scenario: Excluding a playlist from home from its page header
-- **WHEN** a user chooses "Exclude from home" from a playlist's page header "⋮" menu
-- **THEN** the playlist's videos leave the home view, and the menu now offers "Include in home"
+- **WHEN** a user chooses "Exclude from home" from a playlist's page header
+- **THEN** the playlist's videos leave the home view, and the header now offers "Include in home"
 
 #### Scenario: Including a playlist in home from its page header
-- **WHEN** a user chooses "Include in home" from the page header "⋮" menu of a playlist excluded from home
-- **THEN** the playlist's videos appear in the home view's sections they qualify for, and the menu now offers "Exclude from home"
+- **WHEN** a user chooses "Include in home" from the page header of a playlist excluded from home
+- **THEN** the playlist's videos appear in the home view's sections they qualify for, and the header now offers "Exclude from home"
 
 ### Requirement: Sidebar Section Headings
 The sidebar's "Channels" and "Playlists" section titles SHALL be styled as headings, visually distinct from the channel and playlist rows beneath them.
@@ -921,71 +1000,103 @@ The sidebar's Channels section SHALL list channels with an unwatched count above
 - **THEN** the channel moves into the caught-up group at its alphabetical position
 
 ### Requirement: Sidebar Playlist Ordering
-The sidebar's Playlists section SHALL list playlists by name, ignoring case.
+The sidebar's Playlists section SHALL list playlists with a shown unwatched count above 0 first, ordered by unwatched count from highest to lowest, with equal counts ordered by name, ignoring case. The other playlists, including those whose count is hidden, SHALL follow, ordered by name, ignoring case.
 
 #### Scenario: Playlists listed alphabetically
-- **WHEN** the tracked playlists are "watch later", "Courses" and "Ambient"
+- **WHEN** the tracked playlists are "watch later", "Courses" and "Ambient", none with a shown unwatched count above 0
 - **THEN** the Playlists section lists them in the order "Ambient", "Courses", "watch later"
 
-### Requirement: Collapsed Sidebar Sections
-Each sidebar section SHALL start collapsed, showing only its leading rows in the section's order followed by a control that reveals the remaining rows and states how many there are. In the Channels section, the leading rows SHALL be the channels with unwatched videos, up to 10; when no channel has unwatched videos, the leading rows SHALL be the first 5 channels. In the Playlists section, the leading rows SHALL be the first 5 playlists. When a section has no rows beyond its leading rows, the control SHALL NOT be shown. An expanded section SHALL offer a control to collapse it again.
+#### Scenario: Unread playlists come first, most unread first
+- **WHEN** the tracked playlists are "Ambient" (0 unwatched), "Courses" (2 unwatched), "watch later" (7 unwatched) and "Zen" (0 unwatched)
+- **THEN** the Playlists section lists them in the order "watch later", "Courses", "Ambient", "Zen"
 
-#### Scenario: Only unread channels shown while collapsed
-- **WHEN** 3 of 40 tracked channels have unwatched videos and the Channels section is collapsed
-- **THEN** the section shows those 3 channels followed by a control to show the 37 others
+#### Scenario: Equal unwatched counts are ordered by name
+- **WHEN** "zeta" and "Echo" both have 3 unwatched videos
+- **THEN** "Echo" is listed before "zeta"
 
-#### Scenario: Unread channels beyond the cap
-- **WHEN** 14 tracked channels have unwatched videos and the Channels section is collapsed
-- **THEN** the section shows the 10 with the most unwatched videos, and the other unread channels are among the hidden rows
+#### Scenario: Hidden counts sort as caught up
+- **WHEN** "Music" has 40 unwatched videos with its count hidden, and "Courses" has 2 unwatched videos with its count shown
+- **THEN** "Courses" is listed first, and "Music" is listed among the caught-up playlists at its alphabetical position
 
-#### Scenario: No unread channels
-- **WHEN** no tracked channel has unwatched videos and the Channels section is collapsed
-- **THEN** the section shows the first 5 channels alphabetically followed by a control to show the rest
+#### Scenario: A playlist's position follows its count
+- **WHEN** a user watches enough of a playlist's videos that its unwatched count drops to 0
+- **THEN** the playlist moves into the caught-up group at its alphabetical position
 
-#### Scenario: Short section has no control
-- **WHEN** 4 playlists are tracked
-- **THEN** the Playlists section shows all 4 and no show-more control
+### Requirement: Foldable Sidebar Sections
+Each sidebar section heading SHALL be a control that folds and unfolds its section. The heading SHALL show a chevron pointing right while the section is folded and down while it is unfolded, and the whole heading (chevron and title) SHALL be the toggle target. The heading SHALL expose to assistive technology whether its section is unfolded. An unfolded section SHALL list all its rows in the section's order. A folded section SHALL show only its heading: its rows, its add control and its loading, empty and error messages SHALL be hidden. Folding SHALL apply the same way in the mobile sidebar.
 
-#### Scenario: Expanding and collapsing a section
-- **WHEN** a user activates a section's show-more control and then its collapse control
-- **THEN** the section first shows all its rows in order, then returns to its leading rows
+#### Scenario: Unfolded section lists every row
+- **WHEN** 40 channels are tracked and the Channels section is unfolded
+- **THEN** the Channels section lists all 40 channels, with no show-more control
 
-### Requirement: Active Sidebar Entry Always Visible
-When the user is on a channel's or playlist's detail view and that entry is not among its collapsed section's leading rows, the sidebar SHALL still show that entry, marked as active, in the collapsed section.
+#### Scenario: Folding a section
+- **WHEN** a user activates the "Channels" heading while the Channels section is unfolded
+- **THEN** the Channels section shows only its heading, with a right-pointing chevron, and no channel rows or "Add channel" control
 
-#### Scenario: Viewing a caught-up channel while collapsed
-- **WHEN** a user opens the detail view of a channel that is hidden in the collapsed Channels section
-- **THEN** the Channels section shows that channel, marked as active, alongside its leading rows
+#### Scenario: Unfolding a section
+- **WHEN** a user activates the "Channels" heading while the Channels section is folded
+- **THEN** the section shows its add control and all its rows again, with a down-pointing chevron
 
-### Requirement: Remembered Sidebar Section State
-The application SHALL remember, per browser, whether each sidebar section is expanded or collapsed, and SHALL restore that state when the application is loaded again. When no state has been remembered, a section SHALL start collapsed. When the remembered state cannot be read, the sidebar SHALL fall back to collapsed without an error.
+#### Scenario: Sections fold independently
+- **WHEN** a user folds the Channels section
+- **THEN** the Playlists section is unchanged
 
-#### Scenario: Expanded section survives a reload
-- **WHEN** a user expands the Channels section and reloads the page
-- **THEN** the Channels section is still expanded, and the Playlists section keeps its own state
+#### Scenario: Folded state is announced
+- **WHEN** a screen reader reaches the heading of a folded section
+- **THEN** the heading is announced as a collapsed control named after the section
 
-### Requirement: Sidebar Search
-When the number of tracked channels plus tracked playlists is above 15, the sidebar SHALL show a single search field above its sections. At 15 or fewer the field SHALL NOT be shown. While the field contains text, each section SHALL show every entry whose name contains that text, ignoring case, in the section's usual order and regardless of whether the section is collapsed. A section with no matching entry SHALL be hidden. When no entry matches in either section, the sidebar SHALL say that nothing matches. Clearing the field SHALL restore each section's normal collapsed or expanded view.
+### Requirement: Folded Section Unwatched Total
+A folded Channels section SHALL show, at its heading's trailing edge and as a badge styled like the rows' unwatched badges, the sum of its channels' unwatched counts, when that sum is above 0. No total SHALL be shown while the section is unfolded, while it is folded with a sum of 0, or for the Playlists section. The total SHALL update together with the channel badges.
 
-#### Scenario: Search field hidden for a short list
-- **WHEN** 10 channels and 5 playlists are tracked
-- **THEN** the sidebar shows no search field
+#### Scenario: Folded channels with unwatched videos
+- **WHEN** the Channels section is folded and its channels have 3, 0 and 20 unwatched videos
+- **THEN** the "Channels" heading shows an unwatched badge of 23
 
-#### Scenario: Search field shown for a long list
-- **WHEN** 12 channels and 4 playlists are tracked
-- **THEN** the sidebar shows a search field above the Channels section
+#### Scenario: Folded channels with nothing unwatched
+- **WHEN** the Channels section is folded and no channel has unwatched videos
+- **THEN** the "Channels" heading shows no total
 
-#### Scenario: Matching across both sections
-- **WHEN** a user types "ver" and the channel "Veritasium" and the playlist "Universe Overview" are tracked
-- **THEN** the Channels section shows "Veritasium" and the Playlists section shows "Universe Overview", even if both sections are collapsed and those entries are not among their leading rows
+#### Scenario: Unfolded section shows no total
+- **WHEN** the Channels section is unfolded
+- **THEN** the "Channels" heading shows no total
 
-#### Scenario: Section without matches is hidden
-- **WHEN** a user's search text matches only channels
-- **THEN** the Playlists section is not shown
+#### Scenario: Playlists show no total
+- **WHEN** the Playlists section is folded
+- **THEN** the "Playlists" heading shows no total
 
-#### Scenario: Clearing the search
-- **WHEN** a user clears the search field
-- **THEN** both sections return to the collapsed or expanded view they had before searching
+#### Scenario: Total follows watching
+- **WHEN** the Channels section is folded and a user finishes watching one of a channel's unwatched videos
+- **THEN** the total decreases by one promptly without a page reload
+
+### Requirement: Active Entry In A Folded Section
+When the user is on a channel's or playlist's detail view and that entry's section is folded, the section SHALL stay folded and its heading SHALL be marked active, visually and to assistive technology. The heading SHALL NOT be marked active while the section is unfolded or when no entry of the section is being viewed.
+
+#### Scenario: Opening a channel of a folded section
+- **WHEN** the Channels section is folded and a user opens a channel's detail view
+- **THEN** the Channels section stays folded and its heading is marked active
+
+#### Scenario: Unfolding shows the active entry
+- **WHEN** a user unfolds a section whose heading is marked active
+- **THEN** the heading is no longer marked active and the viewed entry is shown marked active
+
+#### Scenario: Viewing another section's entry
+- **WHEN** the Channels section is folded and a user opens a playlist's detail view
+- **THEN** the "Channels" heading is not marked active
+
+### Requirement: Remembered Sidebar Fold State
+The application SHALL remember, per browser, whether each sidebar section is folded, and SHALL restore that state when the application is loaded again. When no state has been remembered, a section SHALL start unfolded. When the remembered state cannot be read, the section SHALL start unfolded without an error.
+
+#### Scenario: Folded section survives a reload
+- **WHEN** a user folds the Playlists section and reloads the page
+- **THEN** the Playlists section is still folded, and the Channels section keeps its own fold state
+
+#### Scenario: First visit
+- **WHEN** a user loads the application with no remembered fold state
+- **THEN** every sidebar section is unfolded
+
+#### Scenario: Storage unavailable
+- **WHEN** the browser's storage cannot be read
+- **THEN** every sidebar section starts unfolded and folding still works until the page is reloaded
 
 ### Requirement: Background Refresh Pauses In Hidden Tabs
 The application SHALL NOT request fresh data from the daemon while its browser tab is hidden. When the tab becomes visible again, it SHALL refresh the data shown in the current view and sidebar.
@@ -1042,7 +1153,7 @@ The tasks view SHALL show a search field above the currently selected tab's list
 - **THEN** the tab returns to listing all of its tasks
 
 ### Requirement: Tasks View Describes Every Task Type
-The tasks view SHALL describe every task it lists in plain language and SHALL NEVER display a task's raw type identifier. Each task family SHALL be described in human terms, including playlist, channel, and Plex collection syncs, video downloads and thumbnail fetches, file and container deletions, and the yt-dlp self-update. When a name the description would include could not be resolved, the description SHALL use a generic placeholder in its place rather than omitting the description.
+The tasks view SHALL describe every task it lists in plain language and SHALL NEVER display a task's raw type identifier. Each task family SHALL be described in human terms, including playlist, channel, video, and Plex collection syncs, video downloads and thumbnail and subtitle fetches, file and container deletions, and the yt-dlp self-update. When a name the description would include could not be resolved, the description SHALL use a generic placeholder in its place rather than omitting the description.
 
 #### Scenario: Plex collection sync is described in plain language
 - **WHEN** the tasks view lists a Plex collection reconciliation task
@@ -1056,6 +1167,10 @@ The tasks view SHALL describe every task it lists in plain language and SHALL NE
 - **WHEN** the tasks view lists a task of any type
 - **THEN** its row shows a human-readable description and never a raw snake_case type string
 
+#### Scenario: Video sync is described in plain language
+- **WHEN** the tasks view lists a video sync task whose video and playlist or channel names were resolved
+- **THEN** it is described as syncing that video in that playlist or channel, and not by its raw type identifier
+
 ### Requirement: Tasks View Shows Last Error
 When a task the tasks view lists has a recorded last error, the view SHALL show that error on the task's row, so a user can see why a task is being retried. A task with no recorded last error SHALL show none.
 
@@ -1068,14 +1183,15 @@ When a task the tasks view lists has a recorded last error, the view SHALL show 
 - **THEN** the task's row shows no error text
 
 ### Requirement: Tasks View Tabs
-The tasks view SHALL group its tasks into tabs by task family, in this order: **Active**, **Downloads**, **Syncs**, and **Other**. Each tab SHALL show, beside its name, a count of the tasks it currently contains. A task belongs to a tab as follows:
+The tasks view SHALL group its tasks into tabs by task family, in this order: **Active**, **Downloads**, **Syncs**, **AI**, and **Other**. The **AI** tab SHALL show only while AI is enabled in the preferences, and SHALL NOT show while preferences are loading or failed to load. Each tab SHALL show, beside its name, a count of the tasks it currently contains. A task belongs to a tab as follows:
 
 - **Active**: every task whose status is `running`, regardless of its type.
 - **Downloads**: video download and thumbnail fetch tasks.
-- **Syncs**: playlist reconciliation and channel reconciliation tasks.
-- **Other**: every task that belongs to neither Downloads nor Syncs, including Plex collection reconciliation, the yt-dlp self-update, deletion of a video file or of a playlist's or channel's files, and any task type the view does not otherwise recognise.
+- **Syncs**: playlist reconciliation, channel reconciliation and video sync tasks.
+- **AI**: video summary tasks, while the **AI** tab shows.
+- **Other**: every task that belongs to none of Downloads, Syncs or a shown AI tab, including Plex collection reconciliation, the yt-dlp self-update, deletion of a video file or of a playlist's or channel's files, and any task type the view does not otherwise recognise.
 
-Every task SHALL appear in exactly one of Downloads, Syncs, or Other, and additionally in **Active** while it is running. The view SHALL open on the **Active** tab. Each tab SHALL list its tasks in the view's usual order (running first, then tasks already due, then tasks scheduled for later). Each task row SHALL show an icon that reflects the kind of work the task does (download, sync, deletion, or maintenance), so rows of different kinds within **Other** remain distinguishable.
+Every task SHALL appear in exactly one of Downloads, Syncs, AI, or Other, and additionally in **Active** while it is running. The view SHALL open on the **Active** tab. Each tab SHALL list its tasks in the view's usual order (running first, then tasks already due, then tasks scheduled for later). Each task row SHALL show an icon that reflects the kind of work the task does (download, sync, deletion, AI, or maintenance), so rows of different kinds within **Other** remain distinguishable.
 
 #### Scenario: View opens on the Active tab
 - **WHEN** a user opens the tasks view
@@ -1090,8 +1206,8 @@ Every task SHALL appear in exactly one of Downloads, Syncs, or Other, and additi
 - **THEN** the Downloads tab lists those tasks and no sync or other tasks
 
 #### Scenario: Syncs tab lists only playlist and channel reconciles
-- **WHEN** the tasks include playlist, channel, and Plex collection reconciliations
-- **THEN** the Syncs tab lists the playlist and channel reconciliations and not the Plex collection reconciliation
+- **WHEN** the tasks include playlist, channel, and Plex collection reconciliations and a video sync
+- **THEN** the Syncs tab lists the playlist and channel reconciliations and the video sync, and not the Plex collection reconciliation
 
 #### Scenario: Other tab collects everything else
 - **WHEN** the tasks include a Plex collection reconciliation, a yt-dlp self-update, a video-file deletion, a deleted container's file cleanup, and a task of an unrecognised type
@@ -1099,7 +1215,7 @@ Every task SHALL appear in exactly one of Downloads, Syncs, or Other, and additi
 
 #### Scenario: Counts match listed tasks
 - **WHEN** tasks of several families are present
-- **THEN** each tab's count matches the number of tasks it lists, and the Downloads, Syncs, and Other counts add up to the total number of tasks
+- **THEN** each tab's count matches the number of tasks it lists, and the counts of every tab but Active add up to the total number of tasks
 
 #### Scenario: No Cleanup or All tab
 - **WHEN** a user opens the tasks view
@@ -1109,8 +1225,24 @@ Every task SHALL appear in exactly one of Downloads, Syncs, or Other, and additi
 - **WHEN** no task is running
 - **THEN** the Active tab shows a message that nothing is running rather than an empty area, and the other tabs still list their tasks
 
+#### Scenario: AI tab lists video summaries
+- **WHEN** AI is enabled and the tasks include video summaries
+- **THEN** the AI tab shows between Syncs and Other and lists them, and the Other tab doesn't
+
+#### Scenario: AI tab with no tasks
+- **WHEN** AI is enabled and no video summary is queued
+- **THEN** the AI tab shows with a count of 0
+
+#### Scenario: AI turned off with summaries still queued
+- **WHEN** AI is off and the tasks include video summaries
+- **THEN** no AI tab shows and the Other tab lists them
+
+#### Scenario: Preferences not loaded
+- **WHEN** preferences are loading or failed to load
+- **THEN** no AI tab shows and the Other tab lists any video summaries
+
 ### Requirement: Tasks View Tab Bar Affordance
-The tasks view's tab bar SHALL make each tab look clickable and SHALL make the selected tab unmistakable. The tasks view SHALL be limited to a readable width and centred in the space beside the sidebar, and the tab bar SHALL span exactly the width of the task list, its tabs sharing that width equally. The tab bar SHALL be drawn as a row of tabs over a horizontal rule, with the selected tab marked by an underline in the application's primary colour and its label in the full foreground colour and a heavier weight; unselected tabs SHALL show a muted label. Hovering an unselected tab SHALL visibly change its background and label colour. Each tab SHALL show an icon for its family, its name, and its count as a pill, with the selected tab's pill in the primary colour. On narrow screens each tab SHALL show only its icon and count, keeping its name as its accessible name, so that all tabs fit without horizontal scrolling. While at least one task is running, the **Active** tab SHALL show a live indicator beside its count. Each tab SHALL be at least 40 pixels tall and SHALL show a visible focus ring when focused from the keyboard. The tab bar SHALL look the same whatever the operating system's colour-scheme preference.
+The tasks view's tab bar SHALL make each tab look clickable and SHALL make the selected tab unmistakable. The tasks view SHALL be limited to a readable width and aligned to the left edge of the content area, like the other views, and the tab bar SHALL span exactly the width of the task list, its tabs sharing that width equally. The tab bar SHALL be drawn as a row of tabs over a horizontal rule, with the selected tab marked by an underline in the application's primary colour and its label in the full foreground colour and a heavier weight; unselected tabs SHALL show a muted label. Hovering an unselected tab SHALL visibly change its background and label colour. Each tab SHALL show an icon for its family, its name, and its count as a pill, with the selected tab's pill in the primary colour. On narrow screens each tab SHALL show only its icon and count, keeping its name as its accessible name, so that all tabs fit without horizontal scrolling. While at least one task is running, the **Active** tab SHALL show a live indicator beside its count. Each tab SHALL be at least 40 pixels tall and SHALL show a visible focus ring when focused from the keyboard. The tab bar SHALL look the same whatever the operating system's colour-scheme preference.
 
 #### Scenario: Selected tab is marked
 - **WHEN** a user views the tasks view with the Syncs tab selected
@@ -1134,7 +1266,7 @@ The tasks view's tab bar SHALL make each tab look clickable and SHALL make the s
 
 #### Scenario: Wide screen
 - **WHEN** the tasks view is shown on a wide desktop screen
-- **THEN** the view is centred at a readable width, and the tab bar's rule and the task list share the same left and right edges
+- **THEN** the view is left-aligned at a readable width, its left edge matching the other views' content, and the tab bar's rule and the task list share the same left and right edges
 
 #### Scenario: Narrow screen
 - **WHEN** the tasks view is shown on a phone-width screen
@@ -1265,3 +1397,1195 @@ The edit playlist dialog SHALL be titled "Edit <playlist name> settings" and sho
 #### Scenario: Save fails
 - **WHEN** saving the interval fails
 - **THEN** the dialog stays open, shows the error, and the playlist keeps its previous interval
+
+### Requirement: Tasks View Describes Subtitle Fetches
+The tasks view SHALL describe a subtitle fetch task in plain language, naming the video whose subtitles are being fetched and the playlist or channel it belongs to, and SHALL list it with the download tasks, the same way it describes and lists a thumbnail fetch task.
+
+#### Scenario: Subtitle fetch task with resolvable context
+- **WHEN** the tasks view lists a subtitle fetch task whose video title and playlist or channel name were resolved
+- **THEN** the task is described as fetching the subtitles of that video in that playlist or channel, under the downloads tab
+
+#### Scenario: Subtitle fetch task whose video can no longer be found
+- **WHEN** the tasks view lists a subtitle fetch task whose video title could not be resolved
+- **THEN** the task is still described as a subtitle fetch, using a generic placeholder in place of the missing names
+
+### Requirement: Tasks View Describes Chapter Fetches
+The tasks view SHALL describe a chapters fetch task in plain language, naming the video whose chapters are being fetched and the playlist or channel it belongs to, and SHALL list it with the download tasks, the same way it describes and lists a subtitle fetch task.
+
+#### Scenario: Chapters fetch task with resolvable context
+- **WHEN** the tasks view lists a chapters fetch task whose video title and playlist or channel name were resolved
+- **THEN** the task is described as fetching the chapters of that video in that playlist or channel, under the downloads tab
+
+#### Scenario: Chapters fetch task whose video can no longer be found
+- **WHEN** the tasks view lists a chapters fetch task whose video title could not be resolved
+- **THEN** the task is still described as a chapters fetch, using a generic placeholder in place of the missing names
+
+### Requirement: Player Offers Subtitles
+When the selected video in a playlist or channel detail view is downloaded and has a subtitle language, the video player SHALL offer its subtitles as a captions track, loaded from that video's subtitles endpoint and labelled with the language's name in English (e.g. "English" for `en`, "Spanish" for `es`), falling back to the language code when no name is known. The track SHALL be off when playback starts. The user SHALL turn it on and off through the player's native captions control. When the selected video has no subtitle language, the player SHALL offer no captions track.
+
+#### Scenario: Video with subtitles
+- **WHEN** a user selects a downloaded video whose subtitle language is `en`
+- **THEN** the player offers an "English" captions track, and no captions are shown until the user turns them on
+
+#### Scenario: Turning captions on
+- **WHEN** a user turns on the "English" captions track through the player's captions control
+- **THEN** the video's subtitles are shown in sync with playback
+
+#### Scenario: Video without subtitles
+- **WHEN** a user selects a downloaded video with no subtitle language
+- **THEN** the player offers no captions track
+
+#### Scenario: Unknown language code
+- **WHEN** a user selects a downloaded video whose subtitle language code has no known name
+- **THEN** the captions track is labelled with the language code
+
+### Requirement: Sidebar Category Ordering
+The sidebar's Categories section SHALL list categories with an unwatched count above 0 first, ordered by unwatched count from highest to lowest, with equal counts ordered by name, ignoring case. The categories with no unwatched videos SHALL follow, ordered by name, ignoring case.
+
+#### Scenario: Unread categories first, most unread first
+- **WHEN** the categories are "Alpha" (0 unwatched), "Bravo" (4 unwatched), "Charlie" (12 unwatched) and "Delta" (0 unwatched)
+- **THEN** the Categories section lists them in the order "Charlie", "Bravo", "Alpha", "Delta"
+
+#### Scenario: Equal counts by name
+- **WHEN** "sports" and "Cooking" both have 4 unwatched videos
+- **THEN** "Cooking" is listed before "sports"
+
+### Requirement: Category Badges Stay Current
+The sidebar's category badges, their order and the folded Categories total SHALL update without a manual page reload, and promptly after any action in the application that changes a channel's or playlist's unwatched videos (the same actions that update channel badges promptly), after marking a category watched, and after changing a category's members.
+
+#### Scenario: Watching a video of a category
+- **WHEN** a user finishes watching an unwatched video of a channel in "Chess"
+- **THEN** the "Chess" badge decreases by one promptly without a page reload
+
+#### Scenario: Adding a member
+- **WHEN** a user adds a channel with 3 unwatched videos to the empty category "Cooking"
+- **THEN** the "Cooking" row promptly shows a badge with 3
+
+### Requirement: Sidebar Category Row Actions
+Each category row SHALL provide a menu control, shown under the same conditions as the channel and playlist rows' menu control in "Sidebar Row Menu", offering "Edit settings", which navigates to that category's view with the category settings dialog open, and "Delete", which deletes the category after the user confirms. The confirmation SHALL state how many channels and playlists the category holds and that none of them, nor any video, will be deleted. Deleting the category whose view is open SHALL return the user to the home view.
+
+#### Scenario: Managing sources from the row menu
+- **WHEN** a user chooses "Edit settings" from the "Chess" row menu
+- **THEN** the "Chess" category view opens with the category settings dialog open
+
+#### Scenario: Deleting from the row menu
+- **WHEN** a user chooses "Delete" from the menu of "Chess", which holds 4 channels and playlists
+- **THEN** a confirmation states that "Chess" holds 4 channels and playlists and that none of them, nor any video, will be deleted
+- **AND** confirming deletes the category and removes its row
+
+#### Scenario: Deleting the open category
+- **WHEN** a user deletes the category whose view is open
+- **THEN** the application navigates to the home view
+
+#### Scenario: Menu control on hover
+- **WHEN** a user with a mouse hovers the "Chess" row
+- **THEN** its menu control becomes visible
+
+### Requirement: Add Category Dialog
+The "Add category" control SHALL open the category dialog, as "Category Settings Dialog" describes, titled "Add category", with an empty name, no sources and the palette color used by the fewest categories preselected (the earliest in palette order on a tie). Its save control SHALL read "Create", SHALL be possible once the name is not blank, and SHALL create the category with the chosen color, the text in "AI prompt" while it shows, and the pressed chips, in one request. On success, the dialog SHALL close and the application SHALL navigate to the new category's view. When creation fails (including a name already taken), the dialog SHALL stay open, keep everything entered and show the error. Dismissing it with anything entered SHALL ask to discard it first, saying "This category won't be created.". On viewports narrower than the desktop breakpoint, activating "Add category" SHALL close the sidebar before the dialog is shown.
+
+#### Scenario: Creating a category
+- **WHEN** a user activates "Add category", enters "Chess" and creates it
+- **THEN** the dialog closes and the "Chess" category view opens, with no dialog open
+
+#### Scenario: Next free color preselected
+- **WHEN** a user opens "Add category" and the existing categories are colored Amber and Red
+- **THEN** "Orange" is preselected
+
+#### Scenario: Creating with a chosen color
+- **WHEN** a user enters "Chess", chooses "Violet" and creates it
+- **THEN** "Chess" is created with the color "#8b5cf6"
+
+#### Scenario: Creating with everything in one go
+- **WHEN** AI, categories and categorization are on and a user enters "Chess", writes an AI prompt, presses the chip "Hikaru" and creates it
+- **THEN** one request creates "Chess" with that prompt and "Hikaru" as its source
+
+#### Scenario: Creating without AI
+- **WHEN** categorization is off and a user enters "Chess", presses a chip and creates it
+- **THEN** there is no "AI prompt" field and "Chess" is created with that source and no AI prompt
+
+#### Scenario: Discarding a new category
+- **WHEN** a user enters "Chess" and cancels
+- **THEN** the user is asked to discard it, and confirming closes the dialog and creates nothing
+
+#### Scenario: Cancelling an untouched dialog
+- **WHEN** a user opens "Add category" and cancels without entering anything
+- **THEN** the dialog closes without asking
+
+#### Scenario: Blank name
+- **WHEN** the name field is empty or blank
+- **THEN** the create action is disabled
+
+#### Scenario: Name already taken
+- **WHEN** a user creates a category with a name another category already has
+- **THEN** the dialog stays open and says the name is already taken
+
+### Requirement: Category View
+Each category SHALL have a view at an address of its own with a header and its videos as a grid of the same cards as the home view, each YouTube video once, newest sync first. Activating a card SHALL open the video within the category, as described in "Category Playback", instead of in its channel's or playlist's view. The header SHALL be tinted with the soft tint of the category's color and SHALL show the category's name, a summary of its number of sources, its number of videos and, when above 0, its number of unwatched videos, and the same actions layout as the channel and playlist views' page header, offering "Edit settings", which opens the category settings dialog, "Mark all watched" (only when the category has sources), which marks every downloaded video of the category watched after the confirmation described in "Confirm Bulk Mark Watched", and "Delete", which deletes the category after the same confirmation as the sidebar row's "Delete" and then navigates to the home view; at or above the desktop breakpoint "Delete" SHALL be in the "More actions" menu as on the channel and playlist views. When the category is known from the categories list, the header SHALL show its name and tint at once, before its videos load, with a placeholder in place of the summary; the videos SHALL show as placeholders as described in "Loading Placeholders" until they load. A category with no sources SHALL say so and offer a control that opens the category settings dialog. A category with sources but without downloaded videos SHALL say it has no videos yet. When the category does not exist, the view SHALL say it was not found.
+
+#### Scenario: Category videos
+- **WHEN** a user opens the "Chess" view, which holds 2 sources with 14 downloaded videos, 3 of them unwatched
+- **THEN** the view shows "Chess", the summary "2 sources · 14 videos · 3 unwatched", and the videos as cards, newest sync first
+
+#### Scenario: Card opens the video in the category
+- **WHEN** a user activates a video card on the "Chess" view
+- **THEN** the application stays on the "Chess" view and plays that video, as described in "Category Playback"
+
+#### Scenario: Header tinted
+- **WHEN** a user opens the "Chess" view and "Chess" is colored "#0ea5e9"
+- **THEN** the header's background is the soft tint of that color's hue
+
+#### Scenario: Header while loading
+- **WHEN** a user opens the "Chess" view from the sidebar and its videos are still loading
+- **THEN** the header already shows "Chess" with its tint and actions, a placeholder in place of the summary, and placeholder cards below
+
+#### Scenario: Changing the color
+- **WHEN** a user chooses "Edit settings" on the "Chess" view, chooses "Violet" and saves
+- **THEN** "Chess" is saved with the color "#8b5cf6", and the header, the sidebar dot and the home chips of its videos show it
+
+#### Scenario: No separate color action
+- **WHEN** a user opens the header actions of the "Chess" view
+- **THEN** there is no "Change color" action
+
+#### Scenario: Mark all watched
+- **WHEN** a user chooses "Mark all watched" from a category view's header and confirms
+- **THEN** every card shows as watched, and the category's sidebar count disappears promptly
+
+#### Scenario: Deleting from the category view
+- **WHEN** a user chooses "Delete" from the "Chess" view's header and confirms
+- **THEN** the category is deleted and the application navigates to the home view
+
+#### Scenario: Empty category
+- **WHEN** a user opens a category with no sources
+- **THEN** the view says it holds no channels or playlists yet and offers a control that opens the category settings dialog
+
+#### Scenario: Unknown category
+- **WHEN** a user opens the view of a category that does not exist
+- **THEN** the view says the category was not found
+
+### Requirement: Category Playback
+A category view SHALL play its videos like a playlist view. Activating a card on the category view SHALL open that video within the category, at an address that identifies both the category and the video, with the video selected and autoplaying as for a deep-linked video. In this mode the view SHALL keep the category's header and SHALL show the player and the selected video's detail, the same as a channel or playlist view. The category's videos, in the order of the category's grid, SHALL be the video list beside them. Selecting a video in that list SHALL play it without leaving the category. Each video SHALL play from, offer the subtitles of, and record its watch progress against the channel or playlist the category lists it from. A video listed from a channel SHALL show that channel's avatar in its detail, linking to the channel. Opening the category without a video, for example from the sidebar, SHALL show the grid.
+
+#### Scenario: Opening a card plays it in the category
+- **WHEN** a user activates the card of the video "Rook endings", listed from the playlist "Endgames", on the "Chess" view
+- **THEN** the address identifies the "Chess" category and "Rook endings", the player autoplays "Rook endings" from the playlist "Endgames", and the list beside it shows the videos of "Chess"
+
+#### Scenario: Queue switches across sources
+- **WHEN** a user playing "Rook endings" in the "Chess" view selects "Blitz", listed from the channel "Hikaru", in the list beside the player
+- **THEN** the player plays "Blitz" from the channel "Hikaru", the view stays on "Chess", and the detail shows Hikaru's avatar linking to the channel
+
+#### Scenario: Progress recorded against the source
+- **WHEN** a user watches a video in a category view past the watched threshold
+- **THEN** the video is watched in its channel or playlist and in the category, and the badges update as when watched from its source's view
+
+#### Scenario: Back to the grid
+- **WHEN** a user playing a video in the "Chess" view activates "Chess" in the sidebar
+- **THEN** the view shows the grid of the category's videos
+
+### Requirement: Rename Category In Place
+The category view's name SHALL be shown as a heading, not as a field, next to an icon control with the accessible name and tooltip "Rename". Activating it SHALL replace the heading with a field holding the name, focused and selected. Pressing Enter or moving focus away SHALL save the name; pressing Escape SHALL cancel and show the saved name. A blank name or a name another category already has SHALL be rejected with a message, keeping the field open with the typed name until the user saves a valid name or cancels. An unchanged name SHALL close the field without saving.
+
+#### Scenario: Renaming
+- **WHEN** a user activates "Rename" on the "Chess" view, types "Board games" and presses Enter
+- **THEN** the heading shows "Board games" and so does the sidebar row
+
+#### Scenario: Cancelling a rename
+- **WHEN** a user activates "Rename", changes the name and presses Escape
+- **THEN** the heading shows the saved name and nothing is saved
+
+#### Scenario: Rename rejected
+- **WHEN** a user renames "Chess" to the name of another category
+- **THEN** the view says the name is already taken and the category keeps its saved name
+
+### Requirement: Category Settings Dialog
+The category dialog SHALL be titled "Edit <name> settings" when editing and SHALL show, in this order, a "Name" field, focused when the dialog opens, a "Color" category color picker, the AI prompt described below, and every tracked channel and playlist as a chip, channels under a "Channels" group and playlists under a "Playlists" group, each group ordered by name ignoring case. Channel chips SHALL show the channel's avatar; playlist chips a playlist icon. Each chip SHALL be a toggle whose pressed state means the source is in the category, shown with a check mark and a tinted fill, while a source not in it is shown outlined with a plus mark. Toggling a chip SHALL NOT change the order of the chips. A search field SHALL filter the chips by name ignoring case, and pressing Enter in it while exactly one chip matches SHALL toggle that chip; Enter in it SHALL never save. Pressing Enter in "Name" SHALL save. Filter controls "All", "In <name>" and "Not in <name>" ("In this category" and "Not in this category" while creating), the last two showing how many sources they hold, SHALL narrow the chips by state. A group with no chip left to show SHALL be hidden. While AI, categories and categorization are all on, the dialog SHALL show, above the search field, an "AI prompt" multi-line text field of 6 rows prefilled with the category's AI prompt, described by the hint "Describe the videos that belong in this category." and with the guide "Category Prompt Guide" describes; otherwise it SHALL NOT show, and the saved prompt SHALL be kept. Editing the name or color, toggling a chip or editing the prompt SHALL only stage changes: the dialog SHALL summarise the sources staged (such as "+2 added, −1 removed"), its "Save" control SHALL be disabled until something is staged and while the name is blank, and saving SHALL send only what changed, the name, color and AI prompt in one request, making the category's AI prompt the text in the field (blank removes it) and its sources exactly the pressed chips, then close the dialog. The AI prompt SHALL be sent only while its field shows and differs from what it started from, so a prompt changed elsewhere while the dialog is open is neither staged nor overwritten. The dialog SHALL set no length limit of its own: a prompt the daemon rejects SHALL show the daemon's message and keep the text. When saving fails, the dialog SHALL stay open, keep the staged changes and say why. When the name, color or AI prompt are saved but the sources fail, the error SHALL read "Your other changes were saved, but the sources weren't: <reason>", saving again SHALL send only the sources, and discarding SHALL say "Your other changes are already saved. Your changes to the sources in <name> won't be saved." Cancelling or dismissing the dialog with staged changes SHALL ask to discard them first. With no channel or playlist tracked, the dialog SHALL say so. Chips SHALL be reachable with the arrow keys within a group. On viewports narrower than the desktop breakpoint the dialog SHALL fill the screen; the name, color, AI prompt and chips SHALL scroll together, the search and filter controls SHALL stick to the top once scrolled to, and the save controls SHALL stay visible. At every viewport size the save controls SHALL stay visible, and the AI prompt field SHALL NOT be resizable.
+
+#### Scenario: Name and color prefilled
+- **WHEN** a user opens the dialog of "Chess", colored Violet
+- **THEN** "Name" holds "Chess" and is focused, and "Violet" is shown checked
+
+#### Scenario: Saving the name and color
+- **WHEN** a user changes the name to "Board games", chooses "Teal" and saves
+- **THEN** one update with the name and the color is sent, the members are not, and the dialog closes
+
+#### Scenario: Blank name while editing
+- **WHEN** a user empties "Name"
+- **THEN** "Save" is disabled
+
+#### Scenario: Name already taken while editing
+- **WHEN** a user saves a name another category already has
+- **THEN** the dialog stays open with everything entered and says the name is already taken, and the sources are not sent
+
+#### Scenario: Enter in the search with several matches
+- **WHEN** the search leaves several chips and the user presses Enter
+- **THEN** nothing is toggled or saved
+
+#### Scenario: Chips show membership
+- **WHEN** a user opens the dialog of "Chess", which holds the channel "Hikaru", and "GothamChess" and the playlist "Endgame course" are also tracked
+- **THEN** "Channels" shows "GothamChess" unpressed and "Hikaru" pressed, and "Playlists" shows "Endgame course" unpressed
+
+#### Scenario: Staging and saving
+- **WHEN** a user presses "GothamChess" and "Endgame course", unpresses "Hikaru" and saves
+- **THEN** the summary read "+2 added, −1 removed" before saving, and afterwards "Chess" holds exactly "GothamChess" and "Endgame course"
+
+#### Scenario: Order stays put
+- **WHEN** a user toggles a chip
+- **THEN** every chip keeps its place
+
+#### Scenario: Searching
+- **WHEN** a user types "ver" in the search field
+- **THEN** only chips whose name contains "ver", ignoring case, are shown
+
+#### Scenario: Enter toggles the only match
+- **WHEN** the search leaves exactly one chip and the user presses Enter
+- **THEN** that chip is toggled and the search field keeps focus
+
+#### Scenario: Filtering by state
+- **WHEN** a user chooses "In Chess"
+- **THEN** only pressed chips are shown, staged ones included
+
+#### Scenario: Nothing to save
+- **WHEN** nothing is changed, or every change has been undone
+- **THEN** "Save" is disabled
+
+#### Scenario: AI prompt shown
+- **WHEN** AI, categories and categorization are on and a user opens the dialog of "Chess", whose AI prompt is "Chess games"
+- **THEN** "AI prompt" holds "Chess games"
+
+#### Scenario: AI prompt hidden
+- **WHEN** AI or categorization is off and a user opens the dialog of "Chess"
+- **THEN** there is no "AI prompt" field and saving sources leaves its AI prompt as it was
+
+#### Scenario: Saving only the prompt
+- **WHEN** a user changes "AI prompt" without toggling a chip and saves
+- **THEN** only the category's `ai_prompt` is sent, its members are not, and the dialog closes
+
+#### Scenario: Saving the prompt and sources
+- **WHEN** a user changes "AI prompt", presses a chip and saves
+- **THEN** both the prompt and the members are saved and the dialog closes
+
+#### Scenario: Removing the prompt
+- **WHEN** a user empties "AI prompt" of a category that has one and saves
+- **THEN** the category has no AI prompt
+
+#### Scenario: Prompt changed elsewhere
+- **WHEN** the dialog of "Chess" is open, its AI prompt changes elsewhere and the user saves only a chip change
+- **THEN** only the members are sent and the prompt saved elsewhere is kept
+
+#### Scenario: Prompt too long
+- **WHEN** a user pastes 2500 characters into "AI prompt" and saves
+- **THEN** all 2500 are sent, and the dialog stays open with the text and shows the daemon's message
+
+#### Scenario: Prompt saved but sources failed
+- **WHEN** a user changes "AI prompt", presses a chip and saves, and only the sources fail
+- **THEN** the dialog says "Your other changes were saved, but the sources weren't: <reason>", and saving again sends only the members
+
+#### Scenario: Discarding after the prompt was saved
+- **WHEN** the prompt was saved, the sources failed and the user cancels
+- **THEN** the dialog asks to discard, saying "Your other changes are already saved. Your changes to the sources in Chess won't be saved."
+
+#### Scenario: Discarding staged changes
+- **WHEN** a user with staged changes cancels the dialog
+- **THEN** the user is asked to discard them, and confirming closes the dialog without saving
+
+#### Scenario: Save fails
+- **WHEN** saving fails
+- **THEN** the dialog stays open with the staged changes and says why
+
+#### Scenario: Nothing tracked
+- **WHEN** a user opens the dialog with no channel or playlist tracked
+- **THEN** the dialog says there are no channels or playlists to add yet
+
+### Requirement: Categories Field In Add And Edit Dialogs
+The add channel, add playlist, edit channel and edit playlist dialogs SHALL offer a "Categories" field showing every existing category as a toggle chip, ordered by name ignoring case. A chip's pressed state SHALL mean the source is chosen for that category. A chosen chip SHALL be filled with the soft tint of its category's hue, show its name in the dark shade of that hue, as the home card chips do, and show a check mark. A chip not chosen SHALL be outlined and show a dot in its category's color. Toggling a chip SHALL NOT change the order of the chips. The field SHALL also offer a "New category" text field with an "Add" control. Adding the typed name SHALL create a category with that name at once and choose it, or, when a category already has that name ignoring case, SHALL choose that category without creating one. Pressing Enter in the "New category" field SHALL add the typed name and SHALL NOT submit the dialog. Saving an add dialog SHALL track the source and then make it a member of exactly the chosen categories. Saving an edit dialog SHALL make the source a member of exactly the chosen categories, and a change of categories alone SHALL count as a change to save. When the source is saved but its categories cannot be, the dialog SHALL say so and keep the source saved.
+
+#### Scenario: Every category shown
+- **WHEN** a user opens the add channel dialog and the categories "Streams", "Chess" and "Science" exist
+- **THEN** the Categories field shows the chips "Chess", "Science" and "Streams", none pressed, without typing anything
+
+#### Scenario: Chosen chips in their category's color
+- **WHEN** a user presses the "Chess" chip and "Chess" is colored "#0ea5e9"
+- **THEN** the chip is pressed, filled with the soft tint of that color's hue, its name in the dark shade of that hue, and shows a check mark
+
+#### Scenario: Choosing categories when adding a channel
+- **WHEN** a user adds a channel with the "Chess" and "Streams" chips pressed
+- **THEN** the channel is tracked and is a member of "Chess" and "Streams"
+
+#### Scenario: Creating a category from the field
+- **WHEN** a user types "Speedcubing", which matches no category, in "New category" and activates "Add"
+- **THEN** the category "Speedcubing" exists and its chip is shown pressed
+
+#### Scenario: Typing an existing name
+- **WHEN** a user types "chess" in "New category" and presses Enter while "Chess" exists
+- **THEN** the "Chess" chip is pressed, no category is created and the dialog is not submitted
+
+#### Scenario: Editing a source's categories
+- **WHEN** a user unpresses the "Chess" chip in a channel's edit dialog and saves
+- **THEN** the channel is no longer a member of "Chess" and stays in its other categories
+
+#### Scenario: Categories are the only change
+- **WHEN** a user changes only the Categories field in an edit dialog
+- **THEN** the dialog can be saved and saving updates the categories
+
+#### Scenario: Categories fail to save
+- **WHEN** a user adds a channel with categories chosen and the channel is tracked but its categories cannot be saved
+- **THEN** the dialog says the channel was added but its categories were not saved
+
+### Requirement: Unwatched Badge On Sidebar Playlists
+Each playlist row in the sidebar SHALL display a badge with the playlist's unwatched video count when that count is above 0 and not hidden, and no badge otherwise. After an action in the application that changes a playlist's unwatched count or its hide setting, the badge and the playlist's sidebar position SHALL update promptly, without waiting for the periodic refresh. The same actions as for channel badges apply, plus marking the playlist watched and hiding or showing its count.
+
+#### Scenario: Playlist with unwatched videos
+- **WHEN** a playlist has 3 downloaded, unwatched videos and its count is not hidden
+- **THEN** its sidebar row displays a badge showing 3
+
+#### Scenario: Playlist with nothing unwatched
+- **WHEN** a playlist has no downloaded, unwatched videos
+- **THEN** its sidebar row displays no badge
+
+#### Scenario: Hidden count shows no badge
+- **WHEN** a playlist has 3 downloaded, unwatched videos and its count is hidden
+- **THEN** its sidebar row displays no badge
+
+#### Scenario: Playlist badge updates after watching
+- **WHEN** a user finishes watching one of a playlist's unwatched videos, from the playlist's view or from a channel that also tracks it
+- **THEN** the playlist's badge count decreases promptly without a page reload
+
+#### Scenario: Playlist badge updates after marking watched
+- **WHEN** a user marks a playlist watched from its sidebar row or its detail view
+- **THEN** the playlist's badge disappears promptly and the playlist moves into the caught-up group
+
+### Requirement: Hide Playlist Unwatched Count
+Each playlist's sidebar row menu and page header SHALL offer an action labeled "Hide unwatched count" when the playlist's count is shown, or "Show unwatched count" when it is hidden. The action SHALL change that setting without confirmation. When changing it fails, the application SHALL tell the user and leave the playlist as it was. Channel menus and page headers SHALL offer neither action.
+
+#### Scenario: Hiding a playlist's count from the sidebar
+- **WHEN** a user chooses "Hide unwatched count" from a playlist row's menu
+- **THEN** the row's badge disappears, the playlist sorts among the caught-up playlists, and the menu now offers "Show unwatched count"
+
+#### Scenario: Showing a playlist's count from its page header
+- **WHEN** a user chooses "Show unwatched count" from the page header of a playlist whose count is hidden
+- **THEN** the playlist's sidebar badge shows its unwatched count, and the header now offers "Hide unwatched count"
+
+#### Scenario: Changing the setting fails
+- **WHEN** the request to change a playlist's hide setting fails
+- **THEN** the application tells the user, and the playlist's badge and header actions stay as they were
+
+#### Scenario: Channel menus have no hide count action
+- **WHEN** a user opens a channel row's menu or a channel's page header
+- **THEN** it offers neither "Hide unwatched count" nor "Show unwatched count"
+
+### Requirement: Sidebar Row Menu
+Each channel or playlist sidebar row SHALL have a menu control offering sync, mark watched, "Edit settings" (opening that entry's edit dialog) and delete. On devices with a fine pointer the control SHALL be shown while the row is hovered, while it or the row has keyboard focus, while its menu is open, and on the active row; otherwise it SHALL keep its space but not be visible. On touch devices it SHALL always be visible. Playlist rows SHALL also offer the home exclusion action ("Exclude from home"/"Include in home", without confirmation, refreshing home) and the hide/show unwatched count action. The unwatched count SHALL sit at the row's trailing edge next to the menu control. Deleting SHALL need confirmation, and mark watched SHALL ask for it as described in "Confirm Bulk Mark Watched"; no other action SHALL.
+
+#### Scenario: Badge sits next to the menu control
+- **WHEN** a row displays an unwatched count
+- **THEN** the count sits at the row's trailing edge, next to the menu control's space, with no other blank space between them
+
+#### Scenario: Menu control on hover
+- **WHEN** a user with a mouse hovers a channel row that is not active
+- **THEN** the row's menu control becomes visible, and it is hidden again when the pointer leaves
+
+#### Scenario: Menu control on keyboard focus
+- **WHEN** a user moves keyboard focus onto a row's menu control
+- **THEN** the control is visible
+
+#### Scenario: Marking watched takes effect without confirmation
+- **WHEN** a user chooses the mark-watched action from the menu of a channel or playlist row with 1 or no unwatched videos
+- **THEN** it takes effect without a confirmation prompt
+
+#### Scenario: Marking watched asks for confirmation
+- **WHEN** a user chooses the mark-watched action from the menu of a channel or playlist row with 2 or more unwatched videos
+- **THEN** the application asks for confirmation before marking it watched
+
+#### Scenario: Changing the home setting fails
+- **WHEN** the request to exclude a playlist from home or include it again fails
+- **THEN** the application tells the user and leaves the playlist as it was
+
+#### Scenario: Opening a row's menu on a touch device
+- **WHEN** a user on a touch device taps a sidebar row's menu control, which is always visible there
+- **THEN** a menu opens listing the row's actions, without navigating to the row's detail view
+
+#### Scenario: Syncing from the sidebar
+- **WHEN** a user chooses the sync action from a sidebar row's menu
+- **THEN** the application triggers a reconcile for that channel or playlist
+
+#### Scenario: Deleting from the sidebar requires confirmation
+- **WHEN** a user chooses the delete action from a sidebar row's menu
+- **THEN** the application prompts for confirmation before deleting that channel or playlist
+
+#### Scenario: Deleting the currently viewed entry
+- **WHEN** a user confirms deletion of the channel or playlist whose detail view is currently open
+- **THEN** the application navigates to the home view
+
+#### Scenario: Marking a channel watched from the sidebar
+- **WHEN** a user chooses the mark-watched action from a channel row's menu and confirms
+- **THEN** the application marks that channel watched, and its unwatched count disappears
+
+#### Scenario: Marking a playlist watched from the sidebar
+- **WHEN** a user chooses the mark-watched action from a playlist row's menu and confirms
+- **THEN** the application marks that playlist watched, its unwatched count disappears, and the counts of channels sharing its videos drop accordingly
+
+#### Scenario: Editing a channel's settings from the sidebar
+- **WHEN** a user chooses "Edit settings" from a channel row's menu
+- **THEN** the edit channel dialog opens for that channel, and saving it behaves as when opened from the channel's page header
+
+#### Scenario: Editing a playlist's settings from the sidebar
+- **WHEN** a user chooses "Edit settings" from a playlist row's menu
+- **THEN** the edit playlist dialog opens for that playlist, and saving it behaves as when opened from the playlist's page header
+
+#### Scenario: Channel row menu order
+- **WHEN** a user opens a channel row's menu
+- **THEN** it offers, in order, sync, mark-watched, "Edit settings" and delete
+
+#### Scenario: Playlist row menu order
+- **WHEN** a user opens a playlist row's menu
+- **THEN** it offers, in order, sync, mark-watched, the exclude or include in home action, the hide or show unwatched count action, "Edit settings" and delete
+
+#### Scenario: Excluding a playlist from home from the sidebar
+- **WHEN** a user chooses "Exclude from home" from the menu of a playlist shown on home
+- **THEN** the playlist's videos leave the home view, and the row's menu now offers "Include in home"
+
+#### Scenario: Including a playlist in home from the sidebar
+- **WHEN** a user chooses "Include in home" from the menu of a playlist excluded from home
+- **THEN** the playlist's videos appear in the home view's sections they qualify for, and the row's menu now offers "Exclude from home"
+
+#### Scenario: Channel rows have no home exclusion action
+- **WHEN** a user opens a channel row's menu
+- **THEN** it offers neither "Exclude from home" nor "Include in home"
+
+### Requirement: Edit Dialogs Show The Location
+The edit playlist and edit channel dialogs SHALL show a "Location" line with the source's current storage path and a "Move…" control next to it. Activating "Move…" SHALL close the edit dialog without saving and open the move dialog for that source.
+
+#### Scenario: Location shown
+- **WHEN** a user opens the edit dialog of a playlist stored at `music/chill`
+- **THEN** the dialog shows "Location" with `music/chill` and a "Move…" control
+
+#### Scenario: Move unavailable while work is in progress
+- **WHEN** a user opens the edit dialog of a source listed with work in progress
+- **THEN** the "Move…" control is disabled and the dialog says "Downloads in progress — you can move it once they finish."
+
+#### Scenario: Opening the move dialog
+- **WHEN** a user activates "Move…" in a channel's edit dialog
+- **THEN** the edit dialog closes, nothing is saved, and the move dialog for that channel opens
+
+### Requirement: Move Dialog
+The move dialog SHALL be titled "Move <source name>" and pick the destination with the same "Save to" list, parent folder browser and folder name controls as the add dialogs, prefilled with the source's current parent and folder name, showing the resulting destination. Saving SHALL send the destination to the move endpoint; on success it SHALL close and refresh the library.
+
+#### Scenario: Prefilled with the current location
+- **WHEN** a user opens the move dialog for a playlist stored at `music/chill`
+- **THEN** the parent folder is `music`, the folder name is `chill`, and the destination shown is `music/chill`
+
+#### Scenario: Moving to a new folder
+- **WHEN** a user browses to `archive`, names the folder `chill`, and saves
+- **THEN** the application requests a move to `archive/chill`, closes the dialog, and the library shows the source at its new path
+
+#### Scenario: Unchanged destination
+- **WHEN** the destination equals the source's current path
+- **THEN** the save control is disabled
+
+#### Scenario: Folder name `.` or `..`
+- **WHEN** a user names the folder `.` or `..`, or creates a new folder with either name in the folder browser
+- **THEN** the dialog shows an error and the save control is disabled
+
+#### Scenario: Move rejected
+- **WHEN** the move is rejected, e.g. because the source still has downloads in progress or the destination is in use
+- **THEN** the dialog stays open and shows the server's error message, and the source keeps its location
+
+#### Scenario: Cancelling
+- **WHEN** a user cancels the move dialog
+- **THEN** no request is sent
+
+### Requirement: Watch Progress On Video Thumbnails
+Every video thumbnail in the playlist detail, channel detail, category and home views SHALL show the video as in progress when it is unwatched, its saved playback position is greater than 0 and its duration is known. An in-progress thumbnail SHALL show a progress bar along its bottom edge, proportional to the saved position over the duration, and SHALL show the time left instead of the video's duration. The time left is the duration minus the saved position: below one minute it SHALL read `<1m left`; below one hour, `<minutes>m left` with the minutes rounded down; from one hour, `<hours>h <minutes>m left`, or `<hours>h left` when the minutes are 0. The duration badge and the watched tick SHALL NOT overlap the progress bar. A thumbnail that is not in progress SHALL show no progress bar and SHALL show the video's duration as before.
+
+#### Scenario: In-progress video in a channel or playlist list
+- **WHEN** an unwatched video with a saved position of 120 seconds and a duration of 600 seconds is listed in a channel or playlist view
+- **THEN** its thumbnail shows a progress bar at 20% and the badge reads `8m left`
+
+#### Scenario: In-progress video on a home or category card
+- **WHEN** an unwatched video with a saved position greater than 0 and a known duration is shown in any home section or in a category view
+- **THEN** its card's thumbnail shows a progress bar and the time left
+
+#### Scenario: Time left from one hour
+- **WHEN** an in-progress video has 3,900 seconds left
+- **THEN** its badge reads `1h 5m left`
+
+#### Scenario: Time left in whole hours
+- **WHEN** an in-progress video has 3,600 seconds left
+- **THEN** its badge reads `1h left`
+
+#### Scenario: Under a minute left
+- **WHEN** an in-progress video has 45 seconds left
+- **THEN** its badge reads `<1m left`
+
+#### Scenario: Unstarted video
+- **WHEN** an unwatched video with a saved position of 0 is listed
+- **THEN** its thumbnail shows no progress bar and its badge shows the video's duration
+
+#### Scenario: Watched video
+- **WHEN** a watched video is listed
+- **THEN** its thumbnail shows no progress bar and its badge shows the video's duration
+
+#### Scenario: Unknown duration
+- **WHEN** an unwatched video with a saved position greater than 0 has no known duration
+- **THEN** its thumbnail shows no progress bar and no duration badge
+
+### Requirement: Watched Videos Are De-emphasized
+In the playlist detail, channel detail, category and home views, a watched video SHALL be shown de-emphasized: its thumbnail dimmed and its title in a muted color. The watched tick SHALL NOT be dimmed. On home and category cards, hovering a watched card SHALL show its thumbnail at full strength. In a channel or playlist video list, the selected video's title SHALL keep its selected highlight even when the video is watched. Unwatched videos, in progress or not, SHALL NOT be de-emphasized.
+
+#### Scenario: Watched video in a list
+- **WHEN** a watched video is listed in a channel or playlist view
+- **THEN** its thumbnail is dimmed and its title is muted, while its tick is shown at full strength
+
+#### Scenario: Watched card hovered
+- **WHEN** the user hovers a watched video's card in a home section or a category view
+- **THEN** its thumbnail is shown at full strength
+
+#### Scenario: Selected watched video
+- **WHEN** the selected video in a channel or playlist view is watched
+- **THEN** its title keeps the selected highlight
+
+#### Scenario: Unwatched video
+- **WHEN** an unwatched video is listed
+- **THEN** neither its thumbnail nor its title is de-emphasized
+
+### Requirement: Accessible Sidebar Section Lists
+Each sidebar section (Channels, Playlists, Categories) SHALL be exposed to assistive technology as a region named after its section heading, and its list of entries as a list named after that heading too.
+
+#### Scenario: Channels list is named
+- **WHEN** at least one channel is tracked and the Channels section is unfolded
+- **THEN** its entries are in a list whose accessible name is "Channels"
+
+#### Scenario: Empty section is a named region
+- **WHEN** no channel is tracked
+- **THEN** the "None tracked yet." message is inside a region whose accessible name is "Channels"
+
+### Requirement: Add Dialog Submit Errors Are Announced
+When creating a channel or playlist from the Add dialog fails, the dialog SHALL present the error message as an alert so assistive technology announces it.
+
+#### Scenario: Create fails
+- **WHEN** the server rejects a playlist created from the Add dialog
+- **THEN** the dialog shows the server's message in an element with the alert role
+
+### Requirement: Sidebar Categories List
+The sidebar SHALL show a "Categories" section above the Channels section listing every category, never trimmed, each row showing a dot in the category's color, the category's name and, when its unwatched count is above 0, that count. Selecting a row SHALL navigate to that category's view, and while the user is on it, its row SHALL be marked active.
+
+#### Scenario: Categories listed above channels
+- **WHEN** the categories "Chess" and "Sports" exist
+- **THEN** the sidebar shows a "Categories" section above "Channels" listing both
+
+#### Scenario: Color dot
+- **WHEN** the category "Chess" is colored "#0193bf"
+- **THEN** its row shows a "#0193bf" dot before its name
+
+#### Scenario: Every category shown
+- **WHEN** 25 categories exist and the Categories section is unfolded
+- **THEN** all 25 are listed, with no show-more control
+
+#### Scenario: Category badge
+- **WHEN** the category "Chess" has 12 unwatched videos and "Science" has none
+- **THEN** the "Chess" row shows the count 12 and the "Science" row shows no count
+
+#### Scenario: Opening a category
+- **WHEN** a user selects the "Chess" row
+- **THEN** the application navigates to the "Chess" category view and marks the row active
+
+#### Scenario: Search filters categories
+- **WHEN** the categories "Chess" and "Science" exist and a user types "sci" in the header search
+- **THEN** the search's Categories group lists only "Science", and the sidebar's Categories section still lists both
+
+### Requirement: Sidebar Categories Heading
+The Categories section's heading SHALL fold and unfold the section like the other sidebar sections. While folded, it SHALL show the unwatched total across all categories as a badge styled like the row badges, at its trailing edge, when that total is above 0, and SHALL be marked active while the user is on a category's view.
+
+#### Scenario: Folded categories total
+- **WHEN** the Categories section is folded and the unwatched total across categories is 16
+- **THEN** the heading shows an unwatched badge of 16
+
+#### Scenario: Folded heading marked active
+- **WHEN** the Categories section is folded and the user is on the "Chess" category view
+- **THEN** the Categories heading is marked active
+
+### Requirement: Sidebar Add Category Control
+While unfolded, the Categories section SHALL offer an "Add category" control: a full-width labelled row beneath the heading while no category exists, and no category rows; otherwise (categories exist, or are still loading) a compact "+" button at the heading's trailing edge, outside its fold toggle, with the accessible name and tooltip "Add category".
+
+#### Scenario: No categories yet
+- **WHEN** no category exists and the Categories section is unfolded
+- **THEN** the section shows its heading and a full-width "Add category" row, and no category rows
+
+#### Scenario: Adding from the heading once categories exist
+- **WHEN** at least one category exists and the Categories section is unfolded
+- **THEN** the heading shows a "+" control named "Add category", and no "Add category" row is shown
+
+### Requirement: Player Keyboard Seeking
+While a downloaded video is in a playlist or channel detail view's player, pressing ← or → without modifier keys SHALL seek it 10 seconds back or forward, kept within the video, instead of the browser's own step. Presses typed into a text field, or already handled by an open menu or dialog, SHALL NOT seek.
+
+#### Scenario: Seeking forward
+- **WHEN** a video is 30 seconds in and the user presses →
+- **THEN** it is 40 seconds in
+
+#### Scenario: Seeking back near the start
+- **WHEN** a video is 4 seconds in and the user presses ←
+- **THEN** it is at the start
+
+#### Scenario: Typing in a field
+- **WHEN** the focus is in the sidebar search field and the user presses ←
+- **THEN** the video does not seek
+
+### Requirement: Player Seek Feedback
+Each keyboard seek SHALL show feedback over the side of the player sought towards: chevrons pointing that way and the seconds sought, e.g. "10 seconds". Presses towards the same direction while it shows SHALL add up ("20 seconds" after two); a press the other way SHALL start again from 10. The feedback SHALL fade out on its own within a second of the last press.
+
+#### Scenario: Feedback for one press
+- **WHEN** the user presses → in the player
+- **THEN** the right side of the player shows forward chevrons and "10 seconds", which fade away shortly after
+
+#### Scenario: Presses add up
+- **WHEN** the user presses → twice in quick succession
+- **THEN** the feedback shows "20 seconds"
+
+#### Scenario: Changing direction
+- **WHEN** the feedback shows "20 seconds" forward and the user presses ←
+- **THEN** the left side of the player shows "10 seconds"
+
+### Requirement: Confirm Bulk Mark Watched
+Marking a channel, playlist or category watched, from its page header or its sidebar row menu, SHALL first ask the user to confirm when it has 2 or more unwatched videos, counting them also when its count is hidden. The confirmation SHALL state how many videos will be marked and that this cannot be undone in bulk, with a destructive-styled confirm action. Cancelling SHALL mark nothing. With 0 or 1 unwatched videos, it SHALL take effect without confirmation.
+
+#### Scenario: Confirming marks the entry watched
+- **WHEN** a user chooses "Mark all watched" for the channel "Foo", which has 23 unwatched videos
+- **THEN** a confirmation asks to mark 23 videos in "Foo" watched and says this cannot be undone in bulk
+- **AND** confirming marks the channel watched and closes the confirmation
+
+#### Scenario: Cancelling marks nothing
+- **WHEN** a user chooses "Mark all watched" for a playlist with 5 unwatched videos and cancels the confirmation
+- **THEN** no video is marked watched and the playlist's badge still shows 5
+
+#### Scenario: Marking a category asks for confirmation
+- **WHEN** a user chooses "Mark all watched" from the header of a category with 3 unwatched videos
+- **THEN** a confirmation asks to mark 3 videos in the category watched before anything is marked
+
+#### Scenario: One unwatched video needs no confirmation
+- **WHEN** a user chooses "Mark all watched" for a channel with exactly 1 unwatched video
+- **THEN** the channel is marked watched without a confirmation prompt
+
+#### Scenario: Nothing unwatched needs no confirmation
+- **WHEN** a user chooses "Mark all watched" for a playlist with no unwatched videos
+- **THEN** it takes effect without a confirmation prompt
+
+#### Scenario: Hidden count still confirms
+- **WHEN** a user chooses "Mark all watched" from the menu of a playlist whose unwatched count is hidden and which has 4 unwatched videos
+- **THEN** a confirmation asks to mark 4 videos watched
+
+#### Scenario: Marking fails
+- **WHEN** a user confirms marking an entry watched and the request fails
+- **THEN** the confirmation stays open, shows the error, and no video is marked watched
+
+### Requirement: Category Color Picker
+The category color picker SHALL offer the 10 palette colors as swatches in palette order, each a radio option named Amber, Orange, Red, Pink, Violet, Blue, Sky, Teal, Green and Slate, plus a "Custom" option with a hue slider. Every custom color SHALL have OKLCH lightness 0.65 and chroma 0.2 (chroma lowered as needed to fit sRGB), so only the hue changes. The chosen option SHALL be shown checked. "Custom" SHALL stay chosen, with its slider shown, until a swatch is chosen, even when the slider lands on a palette color. A color not in the palette SHALL show as "Custom" with the slider at its hue.
+
+#### Scenario: Choosing a swatch
+- **WHEN** a user chooses the "Sky" swatch
+- **THEN** "Sky" is shown checked and the chosen color is "#0ea5e9"
+
+#### Scenario: Clicking a swatch
+- **WHEN** a user clicks anywhere on the "Violet" swatch
+- **THEN** "Violet" is shown checked
+
+#### Scenario: Choosing a custom hue
+- **WHEN** a user chooses "Custom" and moves the hue slider
+- **THEN** the chosen color follows the hue at OKLCH lightness 0.65 and chroma 0.2
+
+#### Scenario: Choosing Custom from any swatch
+- **WHEN** the "Orange" or "Blue" swatch is checked and a user chooses "Custom"
+- **THEN** "Custom" is shown checked and the hue slider is shown
+
+#### Scenario: Custom hue matching a palette color
+- **WHEN** "Custom" is chosen and the user moves the slider to a hue whose color equals a palette color
+- **THEN** "Custom" stays checked and the slider stays shown
+
+#### Scenario: Swatch after Custom
+- **WHEN** "Custom" is chosen and the user chooses the "Teal" swatch
+- **THEN** "Teal" is shown checked and the hue slider is hidden
+
+#### Scenario: Existing custom color
+- **WHEN** the picker opens for a category whose color is not in the palette
+- **THEN** "Custom" is shown checked with the slider at that color's hue
+
+### Requirement: Home Category Sections
+Each category section on the home view SHALL be headed "More about <category name>", the heading linking to the category's view, and SHALL show a "See all" link to the same view on the heading's row. Its videos SHALL be shown as the same grid of cards as the other home sections, in the order the home response lists them.
+
+#### Scenario: Category section shown
+- **WHEN** the home response holds a category section for "Chess" with 2 videos
+- **THEN** the home view shows "More about Chess" below "Continue watching" and above "Quick watches", listing both videos
+
+#### Scenario: Heading opens the category
+- **WHEN** a user activates the "More about Chess" heading
+- **THEN** the application navigates to the "Chess" view
+
+#### Scenario: See all opens the category
+- **WHEN** a user activates "See all" in the "More about Chess" section
+- **THEN** the application navigates to the "Chess" view
+
+#### Scenario: Sections in response order
+- **WHEN** the home response holds category sections for "Science" then "Chess"
+- **THEN** "More about Science" is shown above "More about Chess"
+
+#### Scenario: No category sections
+- **WHEN** the home response holds no category sections
+- **THEN** no "More about" section is shown
+
+### Requirement: Preferences View
+The application SHALL have a "Preferences" view at `/preferences` showing a labelled switch per preference: "Enable categories" in a "Categories" group, and "Show continue watching", "Show categories", "Show quick watches" and "Show latest videos" in a "Home" group. Toggling a switch SHALL save the preferences at once and update the whole application.
+
+#### Scenario: Current values shown
+- **WHEN** a user opens the preferences view and only `home_show_latest` is off
+- **THEN** every switch is on except "Show latest videos"
+
+#### Scenario: Toggling saves
+- **WHEN** a user turns off "Show quick watches"
+- **THEN** the preferences are saved with `home_show_quick_watches` off and the switch stays off after reloading the page
+
+#### Scenario: Save fails
+- **WHEN** a user toggles a switch and the save fails
+- **THEN** the view shows the error and the switch returns to its saved value
+
+### Requirement: Preferences Help
+Each preference switch SHALL have a help control shown as a "?" icon with the accessible name "About <switch label>". Hovering, focusing or activating it SHALL show a tooltip saying what the preference does and what turning it off changes. The "Home" group SHALL say that its sections show in the listed order and that a video shows in one section only, so turning a section off can move its videos to a section below.
+
+#### Scenario: Explaining a preference
+- **WHEN** a user activates the "About Enable categories" control
+- **THEN** a tooltip explains that turning categories off hides every category control and section, and that categories and their videos are kept
+
+#### Scenario: Help on touch screens
+- **WHEN** a user taps the "About Show quick watches" control
+- **THEN** its tooltip shows
+
+### Requirement: Preferences Save Confirmation
+After a preference is saved, the preferences view SHALL show "Saved" next to its title for about 2 seconds. A failed save SHALL NOT show it.
+
+#### Scenario: Saved
+- **WHEN** a user turns off "Show quick watches" and the save succeeds
+- **THEN** "Saved" shows next to "Preferences" and is gone about 2 seconds later
+
+#### Scenario: Not saved
+- **WHEN** a user toggles a switch and the save fails
+- **THEN** "Saved" does not show
+
+### Requirement: Preferences View Width
+The preferences view SHALL be aligned to the left edge of the content area, like the other views, at the same maximum width as the tasks view.
+
+#### Scenario: Consistent width
+- **WHEN** a user opens the tasks view and then the preferences view on a wide screen
+- **THEN** both start at the left edge of the content area with the same maximum width
+
+### Requirement: Home Category Switch Needs Categories
+While "Enable categories" is off, the "Show categories" switch SHALL be disabled, keeping its saved value.
+
+#### Scenario: Categories off
+- **WHEN** a user turns off "Enable categories"
+- **THEN** "Show categories" is disabled and keeps its value
+
+### Requirement: No Category UI While Categories Are Off
+While `categories_enabled` is off, or the preferences are still loading, the application SHALL NOT show the sidebar Categories section, the Categories field in the add and edit channel and playlist dialogs, home category sections or home card category chips, and the header search SHALL NOT list a Categories group. When the preferences cannot be loaded, the application SHALL behave as with the defaults.
+
+#### Scenario: Sidebar without categories
+- **WHEN** categories are off and "Chess" exists
+- **THEN** the sidebar shows no Categories section and no "Add category" control
+
+#### Scenario: Dialogs without categories
+- **WHEN** categories are off and a user opens the add channel dialog
+- **THEN** the dialog shows no Categories field, and saving it changes no category
+
+#### Scenario: Home without categories
+- **WHEN** categories are off and a home video belongs to "Chess"
+- **THEN** home shows no "More about Chess" section and the video's card shows no category chip
+
+#### Scenario: Search without categories
+- **WHEN** categories are off, "Chess" exists and a user types "chess" in the header search
+- **THEN** the search shows no Categories group
+
+#### Scenario: Preferences fail to load
+- **WHEN** the preferences request fails
+- **THEN** the sidebar shows the Categories section as with the defaults
+
+### Requirement: Category View While Categories Are Off
+While `categories_enabled` is off, a category view address SHALL say "Categories are turned off." with a link to the preferences view instead of the category.
+
+#### Scenario: Category address while off
+- **WHEN** categories are off and a user opens the "Chess" view's address
+- **THEN** the view says "Categories are turned off." and links to the preferences view
+
+### Requirement: Home Without Latest Videos
+While `home_show_latest` is off, the home view SHALL NOT show "Latest videos". When no shown section has videos, the home view SHALL say "Nothing to show here." with a link to the preferences view.
+
+#### Scenario: Latest off with other sections
+- **WHEN** `home_show_latest` is off and "Continue watching" has videos
+- **THEN** the home view shows "Continue watching" and no "Latest videos" heading
+
+#### Scenario: Nothing to show
+- **WHEN** `home_show_latest` is off and every other section is empty or off
+- **THEN** the home view says "Nothing to show here." and links to the preferences view
+
+### Requirement: Preferences Saved One At A Time
+While a preference is being saved, every switch on the preferences view SHALL be disabled, so a second change is always based on the saved first one.
+
+#### Scenario: Toggling while a save is in flight
+- **WHEN** a user turns off "Show quick watches" and its save has not finished yet
+- **THEN** every preference switch is disabled until it finishes
+
+#### Scenario: Two changes in a row
+- **WHEN** a user turns off "Show quick watches" and, once saved, turns off "Show latest videos"
+- **THEN** both are saved off
+
+### Requirement: Home Reflects A Preferences Change At Once
+After a preference is saved, the home view SHALL NOT show sections from before the change, even when it was showing them earlier. While categories are off, the home view SHALL NOT show category sections, whatever home response it holds.
+
+#### Scenario: Back to home after turning categories off
+- **WHEN** home showed "More about Chess", and the user turns off "Enable categories" and goes back to home
+- **THEN** home shows no "More about Chess" section, not even briefly
+
+#### Scenario: Home videos reloaded on save
+- **WHEN** a user saves a preference while home's videos are cached but home is not shown
+- **THEN** the home videos are reloaded straight away
+
+### Requirement: Video Card Presentation
+Video cards on the home view and on a category's view SHALL be drawn without a frame and without a background: the thumbnail and the text below it sit directly on the page background, with no border and no padding around the card. Hovering a card with a pointer SHALL show a soft background behind the whole card and slightly enlarge the thumbnail within its rounded bounds. Below the title, a card SHALL show a meta line:
+- **Channel video:** the channel's avatar beside the title, and on the meta line the channel's name followed by " · " and how long ago the video was published.
+- **Playlist video:** a placeholder playlist icon in the avatar's place, and on the meta line the playlist's name followed by " · " and how long ago the video was published.
+- **No publish date:** the meta line shows only the source's name.
+
+The relative date SHALL read as a short age ("3h ago", "2d ago", "5w ago", "4mo ago", "2y ago").
+
+Activating a card anywhere SHALL open its video, except on the card's own controls: the channel's avatar and the playlist icon lead to the source's view, as does the source's name on the meta line, and the actions menu control opens the menu. Category chips are labels, not controls: activating one opens the video like the rest of the card. Each card SHALL offer a single link to its video, so keyboard users move through cards one stop per video plus the source and menu controls.
+
+#### Scenario: Frameless card
+- **WHEN** a user views the home view
+- **THEN** no video card has a border, padding or background colour of its own
+
+#### Scenario: Hovering a card
+- **WHEN** a user hovers a video card with a pointer
+- **THEN** a soft background appears behind the card and its thumbnail is slightly enlarged without overflowing its rounded corners
+
+#### Scenario: Channel card meta line
+- **WHEN** a home card shows a video of the channel "BettaTech" published 2 days ago
+- **THEN** its meta line reads "BettaTech · 2d ago" and the channel's avatar is shown beside the title
+
+#### Scenario: Playlist card meta line
+- **WHEN** a home card shows a video of the playlist "Chess Middlegames" published 5 weeks ago
+- **THEN** a playlist icon is shown beside the title and its meta line reads "Chess Middlegames · 5w ago"
+
+#### Scenario: Unknown publish date
+- **WHEN** a home card shows a channel video with no publish date
+- **THEN** its meta line reads only the channel's name
+
+#### Scenario: Activating the card's empty space
+- **WHEN** a user clicks a card's padding or the empty end of its meta line
+- **THEN** the application opens that card's video
+
+#### Scenario: Activating the playlist icon
+- **WHEN** a user activates the playlist icon on a card of the playlist "Chess Middlegames"
+- **THEN** the application opens the "Chess Middlegames" view, not the video
+
+### Requirement: Home Card Category Chips
+On the home view's "Continue watching", "Quick watches" and "Latest videos" sections, each video card SHALL show the video's categories, in the order the video lists them, as small text chips below its meta line. Each chip SHALL show the category's name in a dark shade of the category's hue, over a soft tint of that hue. A card SHALL show at most 2 chips, followed by a "+N" chip when the video has more categories. A video in no category SHALL show no chip row. Cards in "More about <category>" sections and on a category's view SHALL NOT show chips.
+
+#### Scenario: One category
+- **WHEN** a video under "Latest videos" belongs to "Chess"
+- **THEN** its card shows one chip reading "Chess", tinted with Chess's hue
+
+#### Scenario: Many categories
+- **WHEN** a video under "Continue watching" belongs to "AI & Code", "Chess" and "Science"
+- **THEN** its card shows the chips "AI & Code", "Chess" and "+1"
+
+#### Scenario: No category
+- **WHEN** a video under "Quick watches" belongs to no category
+- **THEN** its card shows no chip row
+
+#### Scenario: Category sections show no chips
+- **WHEN** a user views the "More about Chess" section or the "Chess" view
+- **THEN** no card in it shows a category chip
+
+### Requirement: Home Shelves
+At or above the small breakpoint, "Continue watching", each category section and "Quick watches" SHALL each show their videos in a single row whose number of columns follows the width available to the content area, not the viewport. A section SHALL show only as many videos as fit in that row and SHALL never leave a partial second row. "Latest videos" SHALL keep a multi-row grid whose rows are always complete except possibly the last. Below the small breakpoint, those same sections SHALL be horizontal rows the user can swipe, each card about three quarters of the content width so that the next card peeks in, snapping card by card.
+
+#### Scenario: Wide desktop
+- **WHEN** a category section has 6 videos and the content area fits 5 columns
+- **THEN** the section shows 5 videos in one row and no second row
+
+#### Scenario: Collapsed sidebar or narrower content
+- **WHEN** the content area narrows so that only 3 columns fit
+- **THEN** each shelf section shows 3 videos in one row
+
+#### Scenario: Swiping a shelf on a phone
+- **WHEN** a user on a phone-width viewport views "Continue watching" with 4 videos
+- **THEN** the section shows one card at about three quarters of the width with the next card peeking in, and swiping horizontally brings the next card into place
+
+### Requirement: Mobile Latest Videos Feed
+Below the small breakpoint, "Latest videos" SHALL be a single-column list of full-width cards, each with its full-width thumbnail and its title wrapping on up to 2 lines.
+
+#### Scenario: Latest videos on a phone
+- **WHEN** a user on a phone-width viewport scrolls to "Latest videos"
+- **THEN** its videos are listed one per row, each thumbnail spanning the content width
+
+### Requirement: Touch-Friendly Video Menu
+On touch devices, each video card's and video row's actions menu control SHALL have a hit area of at least 44 by 44 pixels.
+
+#### Scenario: Tapping a card's menu on a phone
+- **WHEN** a user on a touch device taps near a card's "⋮" control
+- **THEN** the video actions menu opens, from a hit area at least 44 by 44 pixels
+
+### Requirement: Loading Placeholders
+While a view's videos are loading, the application SHALL show placeholders shaped like the content they stand for (thumbnail blocks with title and meta lines, or list rows), animated subtly, instead of "Loading…" text. The loading region SHALL be marked busy for assistive technology and SHALL be announced as loading. This applies to the home view, a category's view, and a channel's or playlist's video list. Placeholders SHALL take the space of the content they stand for, so the layout does not shift when the content arrives. When the motion-reduction preference is set, placeholders SHALL NOT animate.
+
+#### Scenario: Home while loading
+- **WHEN** a user opens the home view and its videos are still loading
+- **THEN** the view shows placeholder sections of placeholder cards, marked busy, and no section heading such as "Latest videos"
+
+#### Scenario: Home after loading
+- **WHEN** the home view's videos arrive
+- **THEN** the placeholders are replaced by the real sections and nothing is marked busy
+
+#### Scenario: Channel video list while loading
+- **WHEN** a user opens a channel's view and its videos are still loading
+- **THEN** the video list shows placeholder rows, marked busy, instead of "Loading videos…"
+
+### Requirement: Global Search
+The header SHALL offer a search control named "Search" that opens a search dialog. The dialog SHALL also open with ⌘K on macOS and Ctrl+K elsewhere, from anywhere in the application except while another dialog is open. As the user types, the dialog SHALL show results grouped, in this order:
+- **Categories**: names containing the text, ignoring case.
+- **Channels**: names containing the text, ignoring case.
+- **Playlists**: names containing the text, ignoring case.
+- **Videos**: the matches the daemon returns for the text, as described in the `video-search` capability, each with its thumbnail, title and source name.
+
+Name matches SHALL appear as the user types. Video results SHALL be requested only once the text has at least 2 characters and the user has paused typing briefly. A group with no matches SHALL be hidden. When no group has matches, the dialog SHALL say nothing matches the text. While videos are being searched, the Videos group SHALL show that it is searching. Results SHALL be navigable with the arrow keys and chosen with Enter or a click. Choosing a category, channel or playlist SHALL navigate to its view; choosing a video SHALL open it in its source's view. Choosing a result or pressing Escape SHALL close the dialog. On phone-width viewports the search control SHALL be an icon button in the header, and the dialog SHALL cover the screen.
+
+#### Scenario: Opening with the keyboard
+- **WHEN** a user presses ⌘K on macOS
+- **THEN** the search dialog opens with its field focused
+
+#### Scenario: Grouped matches
+- **WHEN** a user types "chess" and the category "Chess", the channel "ChessCoach Andras" and videos titled "Chess Tactics: Spot the Trigger" exist
+- **THEN** the dialog shows "Chess" under Categories, "ChessCoach Andras" under Channels and the matching videos under Videos, and no Playlists group
+
+#### Scenario: Short text searches names only
+- **WHEN** a user types a single character
+- **THEN** the dialog shows matching categories, channels and playlists and requests no video search
+
+#### Scenario: Choosing a video
+- **WHEN** a user chooses a video result from the channel "BettaTech"
+- **THEN** the dialog closes and the application opens that video in the "BettaTech" channel view
+
+#### Scenario: Nothing matches
+- **WHEN** a user types "zzz" and nothing matches
+- **THEN** the dialog says nothing matches "zzz"
+
+#### Scenario: Video search fails
+- **WHEN** the video search request fails
+- **THEN** the Videos group says videos could not be searched, and the name matches are still shown
+
+### Requirement: Sidebar Count Style
+The unwatched counts on sidebar rows and on folded section headings SHALL be shown as muted, small, tabular numerals at the row's trailing edge, without a filled background, and in the full foreground colour on the active row.
+
+#### Scenario: Count on a channel row
+- **WHEN** a channel row shows an unwatched count of 3
+- **THEN** the count "3" is shown as a muted numeral without a filled pill behind it
+
+### Requirement: Compact Mobile Announcement Bar
+Below the small breakpoint, the announcement bar SHALL take a single line: the announcement's text truncated to one line, followed by its links, with the dismiss control at the trailing edge.
+
+#### Scenario: Long announcement on a phone
+- **WHEN** a user on a phone-width viewport sees an announcement whose text is longer than one line
+- **THEN** the bar shows a single line with the text truncated, its links and the dismiss control
+
+### Requirement: Video List Row Date
+Each row of a channel's or playlist's video list, and of a category's playback list, SHALL show below its title how long ago the video was published, in the same short form as the video cards, when its publish date is known.
+
+#### Scenario: Row with a publish date
+- **WHEN** a channel's video list includes a video published 3 days ago
+- **THEN** its row shows "3d ago" below the title
+
+#### Scenario: Row without a publish date
+- **WHEN** a video in the list has no publish date
+- **THEN** its row shows no date
+
+### Requirement: Tasks View Title
+The tasks view SHALL open with a page heading "Tasks", in the same heading style and alignment as the other views' page headers.
+
+#### Scenario: Opening the tasks view
+- **WHEN** a user opens the tasks view
+- **THEN** a "Tasks" heading is shown above the tab bar, aligned with the left edge of the content area
+
+### Requirement: Tasks View Describes Quality Checks
+The tasks view SHALL describe a quality check task in plain language, naming the video whose quality is being checked and the playlist or channel it belongs to, and SHALL list it with the download tasks, the same way it describes and lists a chapters fetch task.
+
+#### Scenario: Quality check task with resolvable context
+- **WHEN** the tasks view lists a quality check task whose video title and playlist or channel name were resolved
+- **THEN** the task is described as checking the quality of that video in that playlist or channel, under the downloads tab
+
+#### Scenario: Quality check task whose video can no longer be found
+- **WHEN** the tasks view lists a quality check task whose video title could not be resolved
+- **THEN** the task is still described as a quality check, using a generic placeholder in place of the missing names
+
+### Requirement: Summarize Videos Checkbox
+The add and edit dialogs for channels and playlists SHALL show a "Summarize videos" checkbox described by the hint "Generate and show an AI summary of each video.". It SHALL sit in the "AI" section of the dialog. In add dialogs it SHALL be always visible (not in "Advanced options"), unchecked by default, sent as `summaries_enabled`. Edit dialogs SHALL prefill it and send `summaries_enabled` only when changed.
+
+#### Scenario: Visible without advanced options
+- **WHEN** a user opens either add dialog without expanding "Advanced options"
+- **THEN** "Summarize videos" is visible
+
+#### Scenario: Adding a channel without touching it
+- **WHEN** a user adds a channel or playlist without touching "Summarize videos"
+- **THEN** it is created with `summaries_enabled` `false`
+
+#### Scenario: Adding a playlist with summaries
+- **WHEN** AI summaries are on and a user checks "Summarize videos" in the add playlist dialog and submits
+- **THEN** the playlist is created with `summaries_enabled` `true`
+
+#### Scenario: Edit dialog prefilled
+- **WHEN** a user opens "Edit settings" for a channel whose summaries are enabled
+- **THEN** "Summarize videos" is checked
+
+#### Scenario: Enabling summaries from the edit dialog
+- **WHEN** AI summaries are on and a user checks "Summarize videos" for a playlist and saves
+- **THEN** the application sends `summaries_enabled` `true` alone, closes the dialog, and does not trigger a sync
+
+### Requirement: Summarize Videos Needs AI Summaries
+"Summarize videos" SHALL be enabled only while the preferences have both AI and summaries on. Otherwise, including while preferences load or fail to load, it SHALL be disabled unless the source already has summaries on, in which case it SHALL stay enabled so they can be turned off; its hint SHALL read "Turn on AI summaries in AI settings." with "AI settings" a link to `/ai` that closes the dialog.
+
+#### Scenario: AI off
+- **WHEN** AI is off and a user opens the add channel dialog
+- **THEN** "Summarize videos" is unchecked and disabled, and the hint links to AI settings
+
+#### Scenario: AI on but summaries off
+- **WHEN** AI is on, summaries are off and a user opens "Edit settings" for a playlist
+- **THEN** "Summarize videos" is disabled
+
+#### Scenario: Turning summaries off while AI is off
+- **WHEN** AI is off and a user opens "Edit settings" for a channel whose summaries are enabled, unchecks "Summarize videos" and saves
+- **THEN** "Summarize videos" was shown checked and enabled, and only `summaries_enabled` `false` is sent
+
+#### Scenario: Following the link
+- **WHEN** AI is off and a user activates "AI settings" in the hint
+- **THEN** the dialog closes and the AI page at `/ai` opens
+
+### Requirement: Video Detail AI Summary
+The video detail pane SHALL show the video's summary, when the listing reports one, in full between the meta line and the storage location, under the label "AI summary", at every viewport size. Line breaks in the summary SHALL be kept. When the listing reports none, the pane SHALL show neither the text nor the label.
+
+#### Scenario: Video with a summary
+- **WHEN** a user selects a video in a playlist, channel or category view whose listing entry has a summary
+- **THEN** the detail pane shows "AI summary" and the whole summary below the meta line, with no control to expand it
+
+#### Scenario: Video without a summary
+- **WHEN** a user selects a video whose listing entry has no summary
+- **THEN** the detail pane shows no "AI summary" label and no placeholder
+
+### Requirement: Saved Preferences Refresh Video Lists
+Saving preferences SHALL refetch the playlist, channel and category video lists, including those not on screen, so returning to one doesn't first show a summary that was turned off.
+
+#### Scenario: Turning AI off and going back
+- **WHEN** a user viewing a video with a summary goes to AI settings, turns AI off and returns to the video
+- **THEN** the detail pane shows no summary once the list has refetched
+
+### Requirement: AI Section In Source Dialogs
+The add and edit dialogs for channels and playlists SHALL group their AI options in a section headed "AI": "Summarize videos", then "Categorize videos". In add dialogs the section SHALL sit below "Save to" and categories; in edit dialogs, above categories.
+
+#### Scenario: Both options grouped
+- **WHEN** a user opens the add channel dialog with categories on
+- **THEN** an "AI" section holds "Summarize videos" and "Categorize videos", in that order
+
+### Requirement: Categorize Videos Checkbox
+The add and edit dialogs for channels and playlists SHALL show, while categories are on, a "Categorize videos" checkbox described by the hint "Let AI add each video to the categories it fits.". In add dialogs it SHALL be always visible, unchecked by default and sent as `categorization_enabled`, `false` while the checkbox is not shown. Edit dialogs SHALL prefill it and send `categorization_enabled` only when changed.
+
+#### Scenario: Adding a source without touching it
+- **WHEN** a user adds a channel or playlist without touching "Categorize videos"
+- **THEN** it is created with `categorization_enabled` `false`
+
+#### Scenario: Adding a playlist with categorization
+- **WHEN** AI categorization is on and a user checks "Categorize videos" in the add playlist dialog and submits
+- **THEN** the playlist is created with `categorization_enabled` `true`
+
+#### Scenario: Edit dialog prefilled
+- **WHEN** a user opens "Edit settings" for a channel whose categorization is enabled
+- **THEN** "Categorize videos" is checked
+
+#### Scenario: Enabling categorization from the edit dialog
+- **WHEN** AI categorization is on and a user checks "Categorize videos" for a playlist and saves
+- **THEN** the application sends `categorization_enabled` `true` alone, closes the dialog, and does not trigger a sync
+
+#### Scenario: Categories off
+- **WHEN** categories are off and a user opens the add channel dialog
+- **THEN** "Categorize videos" is not shown and "Summarize videos" still is
+
+### Requirement: Categorize Videos Needs AI Categorization
+"Categorize videos" SHALL be enabled only while the preferences have AI, categories and categorization all on. Otherwise, including while preferences load or fail to load, it SHALL be disabled unless the source already has categorization on, in which case it SHALL stay enabled so it can be turned off; its hint SHALL read "Turn on AI categorization in AI settings." with "AI settings" a link to `/ai` that closes the dialog.
+
+#### Scenario: AI off
+- **WHEN** AI is off and a user opens the add channel dialog
+- **THEN** "Categorize videos" is unchecked and disabled, and the hint links to AI settings
+
+#### Scenario: Turning categorization off while AI is off
+- **WHEN** AI is off and a user opens "Edit settings" for a channel whose categorization is enabled, unchecks "Categorize videos" and saves
+- **THEN** "Categorize videos" was shown checked and enabled, and only `categorization_enabled` `false` is sent
+
+#### Scenario: Following the link
+- **WHEN** AI is off and a user activates "AI settings" in the "Categorize videos" hint
+- **THEN** the dialog closes and the AI page at `/ai` opens
+
+### Requirement: Edit A Video's Categories
+While categories are on, every video's actions menu SHALL offer "Edit categories…", opening a dialog titled with the video's title that shows every category as a chip in its color, filled when the video belongs to it. A chip from the video's channel or playlist SHALL be locked, with the hint "From <source name>". A chip the AI decided SHALL carry an "AI" mark. Clicking any other chip SHALL set that category by hand to the opposite state and show the result; a failure SHALL show the error and leave the chip as it was.
+
+#### Scenario: Opening the dialog
+- **WHEN** the user opens "Edit categories…" on a video of "@GothamChess", in "Chess", with an AI `yes` for "Sicilian"
+- **THEN** "Chess" is filled and locked with "From @GothamChess", "Sicilian" is filled with an "AI" mark, and the other categories are outlined
+
+#### Scenario: Removing an AI category
+- **WHEN** the user clicks the filled "Sicilian" chip
+- **THEN** the daemon is asked to set "Sicilian" to `belongs` false and the chip shows outlined without the "AI" mark
+
+#### Scenario: Categories off
+- **WHEN** categories are off
+- **THEN** the video actions menu has no "Edit categories…"
+
+### Requirement: Re-run AI From The Video Dialog
+While AI categorization is available, the Edit categories dialog SHALL show a button that deletes the video's AI verdicts and then shows the categories as they are, without a confirmation. It SHALL read "Re-run AI" when the video's channel or playlist has categorization on, and "Clear AI categories" when it is off, since then nothing is evaluated again.
+
+#### Scenario: Re-running one video
+- **WHEN** the user clicks "Re-run AI" in the dialog of a video with an AI `yes` for "Politics"
+- **THEN** the daemon is asked to delete the video's AI verdicts and "Politics" shows outlined
+
+#### Scenario: Source with categorization off
+- **WHEN** the user opens the dialog of a video whose channel has categorization off
+- **THEN** the button reads "Clear AI categories", and clicking it asks the daemon to delete the video's AI verdicts
+
+### Requirement: Re-run Or Clear From A Source's Menu
+While categories are on, the actions menu of a channel or playlist SHALL offer "Re-run AI categorization" when the source has categorization on, and "Clear AI categories" when it is off. Either SHALL ask for confirmation, naming the source, before deleting the source's AI verdicts.
+
+#### Scenario: Source with categorization off
+- **WHEN** the user opens the menu of "@GothamChess", whose categorization is off, and chooses "Clear AI categories", then confirms
+- **THEN** the daemon is asked to delete the channel's AI verdicts
+
+#### Scenario: Cancelled
+- **WHEN** the user chooses "Re-run AI categorization" and cancels the confirmation
+- **THEN** nothing is sent to the daemon
+
+### Requirement: Re-evaluate A Category From Its Settings
+The category settings dialog SHALL show "Re-evaluate <N> videos" below the AI prompt when the category's `ai_verdict_count` N is above 0. It SHALL ask for confirmation saying the N videos will be evaluated again by the AI, then delete the category's AI verdicts. While the AI prompt has unsaved edits the button SHALL be disabled, with the hint "Save the prompt first to re-evaluate with it.", since the AI asks with the saved prompt.
+
+#### Scenario: After editing a prompt
+- **WHEN** "Food for thought" has `ai_verdict_count` 40 and the user clicks "Re-evaluate 40 videos" and confirms
+- **THEN** the daemon is asked to delete the category's AI verdicts
+
+#### Scenario: Nothing evaluated yet
+- **WHEN** a category has `ai_verdict_count` 0
+- **THEN** no re-evaluate button is shown
+
+#### Scenario: Unsaved prompt
+- **WHEN** "Food for thought" has `ai_verdict_count` 40 and the user edits its prompt without saving
+- **THEN** "Re-evaluate 40 videos" is disabled and "Save the prompt first to re-evaluate with it." is shown
+
+### Requirement: Category Prompt Guide
+A "?" control with the accessible name "About AI prompt" SHALL sit next to the "AI prompt" label and open, on click or tap, a guide to writing the prompt, with a good example, bad examples with the reason each is bad, and tips. Opening or closing it SHALL NOT stage a change or close the dialog.
+
+#### Scenario: Opening the guide
+- **WHEN** a user activates "About AI prompt"
+- **THEN** the guide shows a good example saying what the video is about with "Belongs:" and "Does not belong:", bad examples with their reasons, and the tips: name what is close but doesn't belong, use words a title, chapter or summary would contain, and say whether one part of a video is enough
+
+#### Scenario: Closing the guide
+- **WHEN** a user with a staged change opens the guide and presses Escape
+- **THEN** the guide closes, the dialog stays open and nothing is lost

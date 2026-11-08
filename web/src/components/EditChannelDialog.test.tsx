@@ -1,17 +1,29 @@
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { EditChannelDialog } from './EditChannelDialog'
-import { aChannel } from '@/test/helpers'
+import {
+  aCategory,
+  aCategoryList,
+  aChannel,
+  aPreferences,
+  mockApi,
+  renderWithProviders,
+  type Routes,
+} from '@/test/helpers'
 import type { ChannelListItem } from '@/api/types'
 
 function renderDialog(
   channel: ChannelListItem,
   onSave: (changes: object) => Promise<void> = vi.fn(async () => {}),
+  routes: Routes = { 'GET /api/categories': aCategoryList() },
 ) {
+  const fetchMock = mockApi({ 'GET /api/preferences': aPreferences(), ...routes })
   const onOpenChange = vi.fn()
-  render(<EditChannelDialog channel={channel} open onOpenChange={onOpenChange} onSave={onSave} />)
-  return { onOpenChange, onSave }
+  renderWithProviders(
+    <EditChannelDialog channel={channel} open onOpenChange={onOpenChange} onSave={onSave} />,
+  )
+  return { onOpenChange, onSave, fetchMock }
 }
 
 describe('EditChannelDialog', () => {
@@ -44,6 +56,77 @@ describe('EditChannelDialog', () => {
     expect(onSave).toHaveBeenCalledExactlyOnceWith({ reconcile_interval_minutes: 30 })
     expect(onOpenChange).toHaveBeenCalledWith(false)
   })
+
+  it('sends only the changed summaries setting', async () => {
+    const { onSave, onOpenChange } = renderDialog(aChannel({ summaries_enabled: true }), undefined, {
+      'GET /api/categories': aCategoryList(),
+      'GET /api/preferences': aPreferences({ ai_enabled: true, summaries_enabled: true }),
+    })
+    const user = userEvent.setup()
+    const summaries = screen.getByRole('checkbox', { name: 'Summarize videos' })
+
+    expect(summaries).toBeChecked()
+    await waitFor(() => expect(summaries).toBeEnabled())
+    await user.click(summaries)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(onSave).toHaveBeenCalledExactlyOnceWith({ summaries_enabled: false })
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it('sends only the changed categorization setting', async () => {
+    const { onSave, onOpenChange } = renderDialog(aChannel(), undefined, {
+      'GET /api/categories': aCategoryList(),
+      'GET /api/preferences': aPreferences({ ai_enabled: true, categorization_enabled: true }),
+    })
+    const user = userEvent.setup()
+    const categorization = await screen.findByRole('checkbox', { name: 'Categorize videos' })
+
+    expect(categorization).not.toBeChecked()
+    await waitFor(() => expect(categorization).toBeEnabled())
+    await user.click(categorization)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(onSave).toHaveBeenCalledExactlyOnceWith({ categorization_enabled: true })
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it('lets summaries be turned off while AI is off', async () => {
+    const { onSave, onOpenChange, fetchMock } = renderDialog(aChannel({ summaries_enabled: true }))
+    const user = userEvent.setup()
+    const summaries = screen.getByRole('checkbox', { name: 'Summarize videos' })
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith('/api/preferences', expect.anything()),
+    )
+
+    expect(summaries).toBeChecked()
+    expect(summaries).toBeEnabled()
+    await user.click(summaries)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(onSave).toHaveBeenCalledExactlyOnceWith({ summaries_enabled: false })
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it('lets categorization be turned off while AI is off', async () => {
+    const { onSave, onOpenChange, fetchMock } = renderDialog(
+      aChannel({ categorization_enabled: true }),
+    )
+    const user = userEvent.setup()
+    const categorization = await screen.findByRole('checkbox', { name: 'Categorize videos' })
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith('/api/preferences', expect.anything()),
+    )
+
+    expect(categorization).toBeChecked()
+    expect(categorization).toBeEnabled()
+    await user.click(categorization)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(onSave).toHaveBeenCalledExactlyOnceWith({ categorization_enabled: false })
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
   it('sends only the changed quality', async () => {
     const { onSave, onOpenChange } = renderDialog(aChannel({ quality: 'high', video_limit: 5 }))
     const user = userEvent.setup()
@@ -54,6 +137,29 @@ describe('EditChannelDialog', () => {
 
     expect(onSave).toHaveBeenCalledExactlyOnceWith({ quality: 'low' })
     expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it('offers no categories and saves none while categories are off', async () => {
+    const { onSave, onOpenChange, fetchMock } = renderDialog(
+      aChannel({ quality: 'high' }),
+      undefined,
+      {
+        'GET /api/categories': aCategoryList(),
+        'GET /api/preferences': aPreferences({ categories_enabled: false }),
+      },
+    )
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('combobox', { name: /Video quality/ }))
+    await user.click(await screen.findByRole('option', { name: 'Low' }))
+    expect(screen.queryByRole('group', { name: 'Categories' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    expect(onSave).toHaveBeenCalledExactlyOnceWith({ quality: 'low' })
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'PUT'),
+    ).toEqual([])
   })
 
   it('notes that a changed quality applies to new videos only', async () => {
@@ -167,5 +273,87 @@ describe('EditChannelDialog', () => {
 
     expect(onOpenChange).toHaveBeenCalledWith(false)
     expect(onSave).not.toHaveBeenCalled()
+  })
+
+  it('saves a change of categories alone', async () => {
+    const { onSave, onOpenChange, fetchMock } = renderDialog(
+      aChannel({ id: '@hikaru', name: 'Hikaru' }),
+      vi.fn(async () => {}),
+      {
+        'GET /api/categories': aCategoryList([
+          aCategory({ id: 'chess', name: 'Chess', channels: ['@gotham', '@hikaru'] }),
+          aCategory({ id: 'cooking', name: 'Cooking' }),
+          aCategory({ id: 'streams', name: 'Streams', channels: ['@hikaru'] }),
+        ]),
+        'PUT /api/categories/chess/members': null,
+      },
+    )
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: 'Chess', pressed: true }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    expect(onSave).not.toHaveBeenCalled()
+    expect(
+      fetchMock.mock.calls
+        .filter(([, init]) => (init as RequestInit | undefined)?.method === 'PUT')
+        .map(([url, init]) => [url, JSON.parse((init as RequestInit).body as string)]),
+    ).toEqual([['/api/categories/chess/members', { channels: ['@gotham'], playlists: [] }]])
+  })
+
+  it('picks a category with Enter without saving the dialog', async () => {
+    const { onSave, onOpenChange } = renderDialog(
+      aChannel({ id: '@hikaru', name: 'Hikaru' }),
+      vi.fn(async () => {}),
+      { 'GET /api/categories': aCategoryList([aCategory({ id: 'chess', name: 'Chess' })]) },
+    )
+    await screen.findByRole('button', { name: 'Chess' })
+    const field = screen.getByRole('textbox', { name: 'New category' })
+
+    await userEvent.setup().type(field, 'chess{Enter}')
+
+    expect(await screen.findByRole('button', { name: 'Chess', pressed: true })).toBeInTheDocument()
+    expect(onOpenChange).not.toHaveBeenCalled()
+    expect(onSave).not.toHaveBeenCalled()
+  })
+  it('shows where the channel is stored', () => {
+    renderDialog(aChannel({ name: 'Veritasium', path: 'channels/veritasium' }))
+
+    expect(screen.getByText('Location')).toBeInTheDocument()
+    expect(screen.getByText('channels/veritasium')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Move…' })).toBeInTheDocument()
+  })
+
+  it('opens the move dialog without saving', async () => {
+    const { onSave } = renderDialog(aChannel({ name: 'Veritasium', path: 'channels/veritasium' }), vi.fn(async () => {}), {
+      'GET /api/categories': aCategoryList(),
+      'GET /api/playlists': [],
+      'GET /api/channels': [],
+      'GET /api/directories': { root: '/videos', path: '', entries: [] },
+    })
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: 'Move…' }))
+
+    expect(await screen.findByRole('dialog', { name: 'Move Veritasium' })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: 'Edit Veritasium settings' })).not.toBeInTheDocument()
+    expect(await screen.findByRole('radio', { name: 'channels/' })).toBeChecked()
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
+  it('focuses its first setting, not "Move…", when opened', () => {
+    renderDialog(aChannel())
+
+    expect(screen.getByRole('combobox', { name: /Video quality/ })).toHaveFocus()
+  })
+
+  it('disables "Move…" while the channel has work in progress', () => {
+    renderDialog(aChannel({ work_in_progress: true }))
+
+    expect(screen.getByRole('button', { name: 'Move…' })).toBeDisabled()
+    expect(
+      screen.getByText('Downloads in progress — you can move it once they finish.'),
+    ).toBeInTheDocument()
   })
 })

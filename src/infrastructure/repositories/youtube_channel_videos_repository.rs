@@ -118,3 +118,40 @@ impl ChannelVideosRepository for FakeChannelVideosRepository {
             .collect())
     }
 }
+
+/// Against the real `yt-dlp` and YouTube: run with
+/// `scripts/run-tests.sh --only contract` (see `shared::youtube_contract`).
+#[cfg(test)]
+mod youtube_contract_tests {
+    use super::*;
+    use crate::infrastructure::shared::youtube_contract::{CHANNEL_HANDLE, ytdlp_path};
+
+    #[test]
+    #[ignore = "real YouTube: run scripts/run-tests.sh --only contract"]
+    fn it_should_list_the_newest_channel_videos() {
+        let repository = YtDlpChannelVideosRepository::new(ytdlp_path());
+
+        let videos = repository
+            .list_current_videos(&ChannelHandle::new(CHANNEL_HANDLE).unwrap(), 2)
+            .unwrap();
+
+        // Which videos YouTube lists first varies run to run (it has served a
+        // 2022 upload ahead of the 2023 newest), so only the listing's shape
+        // is pinned: the limit honoured, positions in order, and every entry
+        // one of this channel's uploads, which all share the title suffix.
+        assert_eq!(
+            videos
+                .iter()
+                .map(|video| video.position)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert!(
+            videos.iter().all(|video| video.youtube_id.len() == 11
+                && video
+                    .title
+                    .ends_with("Free HD Videos - No Copyright footage")),
+            "unexpected listing: {videos:?}"
+        );
+    }
+}

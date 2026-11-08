@@ -4,10 +4,23 @@ import userEvent from '@testing-library/user-event'
 import { Route, Routes } from 'react-router-dom'
 import { ChannelDetail } from './ChannelDetail'
 import type { VideoQuality } from '@/api/types'
-import { aChannel, aVideo, mockApi, renderWithProviders, type Routes as ApiRoutes } from '@/test/helpers'
+import { queryKeys } from '@/api/queries'
+import {
+  aChannel,
+  aVideo,
+  heldUntilReleased,
+  aPreferences,
+  mockApi,
+  renderWithProviders,
+  type Routes as ApiRoutes,
+} from '@/test/helpers'
+import { channelPath } from '@/lib/sourcePath'
 
 function renderChannel(routes: ApiRoutes, route: string) {
-  const fetchMock = mockApi(routes)
+  const fetchMock = mockApi({
+    'GET /api/preferences': aPreferences({ categories_enabled: false }),
+    ...routes,
+  })
   const { queryClient } = renderWithProviders(
     <Routes>
       <Route path="/channels/:id" element={<ChannelDetail />} />
@@ -38,6 +51,23 @@ describe('ChannelDetail', () => {
 
     expect(await screen.findByText('The Channel')).toBeInTheDocument()
     expect(await screen.findByText('2 videos · 1 unwatched')).toBeInTheDocument()
+  })
+
+  it.each([
+    ['a non-Latin handle', '@НаучныйСон'],
+    ['a handle holding a literal %', '@%D0%9D'],
+  ])('opens a channel with %s from its link', async (_, id) => {
+    const channel = aChannel({ id, name: 'Научный Сон' })
+    renderChannel(
+      {
+        'GET /api/channels': [channel],
+        [`GET /api/channels/${encodeURIComponent(id)}/videos`]: [aVideo()],
+      },
+      channelPath(id),
+    )
+
+    expect(await screen.findByText('Научный Сон')).toBeInTheDocument()
+    expect(screen.queryByText('Channel not found.')).not.toBeInTheDocument()
   })
 
   it('plays the first video by default without autoplay', async () => {
@@ -145,7 +175,32 @@ describe('ChannelDetail', () => {
     expect(screen.getByRole('heading', { name: 'First Video' })).toBeInTheDocument()
   })
 
-  it('the selected row shows no menu', async () => {
+  it('shows progress and time left on an in-progress row', async () => {
+    const channel = aChannel({ id: 'chan' })
+    renderChannel(
+      {
+        'GET /api/channels': [channel],
+        'GET /api/channels/chan/videos': [
+          aVideo({ title: 'Fresh Video', duration_seconds: 120 }),
+          aVideo({ title: 'Started Video', position_seconds: 120, duration_seconds: 600 }),
+        ],
+      },
+      '/channels/chan',
+    )
+
+    // Each row's select button, not its "Actions for …" menu button.
+    const started = await screen.findByRole('button', { name: /^(?!Actions for).*Started Video$/ })
+    expect(within(started).getByRole('progressbar', { name: 'Watch progress' })).toHaveAttribute(
+      'aria-valuenow',
+      '20',
+    )
+    expect(within(started).getByText('8m left')).toBeInTheDocument()
+    const fresh = screen.getByRole('button', { name: /^(?!Actions for).*Fresh Video$/ })
+    expect(within(fresh).queryByRole('progressbar')).not.toBeInTheDocument()
+    expect(within(fresh).getByText('2:00')).toBeInTheDocument()
+  })
+
+  it('shows the menu on every row, the selected one included', async () => {
     const channel = aChannel({ id: 'chan' })
     renderChannel(
       {
@@ -159,11 +214,9 @@ describe('ChannelDetail', () => {
     )
 
     const list = await screen.findByRole('list')
-    expect(
-      within(list).queryByRole('button', { name: 'Actions for First Video' }),
-    ).not.toBeInTheDocument()
+    expect(within(list).getByRole('button', { name: 'Actions for First Video' })).toBeInTheDocument()
     expect(within(list).getByRole('button', { name: 'Actions for Second Video' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Actions for First Video' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Mark watched' })).toBeInTheDocument()
   })
 
   it('explains when the selected video is not downloaded yet', async () => {
@@ -215,6 +268,48 @@ describe('ChannelDetail', () => {
     expect(await screen.findByText('home page')).toBeInTheDocument()
   })
 
+  it("doesn't ask for its videos while it's being deleted", async () => {
+    const videos = vi.fn(() => [])
+    const remove = heldUntilReleased()
+    const { queryClient } = renderChannel(
+      {
+        'GET /api/channels': [aChannel({ id: 'chan', name: 'The Channel' })],
+        'GET /api/channels/chan/videos': videos,
+        'DELETE /api/channels/chan': remove.route,
+      },
+      '/channels/chan',
+    )
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'More actions for The Channel' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Delete' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(remove.route).toHaveBeenCalledOnce())
+
+    // A poll lands while the delete is in flight.
+    await queryClient.refetchQueries({ queryKey: queryKeys.channelVideos('chan') })
+    remove.release()
+
+    expect(await screen.findByText('home page')).toBeInTheDocument()
+    expect(videos).toHaveBeenCalledOnce()
+  })
+
+  it('a channel page header menu offers no unwatched count item', async () => {
+    renderChannel(
+      {
+        'GET /api/channels': [aChannel({ id: 'chan', name: 'The Channel', unwatched_count: 2 })],
+        'GET /api/channels/chan/videos': [],
+      },
+      '/channels/chan',
+    )
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'More actions for The Channel' }))
+
+    expect(
+      (await screen.findAllByRole('menuitem')).map((item) => item.textContent),
+    ).toEqual(['Sync', 'Mark all watched', 'Edit settings', 'Open channel on YouTube', 'Delete'])
+  })
+
   it('marks the channel watched from its page header menu', async () => {
     const first = aVideo({ title: 'First Video' })
     const second = aVideo({ title: 'Second Video' })
@@ -240,6 +335,7 @@ describe('ChannelDetail', () => {
     expect(await screen.findByText('2 videos · 2 unwatched')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'More actions for The Channel' }))
     await user.click(await screen.findByRole('menuitem', { name: 'Mark all watched' }))
+    await user.click(await screen.findByRole('button', { name: 'Mark watched' }))
 
     expect(await screen.findByText('2 videos')).toBeInTheDocument()
     expect(

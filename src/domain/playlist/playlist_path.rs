@@ -31,6 +31,11 @@ impl PlaylistPath {
                     "Playlist path must not contain \"..\" segments".to_string(),
                 ));
             }
+            if segment == "." {
+                return Err(ValidationError(
+                    "Playlist path must not contain \".\" segments".to_string(),
+                ));
+            }
             if segment.contains(FILESYSTEM_UNSAFE_CHARS) {
                 return Err(ValidationError(format!(
                     "Playlist path segments must not contain any of these characters: {}",
@@ -44,6 +49,17 @@ impl PlaylistPath {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Whether the two paths are the same folder or one is inside the
+    /// other, segment-wise (`music` overlaps `music/chill`, not `musical`).
+    pub fn overlaps(&self, other: &PlaylistPath) -> bool {
+        let (shorter, longer) = if self.0.len() <= other.0.len() {
+            (&self.0, &other.0)
+        } else {
+            (&other.0, &self.0)
+        };
+        longer == shorter || longer.starts_with(&format!("{shorter}/"))
     }
 }
 
@@ -133,6 +149,38 @@ mod tests {
     }
 
     #[test]
+    fn it_should_reject_a_path_that_is_a_current_directory_segment() {
+        assert_eq!(
+            PlaylistPath::new("."),
+            Err(error("Playlist path must not contain \".\" segments"))
+        );
+    }
+
+    #[test]
+    fn it_should_reject_a_path_starting_with_a_current_directory_segment() {
+        assert_eq!(
+            PlaylistPath::new("./a"),
+            Err(error("Playlist path must not contain \".\" segments"))
+        );
+    }
+
+    #[test]
+    fn it_should_reject_a_path_containing_a_current_directory_segment() {
+        assert_eq!(
+            PlaylistPath::new("a/./b"),
+            Err(error("Playlist path must not contain \".\" segments"))
+        );
+    }
+
+    #[test]
+    fn it_should_reject_a_path_ending_with_a_current_directory_segment() {
+        assert_eq!(
+            PlaylistPath::new("a/."),
+            Err(error("Playlist path must not contain \".\" segments"))
+        );
+    }
+
+    #[test]
     fn it_should_reject_a_path_with_a_backslash() {
         assert_eq!(
             PlaylistPath::new("a\\b"),
@@ -154,6 +202,35 @@ mod tests {
             PlaylistPath::new("music/*"),
             Err(error(UNSAFE_CHARACTERS_MESSAGE))
         );
+    }
+
+    #[test]
+    fn it_should_overlap_the_same_path() {
+        assert!(path("music/chill").overlaps(&path("music/chill")));
+    }
+
+    #[test]
+    fn it_should_overlap_a_path_inside_it() {
+        assert!(path("music").overlaps(&path("music/chill")));
+    }
+
+    #[test]
+    fn it_should_overlap_a_path_containing_it() {
+        assert!(path("music/chill/extra").overlaps(&path("music/chill")));
+    }
+
+    #[test]
+    fn it_should_not_overlap_a_sibling_sharing_a_prefix() {
+        assert!(!path("music").overlaps(&path("musical")));
+    }
+
+    #[test]
+    fn it_should_not_overlap_a_sibling() {
+        assert!(!path("music/chill").overlaps(&path("music/lofi")));
+    }
+
+    fn path(value: &str) -> PlaylistPath {
+        PlaylistPath::new(value).unwrap()
     }
 
     fn error(message: &str) -> ValidationError {

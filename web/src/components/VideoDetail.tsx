@@ -1,15 +1,16 @@
-import { Fragment, useLayoutEffect, useRef, useState, type JSX } from 'react'
+import { Fragment, type JSX } from 'react'
 import { Link } from 'react-router-dom'
-import { ChevronDown } from 'lucide-react'
+import { ExternalLink } from 'lucide-react'
 import { avatarMediaUrl } from '@/api/client'
 import type { ChannelListItem, Video } from '@/api/types'
 import { formatDate, formatDateTime, formatRelativeTime } from '@/lib/formatDateTime'
 import { Thumbnail } from './Thumbnail'
 import { PlaybackSpeedMenu } from './PlaybackSpeedMenu'
-import { VideoActionsMenu } from './VideoActionsMenu'
+import { MarkWatchedButton } from './MarkWatchedButton'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Badge } from '@/components/ui/badge'
-import { cn } from '@/lib/utils'
 import { storageLocation } from '@/lib/storageLocation'
+import { channelPath } from '@/lib/sourcePath'
 
 const STATUS_LABELS: Record<string, string> = {
   IN_PROGRESS: 'Downloading',
@@ -17,12 +18,6 @@ const STATUS_LABELS: Record<string, string> = {
   ERRORED_RETRYING: 'Retrying',
   ERRORED: 'Errored',
 }
-
-// Tailwind's `md` breakpoint: details start expanded from here up.
-const DESKTOP_QUERY = '(min-width: 48rem)'
-
-// A web URL, not counting trailing punctuation such as a sentence's full stop.
-const URL_PATTERN = /(https?:\/\/[^\s]*[^\s.,;:!?)\]'"])/g
 
 interface VideoDetailProps {
   basePath: string
@@ -36,8 +31,9 @@ interface VideoDetailProps {
  * The selected video's detail pane in a playlist or channel detail view.
  * `channel` is only given in a channel view, where its avatar is shown and
  * links to the channel; in a playlist view the meta line names the video's
- * channel instead. `playbackRate` is the player's current speed, shown in
- * the title row's speed control.
+ * channel instead. The title row ends with the video's own actions: "Mark
+ * watched" (until it is watched), the speed control for the player's
+ * current `playbackRate`, and a link to the video on YouTube.
  */
 export function VideoDetail({
   basePath,
@@ -46,14 +42,13 @@ export function VideoDetail({
   playbackRate,
   onPlaybackRateChange,
 }: VideoDetailProps) {
-  const [expanded, setExpanded] = useState(() => window.matchMedia(DESKTOP_QUERY).matches)
   const location = storageLocation(basePath, video.filename)
 
   return (
     <div className="rounded-lg border border-border p-4">
       <div className="flex items-start gap-2.5">
         {channel && (
-          <Link to={`/channels/${channel.id}`} className="shrink-0" aria-label={channel.name}>
+          <Link to={channelPath(channel.id)} className="shrink-0" aria-label={channel.name}>
             <Thumbnail
               src={channel.avatar_filename ? avatarMediaUrl(channel.avatar_filename) : null}
               className="mt-0.5 block size-8 rounded-full object-cover"
@@ -63,58 +58,78 @@ export function VideoDetail({
         <h3 className="min-w-0 flex-1 font-heading text-lg font-semibold text-foreground md:text-xl">
           {video.title}
         </h3>
-        <PlaybackSpeedMenu
-          rate={playbackRate}
-          onRateChange={onPlaybackRateChange}
-          disabled={video.status !== 'DOWNLOADED'}
-          className="mt-0.5"
-        />
-        <VideoActionsMenu
-          videoId={video.id}
-          title={video.title}
-          markable={!video.watched && video.status === 'DOWNLOADED'}
-          className="mt-0.5"
-        />
+        <div className="mt-0.5 flex shrink-0 items-center gap-1">
+          <MarkWatchedButton
+            videoId={video.id}
+            title={video.title}
+            watched={video.watched}
+            downloaded={video.status === 'DOWNLOADED'}
+            className="mr-1"
+          />
+          <PlaybackSpeedMenu
+            rate={playbackRate}
+            onRateChange={onPlaybackRateChange}
+            disabled={video.status !== 'DOWNLOADED'}
+          />
+          <YouTubeLink videoId={video.id} />
+        </div>
       </div>
       <MetaLine video={video} showChannelName={!channel} />
-      {expanded && (
-        <div className="mt-3 mb-1">
-          {video.status !== 'DOWNLOADED' && (
-            <Badge variant="outline" className="mb-2">
-              {STATUS_LABELS[video.status] ?? video.status}
-            </Badge>
-          )}
-          {video.description && <Description key={video.id} text={video.description} />}
-          <p className="mt-2 text-xs break-words text-muted-foreground">{location}</p>
-          <a
-            className="mt-3 inline-block text-sm text-primary underline-offset-4 hover:underline"
-            href={`https://www.youtube.com/watch?v=${encodeURIComponent(video.id)}`}
-            target="_blank"
-            rel="noopener"
-          >
-            Open on YouTube
-          </a>
-        </div>
-      )}
-      <button
-        type="button"
-        className="mt-2 flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
-        onClick={() => setExpanded((value) => !value)}
-        aria-expanded={expanded}
-      >
-        {expanded ? 'Less' : 'More'}
-        <ChevronDown className={cn('size-4 transition-transform', expanded && 'rotate-180')} />
-      </button>
+      {video.summary && <AiSummary summary={video.summary} />}
+      <div className="mt-2">
+        {video.status !== 'DOWNLOADED' && (
+          <Badge variant="outline" className="mb-2">
+            {STATUS_LABELS[video.status] ?? video.status}
+          </Badge>
+        )}
+        <p className="text-xs break-words text-muted-foreground">{location}</p>
+      </div>
     </div>
   )
 }
 
+/** The video's AI summary, in full; its line breaks are kept. */
+function AiSummary({ summary }: { summary: string }) {
+  const label = 'AI summary'
+  return (
+    <section aria-label={label} className="mt-3">
+      <h4 className="text-xs font-medium text-muted-foreground">{label}</h4>
+      <p className="mt-1 text-sm break-words whitespace-pre-line text-foreground">{summary}</p>
+    </section>
+  )
+}
+
+/** An icon link opening the video on YouTube in a new tab. */
+function YouTubeLink({ videoId }: { videoId: string }) {
+  const label = 'Open video on YouTube'
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <a
+            href={`https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`}
+            target="_blank"
+            rel="noopener"
+            aria-label={label}
+            className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+          >
+            <ExternalLink className="size-4" />
+          </a>
+        </TooltipTrigger>
+        <TooltipContent>{label}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
 /**
- * `[<channel> · ]Published <date> · Synced <relative>`, omitting any part
- * whose value is absent, and nothing at all when every part is.
+ * `[Watched · ][<channel> · ]Published <date> · Synced <relative>`, omitting
+ * any part whose value is absent, and nothing at all when every part is.
+ * "Synced" shows only from the desktop breakpoint, so the line fits a phone.
  */
 function MetaLine({ video, showChannelName }: { video: Video; showChannelName: boolean }) {
   const parts = [
+    video.watched && <span key="watched">Watched</span>,
     showChannelName && video.channel_name && <span key="channel">{video.channel_name}</span>,
     video.published_at && <span key="published">Published {formatDate(video.published_at)}</span>,
     video.synced_at && (
@@ -130,72 +145,20 @@ function MetaLine({ video, showChannelName }: { video: Video; showChannelName: b
 
   return (
     <p className="mt-1 text-sm text-muted-foreground">
-      {parts.map((part, index) => (
-        <Fragment key={part.key}>
-          {index > 0 && ' · '}
-          {part}
-        </Fragment>
-      ))}
-    </p>
-  )
-}
-
-/**
- * The description clamped to 4 lines, with a "Show more" toggle shown only
- * when the text overflows the clamp. Line breaks are kept and URLs are
- * rendered as links opening in a new tab.
- */
-function Description({ text }: { text: string }) {
-  const ref = useRef<HTMLParagraphElement>(null)
-  const [showAll, setShowAll] = useState(false)
-  const [overflows, setOverflows] = useState(false)
-
-  useLayoutEffect(() => {
-    const element = ref.current
-    if (!element || showAll) {
-      return
-    }
-    const measure = () => setOverflows(element.scrollHeight > element.clientHeight)
-    measure()
-    const observer = new ResizeObserver(measure)
-    observer.observe(element)
-    return () => observer.disconnect()
-  }, [text, showAll])
-
-  return (
-    <div className="mb-2">
-      <p
-        ref={ref}
-        className={cn(
-          'text-sm break-words whitespace-pre-line text-foreground',
-          !showAll && 'line-clamp-4',
-        )}
-      >
-        {text.split(URL_PATTERN).map((segment, index) =>
-          index % 2 === 1 ? (
-            <a
-              key={index}
-              href={segment}
-              target="_blank"
-              rel="noopener"
-              className="text-primary underline-offset-4 hover:underline"
-            >
-              {segment}
-            </a>
-          ) : (
-            segment
-          ),
-        )}
-      </p>
-      {(overflows || showAll) && (
-        <button
-          type="button"
-          className="mt-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
-          onClick={() => setShowAll((value) => !value)}
-        >
-          {showAll ? 'Show less' : 'Show more'}
-        </button>
+      {parts.map((part, index) =>
+        part.key === 'synced' ? (
+          // Hidden with its separator below the desktop breakpoint.
+          <span key={part.key} className="max-md:hidden">
+            {index > 0 && ' · '}
+            {part}
+          </span>
+        ) : (
+          <Fragment key={part.key}>
+            {index > 0 && ' · '}
+            {part}
+          </Fragment>
+        ),
       )}
-    </div>
+    </p>
   )
 }

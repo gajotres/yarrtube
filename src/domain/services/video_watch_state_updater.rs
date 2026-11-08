@@ -1,9 +1,16 @@
+use crate::domain::category::Category;
+use crate::domain::category::CategoryId;
 use crate::domain::channel::ChannelHandle;
+use crate::domain::playlist::PlaylistId;
+use crate::domain::services::{CategoryVideoCollector, CategoryVideoCollectorApi};
 use crate::domain::video::{
-    PlaybackPosition, UpdateWatchStateError, Video, VideoDuration, VideoId,
+    PlaybackPosition, UpdateWatchStateError, Video, VideoDuration, VideoId, VideoRecordId,
 };
+use crate::infrastructure::repositories::sqlite_category_repository::CategoryRepository;
 use crate::infrastructure::repositories::sqlite_channel_repository::ChannelRepository;
 use crate::infrastructure::repositories::sqlite_channel_video_repository::ChannelVideoRepository;
+use crate::infrastructure::repositories::sqlite_playlist_repository::PlaylistRepository;
+use crate::infrastructure::repositories::sqlite_playlist_video_repository::PlaylistVideoRepository;
 use crate::infrastructure::repositories::sqlite_video_repository::VideoRepository;
 use crate::infrastructure::shared::system_clock::Clock;
 use chrono::{DateTime, Utc};
@@ -18,21 +25,34 @@ pub struct VideoWatchStateUpdater {
     video_repository: Arc<dyn VideoRepository>,
     channel_repository: Arc<dyn ChannelRepository>,
     channel_video_repository: Arc<dyn ChannelVideoRepository>,
+    playlist_repository: Arc<dyn PlaylistRepository>,
+    playlist_video_repository: Arc<dyn PlaylistVideoRepository>,
     clock: Arc<dyn Clock>,
+    category_repository: Arc<dyn CategoryRepository>,
+    category_video_collector: CategoryVideoCollector,
 }
 
 impl VideoWatchStateUpdater {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         video_repository: Arc<dyn VideoRepository>,
         channel_repository: Arc<dyn ChannelRepository>,
         channel_video_repository: Arc<dyn ChannelVideoRepository>,
+        playlist_repository: Arc<dyn PlaylistRepository>,
+        playlist_video_repository: Arc<dyn PlaylistVideoRepository>,
         clock: Arc<dyn Clock>,
+        category_repository: Arc<dyn CategoryRepository>,
+        category_video_collector: CategoryVideoCollector,
     ) -> Self {
         Self {
             video_repository,
             channel_repository,
             channel_video_repository,
+            playlist_repository,
+            playlist_video_repository,
             clock,
+            category_repository,
+            category_video_collector,
         }
     }
 }
@@ -55,6 +75,12 @@ pub trait VideoWatchStateUpdaterApi: Send + Sync {
     /// stored copy of each; pending/in-flight videos are left unchanged.
     fn mark_channel_watched(&self, channel_id: &ChannelHandle)
     -> Result<(), UpdateWatchStateError>;
+    /// Marks every downloaded video of the category watched, every copy of
+    /// each; pending/in-flight videos are left unchanged.
+    fn mark_category_watched(&self, id: &CategoryId) -> Result<(), UpdateWatchStateError>;
+    /// Marks every `Downloaded` video of the playlist watched, with every
+    /// stored copy of each; pending/in-flight videos are left unchanged.
+    fn mark_playlist_watched(&self, playlist_id: &PlaylistId) -> Result<(), UpdateWatchStateError>;
 }
 
 impl VideoWatchStateUpdaterApi for VideoWatchStateUpdater {
@@ -95,7 +121,23 @@ impl VideoWatchStateUpdaterApi for VideoWatchStateUpdater {
     ) -> Result<(), UpdateWatchStateError> {
         self.ensure_channel_exists(channel_id)?;
         let now = self.clock.now();
-        self.unwatched_downloaded_youtube_ids(channel_id)?
+        Self::unwatched_downloaded_youtube_ids(self.channel_videos(channel_id)?)
+            .iter()
+            .try_for_each(|youtube_id| self.mark_copies_watched(youtube_id, now))
+    }
+
+    fn mark_category_watched(&self, id: &CategoryId) -> Result<(), UpdateWatchStateError> {
+        let category = self.find_category(id)?;
+        let now = self.clock.now();
+        self.unwatched_category_youtube_ids(&category)?
+            .iter()
+            .try_for_each(|youtube_id| self.mark_copies_watched(youtube_id, now))
+    }
+
+    fn mark_playlist_watched(&self, playlist_id: &PlaylistId) -> Result<(), UpdateWatchStateError> {
+        self.ensure_playlist_exists(playlist_id)?;
+        let now = self.clock.now();
+        Self::unwatched_downloaded_youtube_ids(self.playlist_videos(playlist_id)?)
             .iter()
             .try_for_each(|youtube_id| self.mark_copies_watched(youtube_id, now))
     }
@@ -113,18 +155,47 @@ impl VideoWatchStateUpdater {
             .ok_or_else(|| UpdateWatchStateError::ChannelNotFound(channel_id.clone()))
     }
 
-    /// The YouTube IDs of the channel's `Downloaded` videos not yet watched,
+    fn find_category(&self, id: &CategoryId) -> Result<Category, UpdateWatchStateError> {
+        self.category_repository
+            .find(id)
+            .map_err(UpdateWatchStateError::Repository)?
+            .ok_or_else(|| UpdateWatchStateError::CategoryNotFound(id.clone()))
+    }
+
+    /// The YouTube IDs of the category's downloaded videos not yet watched,
     /// each once.
-    fn unwatched_downloaded_youtube_ids(
+    fn unwatched_category_youtube_ids(
         &self,
-        channel_id: &ChannelHandle,
+        category: &Category,
     ) -> Result<HashSet<VideoId>, UpdateWatchStateError> {
         Ok(self
-            .channel_videos(channel_id)?
+            .category_video_collector
+            .downloaded_videos(category)
+            .map_err(UpdateWatchStateError::Repository)?
+            .into_iter()
+            .filter(|sourced| !sourced.video.is_watched())
+            .map(|sourced| sourced.video.youtube_id)
+            .collect())
+    }
+
+    fn ensure_playlist_exists(
+        &self,
+        playlist_id: &PlaylistId,
+    ) -> Result<(), UpdateWatchStateError> {
+        self.playlist_repository
+            .find(playlist_id)
+            .map_err(UpdateWatchStateError::Repository)?
+            .map(|_| ())
+            .ok_or_else(|| UpdateWatchStateError::PlaylistNotFound(playlist_id.clone()))
+    }
+
+    /// The YouTube IDs of the `Downloaded` videos not yet watched, each once.
+    fn unwatched_downloaded_youtube_ids(videos: Vec<Video>) -> HashSet<VideoId> {
+        videos
             .into_iter()
             .filter(|video| video.is_downloaded_and_unwatched())
             .map(|video| video.youtube_id)
-            .collect())
+            .collect()
     }
 
     fn channel_videos(
@@ -134,14 +205,27 @@ impl VideoWatchStateUpdater {
         self.channel_video_repository
             .list_for_channel(channel_id)
             .and_then(|channel_videos| {
-                channel_videos
-                    .iter()
-                    .filter_map(|channel_video| {
-                        self.video_repository
-                            .find(&channel_video.video_id)
-                            .transpose()
-                    })
-                    .collect()
+                let ids: Vec<VideoRecordId> = channel_videos
+                    .into_iter()
+                    .map(|channel_video| channel_video.video_id)
+                    .collect();
+                self.video_repository.find_many(&ids)
+            })
+            .map_err(UpdateWatchStateError::Repository)
+    }
+
+    fn playlist_videos(
+        &self,
+        playlist_id: &PlaylistId,
+    ) -> Result<Vec<Video>, UpdateWatchStateError> {
+        self.playlist_video_repository
+            .list_for_playlist(playlist_id)
+            .and_then(|playlist_videos| {
+                let ids: Vec<VideoRecordId> = playlist_videos
+                    .into_iter()
+                    .map(|playlist_video| playlist_video.video_id)
+                    .collect();
+                self.video_repository.find_many(&ids)
             })
             .map_err(UpdateWatchStateError::Repository)
     }

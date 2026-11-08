@@ -1,13 +1,15 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { Ellipsis, Plus, RotateCw } from 'lucide-react'
 import {
   queryKeys,
+  useCategoriesShown,
   useChannels,
+  useDeleteSource,
   useLibraryAction,
   usePlaylists,
-  useRemoveQuery,
   useSetPlaylistExcludedFromHome,
+  useSetPlaylistUnwatchedCountHidden,
   useUpdatePlaylistSettings,
 } from '@/api/queries'
 import {
@@ -16,118 +18,53 @@ import {
   deleteChannel,
   deletePlaylist,
   markChannelWatched,
+  markPlaylistWatched,
   avatarMediaUrl,
 } from '@/api/client'
 import type { LibraryItem } from '@/api/types'
 import {
-  CAUGHT_UP_PREVIEW,
-  SEARCH_THRESHOLD,
-  channelLeadCount,
-  collapse,
-  matchesSearch,
-  orderChannels,
+  activeIdFrom,
+  orderByUnwatched,
+  rowCountSlotClassName,
+  rowMenuClassName,
+  sectionView,
+  shownUnwatchedCount,
+  unwatchedTotal,
 } from '@/lib/sidebarSections'
+import { markWatchedConfirmation } from '@/lib/markWatchedConfirmation'
 import { ConfirmDialog } from './ConfirmDialog'
 import { EditChannelDialog } from './EditChannelDialog'
 import { EditPlaylistDialog } from './EditPlaylistDialog'
 import { EntryActionsMenu } from './EntryActionsMenu'
+import { SidebarCategories } from './SidebarCategories'
+import { SidebarCount } from './SidebarCount'
+import { SidebarSectionHeading } from './SidebarSectionHeading'
 import { Thumbnail } from './Thumbnail'
 import { DropdownMenuItem } from '@/components/ui/dropdown-menu'
-import { Input } from '@/components/ui/input'
+import { useRememberedFlag } from '@/hooks/useRememberedFlag'
 import { useSaveChannelSettings } from '@/hooks/useSaveChannelSettings'
 import { errorMessage } from '@/lib/errorMessage'
 import { cn } from '@/lib/utils'
-
-function activeIdFrom(pathname: string, prefix: string): string | null {
-  if (!pathname.startsWith(prefix)) {
-    return null
-  }
-  const rest = pathname.slice(prefix.length).split('/')[0]
-  return rest ? decodeURIComponent(rest) : null
-}
-
-/**
- * Whether a sidebar section is expanded, remembered per browser. Storage may
- * be unavailable (private mode, blocked site data): the section then starts
- * collapsed and the choice lasts until reload.
- */
-function useExpandedState(section: string): readonly [boolean, () => void] {
-  const key = `yarrtube.sidebar.expanded.${section}`
-  const [expanded, setExpanded] = useState(() => {
-    try {
-      return window.localStorage.getItem(key) === 'true'
-    } catch {
-      return false
-    }
-  })
-
-  const toggle = () => {
-    const next = !expanded
-    setExpanded(next)
-    try {
-      window.localStorage.setItem(key, String(next))
-    } catch {
-      // Not remembered; the in-memory state still applies.
-    }
-  }
-
-  return [expanded, toggle] as const
-}
-
-interface SectionViewOptions {
-  searchText: string
-  expanded: boolean
-  leadCount: number
-  activeId: string | null
-}
-
-interface SectionView {
-  rows: LibraryItem[] | undefined
-  hiddenCount: number
-  collapsible: boolean
-}
-
-/**
- * The rows a section shows: every match while searching, otherwise all rows
- * when expanded or its leading rows (plus the active one) when collapsed.
- * `collapsible` says whether collapsing would hide anything.
- */
-function sectionView(
-  items: LibraryItem[] | undefined,
-  { searchText, expanded, leadCount, activeId }: SectionViewOptions,
-): SectionView {
-  if (!items) {
-    return { rows: items, hiddenCount: 0, collapsible: false }
-  }
-  if (searchText) {
-    return {
-      rows: items.filter((item) => matchesSearch(item, searchText)),
-      hiddenCount: 0,
-      collapsible: false,
-    }
-  }
-  const collapsed = collapse(items, leadCount, activeId)
-  return {
-    rows: expanded ? items : collapsed.shown,
-    hiddenCount: expanded ? 0 : collapsed.hiddenCount,
-    collapsible: collapsed.hiddenCount > 0,
-  }
-}
+import { channelPath } from '@/lib/sourcePath'
 
 interface SidebarRowMenuProps {
   item: LibraryItem
+  className?: string
   onSync: () => Promise<void>
   onMarkWatched?: (() => Promise<void>) | undefined
   onSetExcludedFromHome?: ((excluded: boolean) => Promise<void>) | undefined
+  onSetUnwatchedCountHidden?: ((hidden: boolean) => Promise<void>) | undefined
   onEditRequest?: (() => void) | undefined
   onDeleteRequest: () => void
 }
 
 function SidebarRowMenu({
   item,
+  className,
   onSync,
   onMarkWatched,
   onSetExcludedFromHome,
+  onSetUnwatchedCountHidden,
   onEditRequest,
   onDeleteRequest,
 }: SidebarRowMenuProps) {
@@ -136,6 +73,7 @@ function SidebarRowMenu({
   return (
     <EntryActionsMenu
       name={item.name}
+      className={className}
       triggerIcon={
         syncing ? <RotateCw className="size-3.5 animate-spin" /> : <Ellipsis className="size-4" />
       }
@@ -158,6 +96,8 @@ function SidebarRowMenu({
       onMarkWatched={onMarkWatched}
       excludedFromHome={onSetExcludedFromHome && (item.exclude_from_home ?? false)}
       onSetExcludedFromHome={onSetExcludedFromHome}
+      unwatchedCountHidden={onSetUnwatchedCountHidden && (item.hide_unwatched_count ?? false)}
+      onSetUnwatchedCountHidden={onSetUnwatchedCountHidden}
       onEditRequest={onEditRequest}
       onDeleteRequest={onDeleteRequest}
     />
@@ -171,6 +111,7 @@ interface SidebarRowProps {
   onSync: () => Promise<void>
   onMarkWatched?: (() => Promise<void>) | undefined
   onSetExcludedFromHome?: ((excluded: boolean) => Promise<void>) | undefined
+  onSetUnwatchedCountHidden?: ((hidden: boolean) => Promise<void>) | undefined
   onEditRequest?: (() => void) | undefined
   onDeleteRequest: () => void
   showAvatar?: boolean | undefined
@@ -184,14 +125,15 @@ function SidebarRow({
   onSync,
   onMarkWatched,
   onSetExcludedFromHome,
+  onSetUnwatchedCountHidden,
   onEditRequest,
   onDeleteRequest,
   showAvatar,
   onNavigate,
 }: SidebarRowProps) {
-  const unwatchedCount = item.unwatched_count ?? 0
+  const unwatchedCount = shownUnwatchedCount(item)
   return (
-    <li className={cn('flex items-center gap-1 rounded-md pr-1', active && 'bg-accent')}>
+    <li className={cn('group/row relative flex items-center gap-1 rounded-md', active && 'bg-accent')}>
       <Link
         to={href}
         onClick={onNavigate}
@@ -206,22 +148,18 @@ function SidebarRow({
             className="size-5 shrink-0 rounded-full object-cover"
           />
         )}
-        <span className="min-w-0 flex-1 truncate">{item.name}</span>
-        {unwatchedCount > 0 && (
-          <span
-            className="shrink-0 rounded-full bg-primary px-1.5 py-0.5 text-[10px] leading-none font-medium text-primary-foreground"
-            aria-label={`${unwatchedCount} unwatched`}
-            title={`${unwatchedCount} unwatched`}
-          >
-            {unwatchedCount}
-          </span>
-        )}
+        <span className="min-w-0 truncate">{item.name}</span>
+        <span className={rowCountSlotClassName()}>
+          {unwatchedCount > 0 && <SidebarCount count={unwatchedCount} active={active} />}
+        </span>
       </Link>
       <SidebarRowMenu
         item={item}
+        className={rowMenuClassName()}
         onSync={onSync}
         onMarkWatched={onMarkWatched}
         onSetExcludedFromHome={onSetExcludedFromHome}
+        onSetUnwatchedCountHidden={onSetUnwatchedCountHidden}
         onEditRequest={onEditRequest}
         onDeleteRequest={onDeleteRequest}
       />
@@ -235,16 +173,18 @@ interface SidebarSectionProps {
   onAdd: () => void
   onClose: () => void
   items: LibraryItem[] | undefined
-  hiddenCount: number
-  expanded: boolean
-  collapsible: boolean
-  onToggleExpanded: () => void
+  folded: boolean
+  headingActive: boolean
+  onToggleFolded: () => void
+  /** Channels only; omitted for Playlists. Shown when folded and > 0. */
+  foldedTotal?: number | undefined
   error: Error | null
   activeId: string | null
   hrefFor: (item: LibraryItem) => string
   onSync: (id: string) => Promise<void>
   onMarkWatched?: (id: string) => Promise<void>
   onSetExcludedFromHome?: (id: string, excluded: boolean) => Promise<void>
+  onSetUnwatchedCountHidden?: (id: string, hidden: boolean) => Promise<void>
   /** Channels only: opens the edit channel dialog, which the caller owns. */
   onEditRequest?: (id: string) => void
   onDelete: (id: string) => Promise<void>
@@ -259,16 +199,17 @@ function SidebarSection({
   onAdd,
   onClose,
   items,
-  hiddenCount,
-  expanded,
-  collapsible,
-  onToggleExpanded,
+  folded,
+  headingActive,
+  onToggleFolded,
+  foldedTotal,
   error,
   activeId,
   hrefFor,
   onSync,
   onMarkWatched,
   onSetExcludedFromHome,
+  onSetUnwatchedCountHidden,
   onEditRequest,
   onDelete,
   deleteDescription,
@@ -276,67 +217,93 @@ function SidebarSection({
   onNavigate,
 }: SidebarSectionProps) {
   const [pendingDelete, setPendingDelete] = useState<LibraryItem | null>(null)
+  const [pendingMarkWatched, setPendingMarkWatched] = useState<LibraryItem | null>(null)
+  const markWatchedPrompt =
+    pendingMarkWatched &&
+    markWatchedConfirmation(pendingMarkWatched.name, pendingMarkWatched.unwatched_count ?? 0)
+  const headingId = useId()
+  // Closing first lets the mobile drawer get out of the dialog's way;
+  // on desktop the sidebar is static and `onClose` changes nothing.
+  const add = () => {
+    onClose()
+    onAdd()
+  }
+  // An empty section gets a full-width add row; otherwise a compact `+` on the heading.
+  const empty = !error && items?.length === 0
 
   return (
-    <div>
-      <h3 className="mb-2 px-2 font-heading text-base font-semibold tracking-tight text-foreground">
-        {title}
-      </h3>
-      {/* Closing first lets the mobile drawer get out of the dialog's way;
-          on desktop the sidebar is static and `onClose` changes nothing. */}
-      <button
-        type="button"
-        className="mb-1 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-        onClick={() => {
-          onClose()
-          onAdd()
-        }}
-      >
-        <Plus className="size-4 shrink-0" />
-        {addLabel}
-      </button>
-      {error && <p className="px-2 text-sm text-destructive">Failed to load: {error.message}</p>}
-      {!error && !items && <p className="px-2 text-sm text-muted-foreground">Loading…</p>}
-      {!error && items && items.length === 0 && (
-        <p className="px-2 text-sm text-muted-foreground">None tracked yet.</p>
-      )}
-      {!error && items && items.length > 0 && (
-        <ul className="flex flex-col">
-          {items.map((item) => (
-            <SidebarRow
-              key={item.id}
-              item={item}
-              active={item.id === activeId}
-              href={hrefFor(item)}
-              showAvatar={showAvatar}
-              onNavigate={onNavigate}
-              onSync={async () => {
-                try {
-                  await onSync(item.id)
-                } catch (err) {
-                  window.alert(`Failed to sync "${item.name}": ${errorMessage(err)}`)
-                }
-              }}
-              onMarkWatched={onMarkWatched && (() => onMarkWatched(item.id))}
-              onSetExcludedFromHome={
-                onSetExcludedFromHome &&
-                ((excluded: boolean) => onSetExcludedFromHome(item.id, excluded))
-              }
-              onEditRequest={onEditRequest && (() => onEditRequest(item.id))}
-              onDeleteRequest={() => setPendingDelete(item)}
-            />
-          ))}
-        </ul>
-      )}
-      {!error && collapsible && (
-        <button
-          type="button"
-          className="mt-1 px-2 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
-          aria-expanded={expanded}
-          onClick={onToggleExpanded}
-        >
-          {expanded ? 'Show less' : `Show ${hiddenCount} more`}
-        </button>
+    <section aria-labelledby={headingId}>
+      <SidebarSectionHeading
+        id={headingId}
+        title={title}
+        folded={folded}
+        onToggleFolded={onToggleFolded}
+        headingActive={headingActive}
+        foldedTotal={foldedTotal}
+        add={empty ? undefined : { label: addLabel, onClick: add }}
+      />
+      {!folded && (
+        <>
+          {empty && (
+            <button
+              type="button"
+              className="mb-1 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+              onClick={add}
+            >
+              <Plus className="size-4 shrink-0" />
+              {addLabel}
+            </button>
+          )}
+          {error && (
+            <p className="px-2 text-sm text-destructive">Failed to load: {error.message}</p>
+          )}
+          {!error && !items && <p className="px-2 text-sm text-muted-foreground">Loading…</p>}
+          {!error && items && items.length === 0 && (
+            <p className="px-2 text-sm text-muted-foreground">None tracked yet.</p>
+          )}
+          {!error && items && items.length > 0 && (
+            <ul className="flex flex-col" aria-labelledby={headingId}>
+              {items.map((item) => (
+                <SidebarRow
+                  key={item.id}
+                  item={item}
+                  active={item.id === activeId}
+                  href={hrefFor(item)}
+                  showAvatar={showAvatar}
+                  onNavigate={onNavigate}
+                  onSync={async () => {
+                    try {
+                      await onSync(item.id)
+                    } catch (err) {
+                      window.alert(`Failed to sync "${item.name}": ${errorMessage(err)}`)
+                    }
+                  }}
+                  onMarkWatched={
+                    onMarkWatched &&
+                    (async () => {
+                      // The real count, also when the badge hides it.
+                      if (markWatchedConfirmation(item.name, item.unwatched_count ?? 0)) {
+                        setPendingMarkWatched(item)
+                      } else {
+                        await onMarkWatched(item.id)
+                      }
+                    })
+                  }
+                  onSetExcludedFromHome={
+                    onSetExcludedFromHome &&
+                    ((excluded: boolean) => onSetExcludedFromHome(item.id, excluded))
+                  }
+                  onSetUnwatchedCountHidden={
+                    onSetUnwatchedCountHidden &&
+                    ((hidden: boolean) => onSetUnwatchedCountHidden(item.id, hidden))
+                  }
+                  onEditRequest={onEditRequest && (() => onEditRequest(item.id))}
+                  onDeleteRequest={() => setPendingDelete(item)}
+                />
+              ))}
+            </ul>
+          )}
+        </>
       )}
 
       <ConfirmDialog
@@ -354,7 +321,24 @@ function SidebarSection({
           }
         }}
       />
-    </div>
+      <ConfirmDialog
+        open={markWatchedPrompt !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setPendingMarkWatched(null)
+          }
+        }}
+        title={markWatchedPrompt?.title ?? ''}
+        description={markWatchedPrompt?.description}
+        confirmLabel="Mark watched"
+        pendingLabel="Marking…"
+        onConfirm={async () => {
+          if (pendingMarkWatched && onMarkWatched) {
+            await onMarkWatched(pendingMarkWatched.id)
+          }
+        }}
+      />
+    </section>
   )
 }
 
@@ -367,6 +351,7 @@ interface SidebarProps {
   onClose: () => void
   onAddChannel: () => void
   onAddPlaylist: () => void
+  onAddCategory: () => void
 }
 
 export function Sidebar({
@@ -375,14 +360,17 @@ export function Sidebar({
   onClose,
   onAddChannel,
   onAddPlaylist,
+  onAddCategory,
 }: SidebarProps) {
   const location = useLocation()
   const navigate = useNavigate()
   const { data: channels, error: channelsError } = useChannels()
   const { data: playlists, error: playlistsError } = usePlaylists()
+  const withCategories = useCategoriesShown()
   const refreshing = useLibraryAction()
-  const removeQuery = useRemoveQuery()
+  const deleteSource = useDeleteSource()
   const setPlaylistExcludedFromHome = useSetPlaylistExcludedFromHome()
+  const setPlaylistUnwatchedCountHidden = useSetPlaylistUnwatchedCountHidden()
   const saveChannelSettings = useSaveChannelSettings()
   const [editingChannelId, setEditingChannelId] = useState<string | null>(null)
   const editingChannel = channels?.find((channel) => channel.id === editingChannelId) ?? null
@@ -390,9 +378,14 @@ export function Sidebar({
   const [editingPlaylistId, setEditingPlaylistId] = useState<string | null>(null)
   const editingPlaylist =
     playlists?.find((playlist) => playlist.id === editingPlaylistId) ?? null
-  const [search, setSearch] = useState('')
-  const [channelsExpanded, toggleChannelsExpanded] = useExpandedState('channels')
-  const [playlistsExpanded, togglePlaylistsExpanded] = useExpandedState('playlists')
+  const [channelsFolded, toggleChannelsFolded] = useRememberedFlag(
+    'yarrtube.sidebar.folded.channels',
+    false,
+  )
+  const [playlistsFolded, togglePlaylistsFolded] = useRememberedFlag(
+    'yarrtube.sidebar.folded.playlists',
+    false,
+  )
 
   // The drawer scrolls on its own; keep the page behind it still.
   useEffect(() => {
@@ -425,23 +418,15 @@ export function Sidebar({
   const activeChannelId = activeIdFrom(location.pathname, '/channels/')
   const activePlaylistId = activeIdFrom(location.pathname, '/playlists/')
 
-  const searchable = (channels?.length ?? 0) + (playlists?.length ?? 0) > SEARCH_THRESHOLD
-  const searchText = searchable ? search.trim() : ''
-  const orderedChannels = channels && orderChannels(channels)
+  const orderedChannels = channels && orderByUnwatched(channels)
   const channelsView = sectionView(orderedChannels, {
-    searchText,
-    expanded: channelsExpanded,
-    leadCount: orderedChannels ? channelLeadCount(orderedChannels) : 0,
+    folded: channelsFolded,
     activeId: activeChannelId,
   })
-  const playlistsView = sectionView(playlists, {
-    searchText,
-    expanded: playlistsExpanded,
-    leadCount: CAUGHT_UP_PREVIEW,
+  const playlistsView = sectionView(playlists && orderByUnwatched(playlists), {
+    folded: playlistsFolded,
     activeId: activePlaylistId,
   })
-  const showChannels = !searchText || channelsView.rows?.length !== 0
-  const showPlaylists = !searchText || playlistsView.rows?.length !== 0
 
   return (
     <>
@@ -462,75 +447,59 @@ export function Sidebar({
           'md:static md:z-auto md:h-full md:w-60 md:max-w-none md:translate-x-0 md:shadow-none md:transition-none md:py-6',
         )}
       >
-        {searchable && (
-          <Input
-            type="search"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search"
-            aria-label="Search channels and playlists"
-          />
-        )}
-        {!showChannels && !showPlaylists && (
-          <p className="px-2 text-sm text-muted-foreground">Nothing matches "{searchText}".</p>
-        )}
-        {showChannels && (
-          <SidebarSection
-            title="Channels"
-            addLabel="Add channel"
-            onAdd={onAddChannel}
-            onClose={onClose}
-            items={channelsView.rows}
-            hiddenCount={channelsView.hiddenCount}
-            expanded={channelsExpanded}
-            collapsible={channelsView.collapsible}
-            onToggleExpanded={toggleChannelsExpanded}
-            error={channelsError}
-            activeId={activeChannelId}
-            hrefFor={(channel) => `/channels/${channel.id}`}
-            showAvatar
-            onNavigate={onClose}
-            onSync={refreshing(reconcileChannel)}
-            onMarkWatched={refreshing(markChannelWatched)}
-            onEditRequest={setEditingChannelId}
-            onDelete={refreshing(async (id: string) => {
-              await deleteChannel(id)
-              removeQuery(queryKeys.channelVideos(id))
-              if (activeChannelId === id) {
-                navigate('/')
-              }
-            })}
-            deleteDescription="This removes the channel from tracking."
-          />
-        )}
-        {showPlaylists && (
-          <SidebarSection
-            title="Playlists"
-            addLabel="Add playlist"
-            onAdd={onAddPlaylist}
-            onClose={onClose}
-            items={playlistsView.rows}
-            hiddenCount={playlistsView.hiddenCount}
-            expanded={playlistsExpanded}
-            collapsible={playlistsView.collapsible}
-            onToggleExpanded={togglePlaylistsExpanded}
-            error={playlistsError}
-            activeId={activePlaylistId}
-            hrefFor={(playlist) => `/playlists/${playlist.id}`}
-            onNavigate={onClose}
-            onSync={refreshing(reconcilePlaylist)}
-            onSetExcludedFromHome={setPlaylistExcludedFromHome}
-            onEditRequest={setEditingPlaylistId}
-            onDelete={refreshing(async (id: string) => {
-              await deletePlaylist(id)
-              removeQuery(queryKeys.playlistVideos(id))
-              if (activePlaylistId === id) {
-                navigate('/')
-              }
-            })}
-            deleteDescription="This removes the playlist from tracking, along with its video records and downloaded files."
-          />
-        )}
+        {withCategories && <SidebarCategories onAddCategory={onAddCategory} onClose={onClose} />}
+        <SidebarSection
+          title="Channels"
+          addLabel="Add channel"
+          onAdd={onAddChannel}
+          onClose={onClose}
+          items={channelsView.rows}
+          folded={channelsView.folded}
+          headingActive={channelsView.headingActive}
+          onToggleFolded={toggleChannelsFolded}
+          foldedTotal={channels && unwatchedTotal(channels)}
+          error={channelsError}
+          activeId={activeChannelId}
+          hrefFor={(channel) => channelPath(channel.id)}
+          showAvatar
+          onNavigate={onClose}
+          onSync={refreshing(reconcileChannel)}
+          onMarkWatched={refreshing(markChannelWatched)}
+          onEditRequest={setEditingChannelId}
+          onDelete={refreshing(async (id: string) => {
+            await deleteSource(queryKeys.channelVideos(id), () => deleteChannel(id))
+            if (activeChannelId === id) {
+              navigate('/')
+            }
+          })}
+          deleteDescription="This removes the channel from tracking."
+        />
+        <SidebarSection
+          title="Playlists"
+          addLabel="Add playlist"
+          onAdd={onAddPlaylist}
+          onClose={onClose}
+          items={playlistsView.rows}
+          folded={playlistsView.folded}
+          headingActive={playlistsView.headingActive}
+          onToggleFolded={togglePlaylistsFolded}
+          error={playlistsError}
+          activeId={activePlaylistId}
+          hrefFor={(playlist) => `/playlists/${playlist.id}`}
+          onNavigate={onClose}
+          onSync={refreshing(reconcilePlaylist)}
+          onMarkWatched={refreshing(markPlaylistWatched)}
+          onSetExcludedFromHome={setPlaylistExcludedFromHome}
+          onSetUnwatchedCountHidden={setPlaylistUnwatchedCountHidden}
+          onEditRequest={setEditingPlaylistId}
+          onDelete={refreshing(async (id: string) => {
+            await deleteSource(queryKeys.playlistVideos(id), () => deletePlaylist(id))
+            if (activePlaylistId === id) {
+              navigate('/')
+            }
+          })}
+          deleteDescription="This removes the playlist from tracking, along with its video records and downloaded files."
+        />
       </aside>
       {editingChannel && (
         <EditChannelDialog

@@ -1,19 +1,27 @@
 pub mod blocking;
+pub mod categories;
 pub mod channels;
 pub mod directories;
 pub mod error;
+pub mod ollama;
 pub mod playlists;
+pub mod preferences;
 pub mod tasks;
+#[cfg(test)]
+mod test_support;
 pub mod validation;
 pub mod version;
 pub mod videos;
 
 use crate::domain::services::{
-    ChannelCreator, ChannelDeleter, ChannelPreviewer, ChannelUpdater, ChannelVideoReconciler,
-    ChannelViewSearcher, DirectorySearcher, PlaylistCreator, PlaylistDeleter, PlaylistPreviewer,
-    PlaylistSearcher, PlaylistUpdater, PlaylistVideoReconciler, TaskViewSearcher, VideoSearcher,
-    VideoWatchStateUpdater,
+    CategoryCreator, CategoryDeleter, CategoryUpdater, CategoryViewSearcher, ChannelCreator,
+    ChannelDeleter, ChannelPreviewer, ChannelUpdater, ChannelVideoReconciler, ChannelViewSearcher,
+    DirectorySearcher, LlmServerSearcher, PlaylistCreator, PlaylistDeleter, PlaylistPreviewer,
+    PlaylistUpdater, PlaylistVideoReconciler, PlaylistViewSearcher, PreferencesSearcher,
+    PreferencesUpdater, ShowMover, SubtitleReader, TaskViewSearcher, VideoCategoryChoiceSearcher,
+    VideoCategoryEditor, VideoSearcher, VideoWatchStateUpdater,
 };
+use crate::infrastructure::shared::app_version::AppVersion;
 use axum::Router;
 use axum::extract::FromRef;
 use axum::routing::{get, post};
@@ -24,20 +32,20 @@ use axum::routing::{get, post};
 #[derive(Clone)]
 pub struct VideosRoot(pub String);
 
-/// The version this binary was built for, carried in the adapter layer like
+/// The build this binary was made from, carried in the adapter layer like
 /// `VideosRoot`: build metadata, not business logic, so no domain service
 /// stands behind it.
 #[derive(Clone)]
-pub struct RunningVersion(pub String);
+pub struct RunningVersion(pub AppVersion);
 
 #[derive(Clone, FromRef)]
 pub struct ApiServices {
     pub playlist_creator: PlaylistCreator,
     pub playlist_deleter: PlaylistDeleter,
     pub playlist_previewer: PlaylistPreviewer,
-    pub playlist_searcher: PlaylistSearcher,
     pub playlist_updater: PlaylistUpdater,
     pub playlist_video_reconciler: PlaylistVideoReconciler,
+    pub playlist_view_searcher: PlaylistViewSearcher,
     pub video_searcher: VideoSearcher,
     pub task_view_searcher: TaskViewSearcher,
     pub channel_creator: ChannelCreator,
@@ -48,8 +56,19 @@ pub struct ApiServices {
     pub channel_video_reconciler: ChannelVideoReconciler,
     pub directory_searcher: DirectorySearcher,
     pub video_watch_state_updater: VideoWatchStateUpdater,
+    pub subtitle_reader: SubtitleReader,
+    pub category_creator: CategoryCreator,
+    pub category_updater: CategoryUpdater,
+    pub category_deleter: CategoryDeleter,
+    pub category_view_searcher: CategoryViewSearcher,
+    pub show_mover: ShowMover,
     pub videos_root: VideosRoot,
     pub running_version: RunningVersion,
+    pub preferences_searcher: PreferencesSearcher,
+    pub preferences_updater: PreferencesUpdater,
+    pub llm_server_searcher: LlmServerSearcher,
+    pub video_category_choice_searcher: VideoCategoryChoiceSearcher,
+    pub video_category_editor: VideoCategoryEditor,
 }
 
 pub fn api_router(api_services: ApiServices) -> Router {
@@ -68,15 +87,46 @@ pub fn api_router(api_services: ApiServices) -> Router {
             "/playlists/{id}/reconcile",
             post(playlists::reconcile_playlist),
         )
+        .route("/playlists/{id}/move", post(playlists::move_playlist))
+        .route(
+            "/playlists/{id}/watched",
+            post(playlists::mark_playlist_watched),
+        )
+        .route(
+            "/playlists/{id}/ai-verdicts",
+            axum::routing::delete(playlists::delete_playlist_ai_verdicts),
+        )
         .route(
             "/playlists/{id}/videos",
             get(videos::list_videos_for_playlist),
         )
+        .route(
+            "/playlists/{id}/videos/{video_id}/subtitles.vtt",
+            get(videos::get_playlist_video_subtitles),
+        )
         .route("/videos/home", get(videos::list_home_videos))
+        .route("/videos/search", get(videos::search_videos))
         .route("/videos/{id}/progress", post(videos::record_video_progress))
         .route("/videos/{id}/watched", post(videos::mark_video_watched))
+        .route(
+            "/videos/{id}/categories",
+            get(videos::list_video_categories),
+        )
+        .route(
+            "/videos/{id}/categories/{category_id}",
+            axum::routing::put(videos::set_video_category),
+        )
+        .route(
+            "/videos/{id}/ai-verdicts",
+            axum::routing::delete(videos::delete_video_ai_verdicts),
+        )
         .route("/tasks", get(tasks::list_tasks))
         .route("/version", get(version::get_version))
+        .route("/ollama", get(ollama::get_ollama))
+        .route(
+            "/preferences",
+            get(preferences::get_preferences).patch(preferences::update_preferences),
+        )
         .route(
             "/channels",
             post(channels::create_channel).get(channels::list_channels),
@@ -90,13 +140,46 @@ pub fn api_router(api_services: ApiServices) -> Router {
             "/channels/{handle}/reconcile",
             post(channels::reconcile_channel),
         )
+        .route("/channels/{handle}/move", post(channels::move_channel))
         .route(
             "/channels/{handle}/videos",
             get(videos::list_videos_for_channel),
         )
         .route(
+            "/channels/{handle}/videos/{video_id}/subtitles.vtt",
+            get(videos::get_channel_video_subtitles),
+        )
+        .route(
             "/channels/{handle}/watched",
             post(channels::mark_channel_watched),
+        )
+        .route(
+            "/channels/{handle}/ai-verdicts",
+            axum::routing::delete(channels::delete_channel_ai_verdicts),
+        )
+        .route(
+            "/categories",
+            post(categories::create_category).get(categories::list_categories),
+        )
+        .route(
+            "/categories/{id}",
+            axum::routing::delete(categories::delete_category).patch(categories::update_category),
+        )
+        .route(
+            "/categories/{id}/members",
+            axum::routing::put(categories::set_category_members),
+        )
+        .route(
+            "/categories/{id}/videos",
+            get(videos::list_videos_for_category),
+        )
+        .route(
+            "/categories/{id}/watched",
+            post(categories::mark_category_watched),
+        )
+        .route(
+            "/categories/{id}/ai-verdicts",
+            axum::routing::delete(categories::delete_category_ai_verdicts),
         )
         .with_state(api_services)
 }

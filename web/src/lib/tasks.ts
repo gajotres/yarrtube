@@ -1,5 +1,13 @@
 import type { Task } from '@/api/types'
 
+/** The video a task targets and its playlist or channel, with placeholders for unresolved names. */
+function videoInContainer(payload: NonNullable<Task['payload']>): string {
+  const video = payload.video_title ?? 'a video'
+  const container =
+    payload.playlist_name ?? payload.channel_name ?? 'an unknown playlist or channel'
+  return `${video} in ${container}`
+}
+
 /** A short human sentence for what a queued task will do. */
 export function describeTask(task: Task): string {
   const payload = task.payload ?? {}
@@ -9,18 +17,24 @@ export function describeTask(task: Task): string {
       return `Syncing playlist ${payload.playlist_name ?? 'an unknown playlist'}`
     case 'reconcile_channel':
       return `Syncing channel ${payload.channel_name ?? 'an unknown channel'}`
-    case 'download_video': {
-      const video = payload.video_title ?? 'a video'
-      const container =
-        payload.playlist_name ?? payload.channel_name ?? 'an unknown playlist or channel'
-      return `Downloading ${video} in ${container}`
-    }
-    case 'fetch_thumbnail': {
-      const video = payload.video_title ?? 'a video'
-      const container =
-        payload.playlist_name ?? payload.channel_name ?? 'an unknown playlist or channel'
-      return `Fetching thumbnail of ${video} in ${container}`
-    }
+    case 'download_video':
+      return `Downloading ${videoInContainer(payload)}`
+    case 'fetch_thumbnail':
+      return `Fetching thumbnail of ${videoInContainer(payload)}`
+    case 'fetch_subtitles':
+      return `Fetching subtitles of ${videoInContainer(payload)}`
+    case 'fetch_chapters':
+      return `Fetching chapters of ${videoInContainer(payload)}`
+    case 'summarize_video':
+      return `Summarizing ${videoInContainer(payload)}`
+    case 'categorize_video':
+      return `Categorizing ${videoInContainer(payload)}`
+    case 'upgrade_quality':
+      return `Checking the quality of ${videoInContainer(payload)}`
+    case 'sync_video':
+      return `Syncing ${videoInContainer(payload)}`
+    case 'sync_plex_labels':
+      return 'Syncing Plex category labels'
     case 'delete_video_file':
       return payload.filename ? `Removing file ${payload.filename}` : 'Removing a video file'
     default:
@@ -40,10 +54,15 @@ function humanizeType(type: string): string {
   return words ? words.charAt(0).toUpperCase() + words.slice(1) : 'Task'
 }
 
-export type TaskFamily = 'downloads' | 'syncs' | 'other'
-export type TaskTab = 'active' | 'downloads' | 'syncs' | 'other'
+export type TaskFamily = 'downloads' | 'syncs' | 'ai' | 'other'
+export type TaskTab = 'active' | 'downloads' | 'syncs' | 'ai' | 'other'
 
-export const TASK_TABS: readonly TaskTab[] = ['active', 'downloads', 'syncs', 'other']
+/** The tabs shown, in order; "ai" only while `aiEnabled`. */
+export function taskTabs(aiEnabled: boolean): readonly TaskTab[] {
+  return aiEnabled
+    ? ['active', 'downloads', 'syncs', 'ai', 'other']
+    : ['active', 'downloads', 'syncs', 'other']
+}
 
 /** Above this many tasks in a tab, the search field is worth showing. */
 export const TASK_SEARCH_THRESHOLD = 15
@@ -51,39 +70,53 @@ export const TASK_SEARCH_THRESHOLD = 15
 const FAMILY_BY_TYPE: Record<string, TaskFamily> = {
   download_video: 'downloads',
   fetch_thumbnail: 'downloads',
+  fetch_subtitles: 'downloads',
+  fetch_chapters: 'downloads',
+  upgrade_quality: 'downloads',
   reconcile_playlist: 'syncs',
   reconcile_channel: 'syncs',
+  sync_video: 'syncs',
+  summarize_video: 'ai',
+  categorize_video: 'ai',
 }
 
-export function taskFamily(task: Task): TaskFamily {
-  return FAMILY_BY_TYPE[task.task_type] ?? 'other'
+/** A task's family; AI tasks are 'other' unless `aiEnabled`. */
+export function taskFamily(task: Task, aiEnabled: boolean): TaskFamily {
+  const family = FAMILY_BY_TYPE[task.task_type] ?? 'other'
+  return family === 'ai' && !aiEnabled ? 'other' : family
 }
 
-export function tasksForTab(tasks: Task[], tab: TaskTab): Task[] {
+export function tasksForTab(tasks: Task[], tab: TaskTab, aiEnabled: boolean): Task[] {
   const inTab =
     tab === 'active'
       ? tasks.filter((task) => task.status === 'running')
-      : tasks.filter((task) => taskFamily(task) === tab)
+      : tasks.filter((task) => taskFamily(task, aiEnabled) === tab)
   return [...inTab].sort(byCategory)
 }
 
-export function tabCounts(tasks: Task[]): Record<TaskTab, number> {
-  return TASK_TABS.reduce(
+export function tabCounts(tasks: Task[], aiEnabled: boolean): Record<TaskTab, number> {
+  return taskTabs(aiEnabled).reduce(
     (counts, tab) => {
-      counts[tab] = tasksForTab(tasks, tab).length
+      counts[tab] = tasksForTab(tasks, tab, aiEnabled).length
       return counts
     },
-    {} as Record<TaskTab, number>,
+    { ai: 0 } as Record<TaskTab, number>,
   )
 }
 
-export type TaskKind = 'download' | 'sync' | 'delete' | 'maintenance'
+export type TaskKind = 'download' | 'sync' | 'delete' | 'ai' | 'maintenance'
 
 const KIND_BY_TYPE: Record<string, TaskKind> = {
   download_video: 'download',
   fetch_thumbnail: 'download',
+  fetch_subtitles: 'download',
+  fetch_chapters: 'download',
+  upgrade_quality: 'download',
   reconcile_playlist: 'sync',
   reconcile_channel: 'sync',
+  sync_video: 'sync',
+  summarize_video: 'ai',
+  categorize_video: 'ai',
   delete_video_file: 'delete',
   delete_playlist_files: 'delete',
   delete_channel_files: 'delete',

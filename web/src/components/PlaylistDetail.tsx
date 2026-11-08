@@ -2,17 +2,26 @@ import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   queryKeys,
+  useCategoriesShown,
+  useCategorizationAvailable,
+  useDeleteSource,
   useLibraryAction,
   usePlaylists,
   usePlaylistVideos,
-  useRemoveQuery,
   useSetPlaylistExcludedFromHome,
+  useSetPlaylistUnwatchedCountHidden,
   useUpdatePlaylistSettings,
 } from '@/api/queries'
-import { reconcilePlaylist, deletePlaylist } from '@/api/client'
+import {
+  reconcilePlaylist,
+  deletePlaylist,
+  deleteSourceAiVerdicts,
+  markPlaylistWatched,
+} from '@/api/client'
 import { useWatchProgress } from '@/hooks/useWatchProgress'
 import { usePlaybackSpeed } from '@/hooks/usePlaybackSpeed'
 import { useVideoSelection } from '@/hooks/useVideoSelection'
+import { youtubePlaylistUrl } from '@/lib/sourcePath'
 import { VideoPlayer } from './VideoPlayer'
 import { VideoDetail } from './VideoDetail'
 import { VideoListPane } from './VideoListPane'
@@ -24,10 +33,13 @@ export function PlaylistDetail() {
   const navigate = useNavigate()
   const { data: playlists, error: playlistsError } = usePlaylists()
   const refreshing = useLibraryAction()
-  const removeQuery = useRemoveQuery()
+  const deleteSource = useDeleteSource()
   const setPlaylistExcludedFromHome = useSetPlaylistExcludedFromHome()
+  const setPlaylistUnwatchedCountHidden = useSetPlaylistUnwatchedCountHidden()
   const updatePlaylistSettings = useUpdatePlaylistSettings()
   const [editing, setEditing] = useState(false)
+  const categoriesShown = useCategoriesShown()
+  const categorizationAvailable = useCategorizationAvailable()
   const playlist = playlists?.find((item) => item.id === id) ?? null
 
   const { data: videos, error } = usePlaylistVideos(id)
@@ -56,16 +68,30 @@ export function PlaylistDetail() {
       <DetailHeader
         name={playlist.name}
         videos={videos}
+        unwatchedCount={playlist.unwatched_count}
         onSync={refreshing(() => reconcilePlaylist(id))}
+        onMarkWatched={refreshing(() => markPlaylistWatched(id))}
         excludedFromHome={playlist.exclude_from_home}
         onSetExcludedFromHome={(excluded) => setPlaylistExcludedFromHome(id, excluded)}
+        unwatchedCountHidden={playlist.hide_unwatched_count}
+        onSetUnwatchedCountHidden={(hidden) => setPlaylistUnwatchedCountHidden(id, hidden)}
         onEditRequest={() => setEditing(true)}
+        youtubeLink={{ href: youtubePlaylistUrl(id), label: 'Open playlist on YouTube' }}
         onDelete={refreshing(async () => {
-          await deletePlaylist(id)
-          removeQuery(queryKeys.playlistVideos(id))
+          await deleteSource(queryKeys.playlistVideos(id), () => deletePlaylist(id))
           navigate('/')
         })}
         deleteDescription="This removes the playlist from tracking, along with its video records and downloaded files."
+        aiCategorization={
+          categoriesShown
+            ? {
+                enabled: categorizationAvailable && playlist.categorization_enabled,
+                onDeleteAiVerdicts: refreshing(() =>
+                  deleteSourceAiVerdicts({ kind: 'playlist', id }),
+                ),
+              }
+            : undefined
+        }
       />
       <EditPlaylistDialog
         playlist={playlist}
@@ -77,6 +103,7 @@ export function PlaylistDetail() {
         <div className="contents md:flex md:h-full md:min-w-0 md:flex-col md:gap-4 md:overflow-y-auto">
           <VideoPlayer
             basePath={playlist.path}
+            source={{ kind: 'playlist', id }}
             video={selectedVideo}
             autoplay={autoplay}
             onVideoElement={setVideoElement}
@@ -96,7 +123,8 @@ export function PlaylistDetail() {
 
         <VideoListPane
           noun="playlist"
-          basePath={playlist.path}
+          basePathOf={() => playlist.path}
+          sourceNameOf={() => playlist.name}
           videos={videos}
           error={error}
           selectedVideoId={selectedVideo?.id ?? null}

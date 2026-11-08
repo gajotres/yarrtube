@@ -1,0 +1,92 @@
+{
+  "youtube_id": "NklJAUizpZs",
+  "url": "https://www.youtube.com/watch?v=NklJAUizpZs",
+  "title": "I Tried the Accelerated Dragon... Not What I Expected",
+  "channel": "IM Alex Banzea",
+  "published": "2026-10-20",
+  "lang": "en",
+  "duration_s": 3522,
+  "chapters": [
+    {
+      "start_seconds": 0,
+      "end_seconds": 1037,
+      "title": "Game 1"
+    },
+    {
+      "start_seconds": 1037,
+      "end_seconds": 2201,
+      "title": "Game 2"
+    },
+    {
+      "start_seconds": 2201,
+      "end_seconds": 3521,
+      "title": "Game 3"
+    }
+  ],
+  "description": "♟️ London System (course of the year)\nhttps://www.chessable.com/alex-banzeas-london-system/course/118788/\n\n♟️ Caro-Kann (course of the year)\nhttps://www.chessable.com/the-caro-kann-simplified/course/171080/\n\n📧 Email me for Private Coaching:\ncoaching@alexbanzea.com\n\n00:00 Game 1\n17:17 Game 2\n36:41 Game 3\n\nUsed to be live on 🔴:\nhttps://www.twitch.tv/alexbanzea\n\nFollow me on 👀:\nhttps://www.instagram.com/alex.banzea/\nhttps://x.com/AlexBanzea",
+  "summary": {
+    "facts": [
+      {
+        "id": "three-games-as-black",
+        "fact": "The video shows three online games in which the streamer plays Black and tries the Accelerated Dragon (Sicilian with an early ...g6).",
+        "critical": true,
+        "trap": "The video is a single game.",
+        "note": "Games start at 0:00, 17:12 and 36:38. Streamer is likely Alex Banzea (caption spells the email 'alexpansza.com').",
+        "evidence": {
+          "at": "0:00",
+          "quote": "Welcome back to another game with the black pieces. Uh, we're going to be trying to play the accelerated dragon."
+        }
+      },
+      {
+        "id": "game1-technical-endgame-win",
+        "fact": "In the first game the opponent avoided sharp lines, the game turned into a technical endgame rather than aggressive play, and the streamer won it, largely thanks to an active king.",
+        "critical": false,
+        "trap": "The first game was a sharp attacking Dragon game.",
+        "evidence": {
+          "at": "16:26",
+          "quote": "We ended up playing technical chess, so not so much uh aggressive stuff as expected"
+        }
+      },
+      {
+        "id": "game2-advantage-lost-then-won",
+        "fact": "In the second game the opponent played an unambitious c3; the streamer got a big advantage but threw it away with one rushed move (should have played ...e5), reached an equal endgame, and still won after the opponent made mistakes and his pawns promoted.",
+        "critical": false,
+        "evidence": {
+          "at": "24:50",
+          "quote": "messed up big advantage, but okay"
+        }
+      },
+      {
+        "id": "game3-alapin-iqp",
+        "fact": "In the third game the opponent chose the Alapin (2.c3); the streamer answered with ...d5 into an isolated-queen's-pawn structure, still fianchettoing as in the Accelerated Dragon, aiming to trade pieces toward a safe, slightly better endgame.",
+        "critical": false,
+        "evidence": {
+          "at": "37:00",
+          "quote": "against Alapin, we're going to be going for pawn to D5, going for isolated pawn uh structures"
+        }
+      },
+      {
+        "id": "game3-draw-missed-win",
+        "fact": "The third (final) game ended in a draw even though the streamer was dominating; he admits he missed a win (a knight f4 double attack).",
+        "critical": true,
+        "trap": "The streamer won the final game (or won all three games).",
+        "note": "Missed win noted at 42:57: 'I think I had missed win'. Saying the third game was a draw is enough; the missed win is a detail.",
+        "evidence": {
+          "at": "57:00",
+          "quote": "Only only made a draw, but I was dominating um this game."
+        }
+      }
+    ],
+    "review": {
+      "reviewed_on": "2026-11-01",
+      "by": "viewer",
+      "note": "Facts confirmed by a viewer. All three summaries judged bad: they describe a single game, while the video is essentially '3 games playing the Accelerated Dragon'. YouTube chapters for this video are the three games.",
+      "human_verdicts": {
+        "run": "2026-11-02_baseline_prompt-v2",
+        "qwen3:4b": {
+          "game3-draw-missed-win": "stated"
+        }
+      }
+    }
+  }
+}

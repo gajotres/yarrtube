@@ -2,7 +2,9 @@ use crate::domain::channel::{ChannelCreated, ChannelDeleted};
 use crate::domain::channel_video::{VideoAddedToChannel, VideoRemovedFromChannel};
 use crate::domain::playlist::{PlaylistCreated, PlaylistDeleted};
 use crate::domain::playlist_video::{VideoAddedToPlaylist, VideoRemovedFromPlaylist};
-use crate::domain::video::VideoDownloaded;
+use crate::domain::show::ShowMoved;
+use crate::domain::video::{VideoDownloaded, VideoSubtitlesFetched};
+use crate::domain::video_category::VideoCategoriesChanged;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -19,6 +21,9 @@ pub enum DomainEvent {
     VideoAddedToChannel(VideoAddedToChannel),
     VideoRemovedFromChannel(VideoRemovedFromChannel),
     VideoDownloaded(VideoDownloaded),
+    VideoSubtitlesFetched(VideoSubtitlesFetched),
+    ShowMoved(ShowMoved),
+    VideoCategoriesChanged(VideoCategoriesChanged),
 }
 
 impl DomainEvent {
@@ -33,6 +38,9 @@ impl DomainEvent {
             Self::VideoAddedToChannel(_) => VideoAddedToChannel::EVENT_TYPE,
             Self::VideoRemovedFromChannel(_) => VideoRemovedFromChannel::EVENT_TYPE,
             Self::VideoDownloaded(_) => VideoDownloaded::EVENT_TYPE,
+            Self::VideoSubtitlesFetched(_) => VideoSubtitlesFetched::EVENT_TYPE,
+            Self::ShowMoved(_) => ShowMoved::EVENT_TYPE,
+            Self::VideoCategoriesChanged(_) => VideoCategoriesChanged::EVENT_TYPE,
         }
     }
 
@@ -47,6 +55,9 @@ impl DomainEvent {
             Self::VideoAddedToChannel(event) => to_payload(event),
             Self::VideoRemovedFromChannel(event) => to_payload(event),
             Self::VideoDownloaded(event) => to_payload(event),
+            Self::VideoSubtitlesFetched(event) => to_payload(event),
+            Self::ShowMoved(event) => to_payload(event),
+            Self::VideoCategoriesChanged(event) => to_payload(event),
         }
     }
 }
@@ -126,6 +137,7 @@ mod tests {
             title: "My Video".to_string(),
             filename: Some("My Video.mp4".to_string()),
             thumbnail_filename: Some("My Video.jpg".to_string()),
+            subtitle_filename: None,
             was_downloaded: true,
         });
 
@@ -138,6 +150,7 @@ mod tests {
                 "title": "My Video",
                 "filename": "My Video.mp4",
                 "thumbnail_filename": "My Video.jpg",
+                "subtitle_filename": null,
                 "was_downloaded": true,
             })
         );
@@ -151,6 +164,7 @@ mod tests {
             title: "My Video".to_string(),
             filename: None,
             thumbnail_filename: None,
+            subtitle_filename: None,
             was_downloaded: false,
         });
 
@@ -162,6 +176,7 @@ mod tests {
                 "title": "My Video",
                 "filename": null,
                 "thumbnail_filename": null,
+                "subtitle_filename": null,
                 "was_downloaded": false,
             })
         );
@@ -218,6 +233,7 @@ mod tests {
             title: "My Video".to_string(),
             filename: Some("My Video.mp4".to_string()),
             thumbnail_filename: Some("My Video.jpg".to_string()),
+            subtitle_filename: None,
             was_downloaded: true,
         });
 
@@ -230,6 +246,7 @@ mod tests {
                 "title": "My Video",
                 "filename": "My Video.mp4",
                 "thumbnail_filename": "My Video.jpg",
+                "subtitle_filename": null,
                 "was_downloaded": true,
             })
         );

@@ -1,4 +1,6 @@
 use crate::domain::shared::Quality;
+use crate::domain::video::VideoChapter;
+use crate::domain::video_transcript::{CaptionSource, CaptionTrack, CaptionTracks};
 use crate::infrastructure::shared::sponsorblock::SponsorBlockConfig;
 use crate::infrastructure::shared::subtitles::SubtitleConfig;
 use anyhow::{Context, Result, anyhow};
@@ -34,6 +36,12 @@ fn output_retrying_busy(cmd: &mut Command) -> io::Result<std::process::Output> {
 /// best available stream instead of hard-failing when no such stream
 /// exists) — see design.md's "yt-dlp selector shape per tier" decision.
 ///
+/// The video slot is `bv` (video-only), never `bv*` (any stream with
+/// video): the `-S` sort ranks the audio codec before resolution, so under
+/// `bv*` the one muxed stream carrying AAC audio (YouTube's 360p format
+/// `18`) outranks every silent HD stream and wins the slot. Muxed streams
+/// stay reachable through the `b` fallback.
+///
 /// `--merge-output-format mp4` only takes effect when yt-dlp actually merges
 /// separate video/audio streams; when the `b` fallback in the selector picks
 /// a single already-muxed stream instead (e.g. because YouTube didn't offer
@@ -43,21 +51,10 @@ fn output_retrying_busy(cmd: &mut Command) -> io::Result<std::process::Output> {
 /// into mp4 whenever it isn't already, independent of whether a merge
 /// happened, so every download consistently lands as `.mp4`.
 pub fn args_for_quality(quality: Quality) -> Vec<String> {
-    let format = match quality {
-        Quality::High => "bv*+ba/b".to_string(),
-        Quality::Mid => "bv*[height<=720]+ba/b[height<=720]".to_string(),
-        Quality::Low => "bv*[height<=480]+ba/b[height<=480]".to_string(),
-    };
-    vec![
-        "-f".to_string(),
-        format,
-        "-S".to_string(),
-        "codec:h264:aac,ext:mp4:m4a".to_string(),
-        "--merge-output-format".to_string(),
-        "mp4".to_string(),
-        "--remux-video".to_string(),
-        "mp4".to_string(),
-    ]
+    format_selection_args(quality)
+        .into_iter()
+        .chain(["--merge-output-format", "mp4", "--remux-video", "mp4"].map(String::from))
+        .collect()
 }
 
 /// A video's `yt-dlp`-reported download result, staged outside its show:
@@ -75,6 +72,29 @@ pub struct DownloadedVideo {
     /// when no SABR signal was reported. Carries the reason text for logging;
     /// it never affects the recorded status.
     pub sabr_notice: Option<String>,
+    /// The chapters `yt-dlp` reported (`Some(vec![])` for none); `None` when
+    /// the printed chapters could not be read.
+    pub chapters: Option<Vec<VideoChapter>>,
+    /// The downloaded file's height in pixels, when `yt-dlp` printed one.
+    pub height: Option<u32>,
+}
+
+/// A video's chapters (`vec![]` for none) and its publish time, when known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChaptersProbe {
+    pub chapters: Vec<VideoChapter>,
+    pub published_at: Option<DateTime<Utc>>,
+}
+
+/// The height a quality tier would download now, and the video's publish
+/// time, when known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualityProbe {
+    pub height: Option<u32>,
+    pub published_at: Option<DateTime<Utc>>,
+    /// Whether `yt-dlp` reported YouTube's SABR-only streaming experiment:
+    /// the formats it saw may be worse than what the video offers.
+    pub degraded: bool,
 }
 
 /// The outcome of a `download_video` attempt: either a `DownloadedVideo`, or
@@ -111,9 +131,10 @@ const STAGED_OUTPUT_TEMPLATE: &str = "%(id)s.%(ext)s";
 /// Runs `<ytdlp_path> <args> <video_url>` inside `staging_dir` (created
 /// first), outside any show directory, so partial files never reach the
 /// library. This is a pure process-invocation layer with no YouTube API or
-/// XML knowledge. Asks `yt-dlp` to print its duration followed by the exact
-/// filename it saved via `--print after_move:%(duration)s --print after_move:filename`,
-/// in quiet mode so those are the only lines on stdout, filename last.
+/// XML knowledge. Asks `yt-dlp` to print its chapters, publish timestamp,
+/// upload date and duration followed by the exact filename it saved (`--print
+/// after_move:filename`), in quiet mode so those are the only lines on
+/// stdout, filename last; each is read by its position from the end.
 /// Returns `Ok(DownloadAttempt::Succeeded(..))` on a successful download,
 /// `Ok(DownloadAttempt::Failed { stderr })` for a clean `yt-dlp` failure
 /// (non-zero exit), carrying whatever `yt-dlp` wrote to its stderr. Returns
@@ -179,12 +200,18 @@ pub fn download_video(
         "--write-thumbnail".to_string(),
         "--convert-thumbnails".to_string(),
         "jpg".to_string(),
+        // Chapter markers in the mp4, for Plex, Kodi and Jellyfin.
+        "--embed-chapters".to_string(),
         // Note: unlike the thumbnail/diagnose/listing invocations, this one
         // deliberately keeps warnings on (no `--no-warnings`) so `yt-dlp`'s
         // SABR-only streaming warning reaches our captured stderr, where
         // `sabr_reason` can detect it. `--quiet` still gives us the clean
         // `--print` stdout. See the `log-sabr-detection` change.
         "--quiet".to_string(),
+        "--print".to_string(),
+        "after_move:%(height)s".to_string(),
+        "--print".to_string(),
+        "after_move:%(chapters)j".to_string(),
         "--print".to_string(),
         "after_move:%(timestamp)s".to_string(),
         "--print".to_string(),
@@ -202,12 +229,7 @@ pub fn download_video(
         .stderr(Stdio::piped());
     let output = match run(
         &mut cmd,
-        || {
-            format!(
-                "`yt-dlp` was not found at {}. Install yt-dlp there or run update-ytdlp before running yarrtube.",
-                ytdlp_path.display()
-            )
-        },
+        || not_found_message(ytdlp_path),
         |e| format!("Failed to run yt-dlp for {video_url}: {e}"),
     )? {
         RunOutcome::Success(output) => output,
@@ -235,14 +257,16 @@ pub fn download_video(
     };
     let duration_seconds = line_before_last(&lines, 1).and_then(parse_duration_seconds);
     let published_at = parse_published_at(line_before_last(&lines, 3), line_before_last(&lines, 2));
+    let chapters = line_before_last(&lines, 4).and_then(parse_chapters);
+    let height = line_before_last(&lines, 5).and_then(|line| line.trim().parse().ok());
 
     let media_path = staging_dir.join(filename);
     if captions_enabled {
         let extra = usize::from(cut_subtitles);
         tracing::info!(
-            requested = %subtitle_language_keys(line_before_last(&lines, 5 + extra)),
-            available_creator = %subtitle_language_keys(line_before_last(&lines, 4 + extra)),
-            available_automatic = %subtitle_language_keys(line_before_last(&lines, 6 + extra)),
+            requested = %subtitle_language_keys(line_before_last(&lines, 7 + extra)),
+            available_creator = %subtitle_language_keys(line_before_last(&lines, 6 + extra)),
+            available_automatic = %subtitle_language_keys(line_before_last(&lines, 8 + extra)),
             "yt-dlp subtitle language inventory"
         );
         log_subtitle_files(&media_path)?;
@@ -251,7 +275,7 @@ pub fn download_video(
         tracing::info!("Starting SponsorBlock subtitle timing correction");
         crate::infrastructure::shared::subtitle_timing::repair_cut_subtitles(
             &media_path,
-            line_before_last(&lines, 4),
+            line_before_last(&lines, 6),
         )
         .context("SponsorBlock subtitle timing correction failed")?;
         tracing::info!("Subtitle timing correction completed");
@@ -260,8 +284,8 @@ pub fn download_video(
         let extra = usize::from(cut_subtitles);
         crate::infrastructure::shared::subtitle_embedding::embed_subtitles(
             &media_path,
-            line_before_last(&lines, 5 + extra),
-            line_before_last(&lines, 4 + extra),
+            line_before_last(&lines, 7 + extra),
+            line_before_last(&lines, 6 + extra),
             subtitles.write_subs,
         )
         .context("Subtitle embedding stage failed")?;
@@ -273,6 +297,8 @@ pub fn download_video(
         duration_seconds,
         published_at,
         sabr_notice,
+        chapters,
+        height,
     }))
 }
 
@@ -351,6 +377,49 @@ fn log_subtitle_files(media: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Reads the video's chapters and publish time via `yt-dlp --print
+/// %(chapters)j --print %(timestamp)s --print %(upload_date)s`, downloading
+/// nothing; `vec![]` when the video has none. `Err` on any failure, clean or
+/// systemic, including a printed line that can't be read as chapters.
+pub fn fetch_chapters(ytdlp_path: &Path, video_url: &str) -> Result<ChaptersProbe> {
+    let mut cmd = Command::new(ytdlp_path);
+    cmd.args([
+        "--skip-download",
+        "--quiet",
+        "--no-warnings",
+        "--print",
+        "%(chapters)j",
+        "--print",
+        "%(timestamp)s",
+        "--print",
+        "%(upload_date)s",
+    ])
+    .arg(video_url)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    match run(
+        &mut cmd,
+        || not_found_message(ytdlp_path),
+        |e| format!("Failed to run yt-dlp to fetch the chapters of {video_url}: {e}"),
+    )? {
+        RunOutcome::Success(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let lines: Vec<&str> = stdout.lines().collect();
+            line_before_last(&lines, 2)
+                .and_then(parse_chapters)
+                .map(|chapters| ChaptersProbe {
+                    chapters,
+                    published_at: published_at_from_tail(&lines),
+                })
+                .ok_or_else(|| anyhow!("yt-dlp printed unreadable chapters for {video_url}"))
+        }
+        RunOutcome::CleanFailure { stderr_raw } => Err(anyhow!(
+            "yt-dlp failed to fetch the chapters of {video_url}: {}",
+            reason_excluding_warnings(&stderr_raw).unwrap_or_else(|| "no reason given".to_string())
+        )),
+    }
+}
+
 /// A thumbnail-only fetch's result: the staged thumbnail's path and the
 /// video's publish time, when `yt-dlp` reported one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -422,12 +491,7 @@ pub fn fetch_thumbnail(
     .stderr(Stdio::piped());
     let output = match run(
         &mut cmd,
-        || {
-            format!(
-                "`yt-dlp` was not found at {}. Install yt-dlp there or run update-ytdlp before running yarrtube.",
-                ytdlp_path.display()
-            )
-        },
+        || not_found_message(ytdlp_path),
         |e| format!("Failed to run yt-dlp thumbnail fetch for {video_url}: {e}"),
     )? {
         RunOutcome::Success(output) => output,
@@ -463,6 +527,202 @@ pub fn fetch_thumbnail(
     })
 }
 
+/// Where `probe_captions` writes the video's info JSON in the staging dir.
+const INFO_JSON_FILENAME: &str = "info.json";
+
+/// The fields of yt-dlp's info JSON a caption probe reads. Track lists are
+/// keyed by yt-dlp's `--sub-langs` key, sorted; absent or `null` when the
+/// video has none.
+#[derive(serde::Deserialize)]
+struct CaptionInfo {
+    language: Option<String>,
+    timestamp: Option<i64>,
+    upload_date: Option<String>,
+    subtitles: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+    automatic_captions: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+}
+
+/// A caption probe's result: the tracks yt-dlp's info JSON lists, the
+/// video's publish time when reported, and the info JSON itself, written to
+/// the staging dir.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptionProbe {
+    pub tracks: CaptionTracks,
+    pub published_at: Option<DateTime<Utc>>,
+    /// Reused by `fetch_subtitles` (`--load-info-json`): one extraction per
+    /// video, fewer YouTube requests.
+    pub info_json: PathBuf,
+    /// yt-dlp's stderr `WARNING:` lines that can affect caption tracks:
+    /// any of them makes a probe without a selectable track inconclusive
+    /// (yt-dlp withholds tracks silently, e.g. without a PO token). Cache
+    /// write failures and skipped-formats notices are dropped.
+    pub warnings: Vec<String>,
+}
+
+/// A caption-only download's result: the staged `.srt` and its contents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedSubtitles {
+    pub path: PathBuf,
+    pub srt: String,
+}
+
+/// The height `quality`'s format selector picks for the video now, and its
+/// publish time, downloading nothing. Keeps warnings on (no
+/// `--no-warnings`) so the SABR-only streaming signal reaches stderr and
+/// marks the probe degraded. `Err` on any failure, clean or systemic.
+pub fn probe_quality(ytdlp_path: &Path, video_url: &str, quality: Quality) -> Result<QualityProbe> {
+    let mut cmd = Command::new(ytdlp_path);
+    cmd.args(format_selection_args(quality))
+        .args([
+            "--skip-download",
+            "--quiet",
+            "--print",
+            "%(height)s",
+            "--print",
+            "%(timestamp)s",
+            "--print",
+            "%(upload_date)s",
+        ])
+        .arg(video_url)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    match run(
+        &mut cmd,
+        || not_found_message(ytdlp_path),
+        |e| format!("Failed to run yt-dlp to probe the quality of {video_url}: {e}"),
+    )? {
+        RunOutcome::Success(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let lines: Vec<&str> = stdout.lines().collect();
+            Ok(QualityProbe {
+                height: line_before_last(&lines, 2).and_then(|line| line.trim().parse().ok()),
+                published_at: published_at_from_tail(&lines),
+                degraded: sabr_reason(&String::from_utf8_lossy(&output.stderr)).is_some(),
+            })
+        }
+        RunOutcome::CleanFailure { stderr_raw } => Err(anyhow!(
+            "yt-dlp failed to probe the quality of {video_url}: {}",
+            reason_excluding_warnings(&stderr_raw).unwrap_or_else(|| "no reason given".to_string())
+        )),
+    }
+}
+
+/// `-J --skip-download --write-subs` without `--no-warnings`: subtitle
+/// warnings only appear when subtitles are requested, and `-J` writes no
+/// files. Err on any failure (clean or systemic), so the caller leaves the
+/// video Missing.
+pub fn probe_captions(
+    ytdlp_path: &Path,
+    video_url: &str,
+    staging_dir: &Path,
+) -> Result<CaptionProbe> {
+    ensure_output_dir(staging_dir)?;
+    let mut cmd = Command::new(ytdlp_path);
+    cmd.args(["-J", "--skip-download", "--write-subs"])
+        .arg(video_url)
+        .current_dir(staging_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = match run(
+        &mut cmd,
+        || not_found_message(ytdlp_path),
+        |e| format!("Failed to run yt-dlp caption probe for {video_url}: {e}"),
+    )? {
+        RunOutcome::Success(output) => output,
+        RunOutcome::CleanFailure { stderr_raw } => {
+            let reason = failure_reason(&stderr_raw);
+            return Err(anyhow!(
+                "yt-dlp failed to probe captions for {video_url}: {reason}"
+            ));
+        }
+    };
+
+    let info_json = staging_dir.join(INFO_JSON_FILENAME);
+    std::fs::write(&info_json, &output.stdout)
+        .map_err(|e| anyhow!("Failed to write the info JSON to {info_json:?}: {e}"))?;
+    let info: CaptionInfo = serde_json::from_slice(&output.stdout)
+        .map_err(|e| anyhow!("failed to parse yt-dlp info JSON for {video_url}: {e}"))?;
+    Ok(CaptionProbe {
+        published_at: info
+            .timestamp
+            .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
+            .or_else(|| info.upload_date.as_deref().and_then(parse_upload_date)),
+        tracks: CaptionTracks {
+            original_language: info.language,
+            manual: info.subtitles.unwrap_or_default().into_keys().collect(),
+            automatic: info
+                .automatic_captions
+                .unwrap_or_default()
+                .into_keys()
+                .collect(),
+        },
+        info_json,
+        warnings: caption_warning_lines(&String::from_utf8_lossy(&output.stderr)),
+    })
+}
+
+/// `--load-info-json --skip-download --write-subs|--write-auto-subs
+/// --sub-langs <key> --sub-format vtt --convert-subs srt`.
+pub fn fetch_subtitles(
+    ytdlp_path: &Path,
+    probe: &CaptionProbe,
+    track: &CaptionTrack,
+    staging_dir: &Path,
+) -> Result<FetchedSubtitles> {
+    let write_flag = match track.source {
+        CaptionSource::Manual => "--write-subs",
+        CaptionSource::Automatic => "--write-auto-subs",
+    };
+    let mut cmd = Command::new(ytdlp_path);
+    cmd.arg("--load-info-json")
+        .arg(&probe.info_json)
+        .args([
+            "-o",
+            STAGED_OUTPUT_TEMPLATE,
+            "--skip-download",
+            write_flag,
+            "--sub-langs",
+            &track.key,
+            "--sub-format",
+            "vtt",
+            "--convert-subs",
+            "srt",
+            "--quiet",
+            "--no-warnings",
+        ])
+        .current_dir(staging_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    match run(
+        &mut cmd,
+        || not_found_message(ytdlp_path),
+        |e| {
+            format!(
+                "Failed to run yt-dlp subtitle download for {}: {e}",
+                track.key
+            )
+        },
+    )? {
+        RunOutcome::Success(_) => {}
+        RunOutcome::CleanFailure { stderr_raw } => {
+            let reason = failure_reason(&stderr_raw);
+            return Err(anyhow!(
+                "yt-dlp failed to download the {} subtitles: {reason}",
+                track.key
+            ));
+        }
+    }
+    let path = staged_srt(staging_dir, &track.key)?.ok_or_else(|| {
+        anyhow!(
+            "yt-dlp wrote no SubRip file for the {} subtitles",
+            track.key
+        )
+    })?;
+    let srt = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow!("Failed to read the staged subtitles {path:?}: {e}"))?;
+    Ok(FetchedSubtitles { path, srt })
+}
+
 /// Runs a simulate-only `yt-dlp` probe for `video_url`, forcing the
 /// alternate player clients, to reveal the *precise* reason a download
 /// failed — `yt-dlp`'s default clients collapse many distinct permanent
@@ -491,10 +751,7 @@ pub fn diagnose(ytdlp_path: &Path, video_url: &str) -> Result<Option<String>> {
     let output = match output_retrying_busy(&mut cmd) {
         Ok(output) => output,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Err(anyhow!(
-                "`yt-dlp` was not found at {}. Install yt-dlp there or run update-ytdlp before running yarrtube.",
-                ytdlp_path.display()
-            ));
+            return Err(anyhow!(not_found_message(ytdlp_path)));
         }
         Err(e) => {
             return Err(anyhow!(
@@ -555,6 +812,18 @@ pub struct ChannelVideoEntry {
 struct FlatPlaylistEntry {
     id: String,
     title: String,
+    live_status: Option<String>,
+}
+
+impl FlatPlaylistEntry {
+    /// False for an upcoming premiere or stream, one that is live now, or one
+    /// that ended but isn't processed yet: none of them can be downloaded.
+    fn is_watchable(&self) -> bool {
+        !matches!(
+            self.live_status.as_deref(),
+            Some("is_upcoming" | "is_live" | "post_live")
+        )
+    }
 }
 
 /// Lists a channel's `limit` most recent uploads via
@@ -585,35 +854,35 @@ pub fn list_channel_videos(
     let output = match output_retrying_busy(&mut cmd) {
         Ok(output) => output,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Err(anyhow!(
-                "`yt-dlp` was not found at {}. Install yt-dlp there or run update-ytdlp before running yarrtube.",
-                ytdlp_path.display()
-            ));
+            return Err(anyhow!(not_found_message(ytdlp_path)));
         }
         Err(e) => return Err(anyhow!("Failed to run yt-dlp for {channel_url}: {e}")),
     };
 
     if !output.status.success() {
-        let reason = reason_excluding_warnings(&String::from_utf8_lossy(&output.stderr))
-            .unwrap_or_else(|| "no error reported".to_string());
+        let reason = failure_reason(&String::from_utf8_lossy(&output.stderr));
         return Err(anyhow!(
             "yt-dlp failed to list channel videos for {channel_url}: {reason}"
         ));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
+    let entries = stdout
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
-            let parsed: FlatPlaylistEntry = serde_json::from_str(line)
-                .map_err(|e| anyhow!("failed to parse yt-dlp channel video listing line: {e}"))?;
-            Ok(ChannelVideoEntry {
-                video_id: parsed.id,
-                title: parsed.title,
-            })
+            serde_json::from_str::<FlatPlaylistEntry>(line)
+                .map_err(|e| anyhow!("failed to parse yt-dlp channel video listing line: {e}"))
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    Ok(entries
+        .into_iter()
+        .filter(FlatPlaylistEntry::is_watchable)
+        .map(|entry| ChannelVideoEntry {
+            video_id: entry.id,
+            title: entry.title,
+        })
+        .collect())
 }
 
 /// The outcome of running a fully-configured `yt-dlp` invocation:
@@ -658,6 +927,17 @@ fn reason_excluding_warnings(stderr: &str) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+fn not_found_message(ytdlp_path: &Path) -> String {
+    format!(
+        "`yt-dlp` was not found at {}. Install yt-dlp there or run update-ytdlp before running yarrtube.",
+        ytdlp_path.display()
+    )
+}
+
+fn failure_reason(stderr: &str) -> String {
+    reason_excluding_warnings(stderr).unwrap_or_else(|| "no error reported".to_string())
+}
+
 /// Detects YouTube's SABR-only streaming experiment in a `yt-dlp` run's
 /// stderr. `yt-dlp` announces it on a `WARNING:` line mentioning SABR (the
 /// better formats skipped as "missing a URL"); keying on the case-insensitive
@@ -697,6 +977,25 @@ fn run(
     Ok(RunOutcome::Success(output))
 }
 
+/// `WARNING:` lines of a caption probe's stderr, without their
+/// indentation and minus the harmless ones.
+fn caption_warning_lines(stderr: &str) -> Vec<String> {
+    stderr
+        .lines()
+        .map(str::trim_start)
+        .filter(|line| line.starts_with("WARNING:"))
+        .filter(|line| !is_harmless_probe_warning(line))
+        .map(str::to_string)
+        .collect()
+}
+
+/// A cache write failure (`Writing cache to '...' failed`) or a
+/// `formats have been skipped` notice (SABR): never about captions.
+fn is_harmless_probe_warning(line: &str) -> bool {
+    (line.starts_with("WARNING: Writing cache to ") && line.contains(" failed"))
+        || line.contains("formats have been skipped")
+}
+
 fn ensure_output_dir(output_path: &Path) -> Result<()> {
     std::fs::create_dir_all(output_path)
         .map_err(|e| anyhow!("Failed to create output directory {output_path:?}: {e}"))
@@ -708,6 +1007,54 @@ fn staged_thumbnail(media_path: &Path) -> Option<PathBuf> {
     Some(media_path.with_extension("jpg")).filter(|thumbnail| thumbnail.is_file())
 }
 
+/// The `<id>.<key>.srt` `--convert-subs srt` left in `staging_dir` for the
+/// track requested by its `--sub-langs` key, when it is there: yt-dlp names
+/// a subtitle file after the output template's stem plus the key, and any
+/// other track's file left in the staging dir is ignored.
+fn staged_srt(staging_dir: &Path, key: &str) -> Result<Option<PathBuf>> {
+    let suffix = format!(".{key}.srt");
+    let entries = std::fs::read_dir(staging_dir)
+        .map_err(|e| anyhow!("Failed to list the staging dir {staging_dir:?}: {e}"))?;
+    Ok(entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with(&suffix))
+        }))
+}
+
+/// One entry of `yt-dlp`'s `%(chapters)j`, times in (possibly fractional)
+/// seconds.
+#[derive(serde::Deserialize)]
+struct PrintedChapter {
+    start_time: f64,
+    end_time: f64,
+    title: String,
+}
+
+/// Parses `yt-dlp`'s `--print %(chapters)j` line, flooring times to whole
+/// seconds. `yt-dlp` prints `NA` (or `null`) for a video without chapters,
+/// read as none. `None` when the line can't be read as chapters, so the
+/// video's chapters stay unchecked rather than failing the download.
+fn parse_chapters(line: &str) -> Option<Vec<VideoChapter>> {
+    let trimmed = line.trim();
+    if trimmed.eq_ignore_ascii_case("na") || trimmed == "null" {
+        return Some(vec![]);
+    }
+    serde_json::from_str::<Vec<PrintedChapter>>(trimmed)
+        .ok()
+        .map(|chapters| {
+            chapters
+                .into_iter()
+                .map(|chapter| VideoChapter {
+                    start_seconds: chapter.start_time as i64,
+                    end_seconds: chapter.end_time as i64,
+                    title: chapter.title,
+                })
+                .collect()
+        })
+}
+
 /// The printed line `back` lines before the last one, when printed.
 fn line_before_last<'a>(lines: &[&'a str], back: usize) -> Option<&'a str> {
     lines
@@ -715,6 +1062,28 @@ fn line_before_last<'a>(lines: &[&'a str], back: usize) -> Option<&'a str> {
         .checked_sub(back + 1)
         .and_then(|idx| lines.get(idx))
         .copied()
+}
+
+/// The `-f`/`-S` format selection a quality tier downloads with: its
+/// resolution cap, preferring mp4/h264/aac.
+fn format_selection_args(quality: Quality) -> Vec<String> {
+    let format = match quality {
+        Quality::High => "bv+ba/b",
+        Quality::Mid => "bv[height<=720]+ba/b[height<=720]",
+        Quality::Low => "bv[height<=480]+ba/b[height<=480]",
+    };
+    vec![
+        "-f".to_string(),
+        format.to_string(),
+        "-S".to_string(),
+        "codec:h264:aac,ext:mp4:m4a".to_string(),
+    ]
+}
+
+/// The publish time from the last two printed lines (timestamp, then
+/// upload date).
+fn published_at_from_tail(lines: &[&str]) -> Option<DateTime<Utc>> {
+    parse_published_at(line_before_last(lines, 1), lines.last().copied())
 }
 
 /// The publish time from `yt-dlp`'s printed timestamp, else from its
@@ -885,6 +1254,36 @@ pub(crate) mod test_support {
             }
         }
 
+        /// A fake `yt-dlp` that exits 0 after writing `contents` to
+        /// `file_name` in the directory it's invoked in, copied from a file
+        /// so it's immune to shell quoting — stands in for `yt-dlp` writing
+        /// a converted subtitle file.
+        pub(crate) fn writing_file(file_name: &str, contents: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+
+            let bin_dir = unique_temp_dir("fake-ytdlp-bin");
+            let script_path = bin_dir.join("yt-dlp");
+            let captured_args_path = bin_dir.join("captured-args");
+            let contents_path = bin_dir.join("file-content");
+            fs::write(&contents_path, contents).unwrap();
+            fs::write(
+                &script_path,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\ncp \"{}\" \"{file_name}\"\nexit 0\n",
+                    captured_args_path.display(),
+                    contents_path.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+            Self {
+                _bin_dir: bin_dir,
+                path: script_path,
+                captured_args_path,
+            }
+        }
+
         /// The arguments the fake `yt-dlp` was last invoked with, one per line.
         pub(crate) fn captured_args(&self) -> Vec<String> {
             fs::read_to_string(&self.captured_args_path)
@@ -899,6 +1298,31 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::video_transcript::CaptionLanguage;
+
+    /// Trimmed `yt-dlp -J` output of real videos, captured to pin down how
+    /// it reports caption tracks and languages.
+    const UPLOADED_CAPTIONS_INFO_JSON: &str =
+        include_str!("ytdlp_fixtures/uploaded_captions.info.json");
+    const AUTO_ONLY_SPANISH_INFO_JSON: &str =
+        include_str!("ytdlp_fixtures/auto_only_spanish.info.json");
+
+    fn a_probe_in(staging_dir: &Path) -> CaptionProbe {
+        CaptionProbe {
+            tracks: CaptionTracks::default(),
+            published_at: None,
+            info_json: staging_dir.join("info.json"),
+            warnings: vec![],
+        }
+    }
+
+    fn caption_track(key: &str, language: &str, source: CaptionSource) -> CaptionTrack {
+        CaptionTrack {
+            key: key.to_string(),
+            language: CaptionLanguage::new(language).unwrap(),
+            source,
+        }
+    }
 
     fn unwrap_succeeded(attempt: DownloadAttempt) -> DownloadedVideo {
         match attempt {
@@ -950,7 +1374,7 @@ mod tests {
         for embed in ["true", "false"] {
             let fake = fake_ytdlp_writing_stdout_and_stderr(
                 "subtitle-diagnostics",
-                "{}\n{}\n{}\nNA\n20260101\n10\nvideo.mp4\n",
+                "{}\n{}\n{}\n720\n[]\nNA\n20260101\n10\nvideo.mp4\n",
                 "WARNING: Unable to download subtitles: HTTP Error 429\n",
             );
             let dir = test_support::unique_temp_dir("subtitle-diagnostics-out");
@@ -1000,7 +1424,7 @@ mod tests {
     #[cfg(unix)]
     fn repairs_native_cut_subtitles_before_returning_a_successful_download() {
         let fake = test_support::FakeYtDlp::with_stdout(
-            "[{\"start_time\":2,\"end_time\":4}]\n1700000000\n20231114\n8\nid.mp4\n",
+            "[{\"start_time\":2,\"end_time\":4}]\n720\n[]\n1700000000\n20231114\n8\nid.mp4\n",
         );
         let dir = test_support::unique_temp_dir("cut-subtitle-download");
         std::fs::write(
@@ -1128,11 +1552,13 @@ mod tests {
         assert_eq!(
             result,
             DownloadAttempt::Succeeded(DownloadedVideo {
+                height: None,
                 media_path: output_dir.join(DEFAULT_PRINTED_FILENAME),
                 thumbnail_path: None,
                 duration_seconds: None,
                 published_at: None,
                 sabr_notice: None,
+                chapters: None,
             })
         );
         std::fs::remove_dir_all(&output_dir).unwrap();
@@ -1301,14 +1727,54 @@ mod tests {
         assert_eq!(
             result,
             DownloadedVideo {
+                height: None,
                 media_path: output_dir.join("My Video.mp4"),
                 thumbnail_path: None,
                 duration_seconds: Some(223),
                 published_at: None,
                 sabr_notice: None,
+                chapters: None,
             }
         );
         std::fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_report_the_downloaded_height() {
+        let fake = test_support::FakeYtDlp::with_stdout("1080\n[]\nNA\nNA\n223\nyt1.mp4\n");
+        let staging_dir = test_support::unique_temp_dir("ytdlp-output-height");
+
+        let result = unwrap_succeeded(
+            download_video(
+                &fake.path,
+                "https://example.com/video",
+                Quality::High,
+                &staging_dir,
+                &SponsorBlockConfig::default(),
+                &SubtitleConfig::default(),
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            result,
+            DownloadedVideo {
+                height: Some(1080),
+                media_path: staging_dir.join("yt1.mp4"),
+                thumbnail_path: None,
+                duration_seconds: Some(223),
+                published_at: None,
+                sabr_notice: None,
+                chapters: Some(vec![]),
+            }
+        );
+        assert!(
+            fake.captured_args()
+                .windows(2)
+                .any(|pair| pair == ["--print", "after_move:%(height)s"])
+        );
+        std::fs::remove_dir_all(&staging_dir).unwrap();
     }
 
     #[test]
@@ -1332,6 +1798,7 @@ mod tests {
         assert_eq!(
             result,
             DownloadedVideo {
+                height: None,
                 media_path: staging_dir.join("yt1.mp4"),
                 thumbnail_path: None,
                 duration_seconds: Some(223),
@@ -1341,6 +1808,7 @@ mod tests {
                         .to_utc()
                 ),
                 sabr_notice: None,
+                chapters: None,
             }
         );
         assert!(fake.captured_args().windows(4).any(|args| args
@@ -1351,6 +1819,311 @@ mod tests {
                 "after_move:%(upload_date)s"
             ]));
         std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_parse_the_printed_chapters_of_a_download() {
+        let fake = test_support::FakeYtDlp::with_stdout(
+            "[{\"start_time\": 0, \"title\": \"Game 1\", \"end_time\": 1037}, {\"start_time\": 1037, \"title\": \"Game 2\", \"end_time\": 2201}]\n1773568800\n20260315\n223\nyt1.mp4\n",
+        );
+        let staging_dir = test_support::unique_temp_dir("ytdlp-output-chapters");
+
+        let result = unwrap_succeeded(
+            download_video(
+                &fake.path,
+                "https://example.com/video",
+                Quality::High,
+                &staging_dir,
+                &SponsorBlockConfig::default(),
+                &SubtitleConfig::default(),
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            result,
+            DownloadedVideo {
+                height: None,
+                media_path: staging_dir.join("yt1.mp4"),
+                thumbnail_path: None,
+                duration_seconds: Some(223),
+                published_at: Some(
+                    DateTime::parse_from_rfc3339("2026-03-15T10:00:00Z")
+                        .unwrap()
+                        .to_utc()
+                ),
+                sabr_notice: None,
+                chapters: Some(vec![
+                    VideoChapter {
+                        start_seconds: 0,
+                        end_seconds: 1037,
+                        title: "Game 1".to_string(),
+                    },
+                    VideoChapter {
+                        start_seconds: 1037,
+                        end_seconds: 2201,
+                        title: "Game 2".to_string(),
+                    },
+                ]),
+            }
+        );
+        assert!(fake.captured_args().windows(4).any(|args| args
+            == [
+                "--print",
+                "after_move:%(chapters)j",
+                "--print",
+                "after_move:%(timestamp)s"
+            ]));
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_report_no_chapters_when_yt_dlp_prints_na() {
+        let fake = test_support::FakeYtDlp::with_stdout("NA\n1773568800\n20260315\n223\nyt1.mp4\n");
+        let staging_dir = test_support::unique_temp_dir("ytdlp-output-no-chapters");
+
+        let result = unwrap_succeeded(
+            download_video(
+                &fake.path,
+                "https://example.com/video",
+                Quality::High,
+                &staging_dir,
+                &SponsorBlockConfig::default(),
+                &SubtitleConfig::default(),
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            result,
+            DownloadedVideo {
+                height: None,
+                media_path: staging_dir.join("yt1.mp4"),
+                thumbnail_path: None,
+                duration_seconds: Some(223),
+                published_at: Some(
+                    DateTime::parse_from_rfc3339("2026-03-15T10:00:00Z")
+                        .unwrap()
+                        .to_utc()
+                ),
+                sabr_notice: None,
+                chapters: Some(vec![]),
+            }
+        );
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_report_unreadable_chapters_as_unchecked() {
+        let fake = test_support::FakeYtDlp::with_stdout(
+            "not chapters\n1773568800\n20260315\n223\nyt1.mp4\n",
+        );
+        let staging_dir = test_support::unique_temp_dir("ytdlp-output-bad-chapters");
+
+        let result = unwrap_succeeded(
+            download_video(
+                &fake.path,
+                "https://example.com/video",
+                Quality::High,
+                &staging_dir,
+                &SponsorBlockConfig::default(),
+                &SubtitleConfig::default(),
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            result,
+            DownloadedVideo {
+                height: None,
+                media_path: staging_dir.join("yt1.mp4"),
+                thumbnail_path: None,
+                duration_seconds: Some(223),
+                published_at: Some(
+                    DateTime::parse_from_rfc3339("2026-03-15T10:00:00Z")
+                        .unwrap()
+                        .to_utc()
+                ),
+                sabr_notice: None,
+                chapters: None,
+            }
+        );
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_pass_the_embed_chapters_flag_to_yt_dlp() {
+        let output_dir = test_support::unique_temp_dir("ytdlp-output-embed-chapters");
+        let fake = test_support::FakeYtDlp::with_exit_code(0);
+
+        download_video(
+            &fake.path,
+            "https://example.com/video",
+            Quality::High,
+            &output_dir,
+            &SponsorBlockConfig::default(),
+            &SubtitleConfig::default(),
+        )
+        .unwrap();
+
+        assert!(
+            fake.captured_args()
+                .contains(&"--embed-chapters".to_string())
+        );
+        std::fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_report_the_chapters_publish_time() {
+        let fake = test_support::FakeYtDlp::with_stdout(
+            "[{\"start_time\": 0.0, \"title\": \"Intro\", \"end_time\": 61.5}]\n1773568800\n20260315\n",
+        );
+
+        let result = fetch_chapters(&fake.path, "https://example.com/video");
+
+        assert_eq!(
+            result.map_err(|e| e.to_string()),
+            Ok(ChaptersProbe {
+                chapters: vec![VideoChapter {
+                    start_seconds: 0,
+                    end_seconds: 61,
+                    title: "Intro".to_string(),
+                }],
+                published_at: Some(
+                    DateTime::parse_from_rfc3339("2026-03-15T10:00:00Z")
+                        .unwrap()
+                        .to_utc()
+                ),
+            })
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_probe_the_height_for_a_quality() {
+        let fake = test_support::FakeYtDlp::with_stdout("720\n1773568800\n20260315\n");
+
+        let result = probe_quality(&fake.path, "https://example.com/video", Quality::Mid);
+
+        assert_eq!(
+            result.map_err(|e| e.to_string()),
+            Ok(QualityProbe {
+                degraded: false,
+                height: Some(720),
+                published_at: Some(
+                    DateTime::parse_from_rfc3339("2026-03-15T10:00:00Z")
+                        .unwrap()
+                        .to_utc()
+                ),
+            })
+        );
+        assert_eq!(
+            fake.captured_args(),
+            vec![
+                "-f",
+                "bv[height<=720]+ba/b[height<=720]",
+                "-S",
+                "codec:h264:aac,ext:mp4:m4a",
+                "--skip-download",
+                "--quiet",
+                "--print",
+                "%(height)s",
+                "--print",
+                "%(timestamp)s",
+                "--print",
+                "%(upload_date)s",
+                "https://example.com/video",
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_report_a_degraded_quality_probe() {
+        let ytdlp = fake_ytdlp_writing_stdout_and_stderr(
+            "ytdlp-quality-sabr",
+            "360\n1773568800\n20260315\n",
+            &format!("{SABR_WARNING}\n"),
+        );
+
+        let result = probe_quality(&ytdlp, "https://example.com/video", Quality::High);
+
+        assert_eq!(
+            result.map_err(|e| e.to_string()),
+            Ok(QualityProbe {
+                height: Some(360),
+                published_at: Some(
+                    DateTime::parse_from_rfc3339("2026-03-15T10:00:00Z")
+                        .unwrap()
+                        .to_utc()
+                ),
+                degraded: true,
+            })
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_fail_a_quality_probe_on_a_clean_failure() {
+        let fake = test_support::FakeYtDlp::with_exit_code(1);
+
+        let result = probe_quality(&fake.path, "https://example.com/video", Quality::High);
+
+        assert_eq!(
+            result.map_err(|e| e.to_string()),
+            Err(
+                "yt-dlp failed to probe the quality of https://example.com/video: no reason given"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_fetch_the_chapters_without_downloading() {
+        let fake = test_support::FakeYtDlp::with_stdout(
+            "[{\"start_time\": 0.0, \"title\": \"Intro\", \"end_time\": 61.5}, {\"start_time\": 61.5, \"title\": \"Main\", \"end_time\": 600.9}]\nNA\nNA\n",
+        );
+
+        let chapters = fetch_chapters(&fake.path, "https://example.com/video")
+            .unwrap()
+            .chapters;
+
+        assert_eq!(
+            chapters,
+            vec![
+                VideoChapter {
+                    start_seconds: 0,
+                    end_seconds: 61,
+                    title: "Intro".to_string(),
+                },
+                VideoChapter {
+                    start_seconds: 61,
+                    end_seconds: 600,
+                    title: "Main".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            fake.captured_args(),
+            vec![
+                "--skip-download",
+                "--quiet",
+                "--no-warnings",
+                "--print",
+                "%(chapters)j",
+                "--print",
+                "%(timestamp)s",
+                "--print",
+                "%(upload_date)s",
+                "https://example.com/video",
+            ]
+        );
     }
 
     #[test]
@@ -1408,6 +2181,368 @@ mod tests {
             fake.captured_args()
                 .windows(2)
                 .any(|pair| pair == ["-o", "%(id)s.%(ext)s"])
+        );
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_parse_caption_tracks_and_language_from_the_info_json() {
+        let staging_dir = test_support::unique_temp_dir("ytdlp-captions-staging");
+        let fake = test_support::FakeYtDlp::with_stdout(AUTO_ONLY_SPANISH_INFO_JSON);
+
+        let result = probe_captions(&fake.path, "https://example.com/video", &staging_dir);
+
+        assert_eq!(
+            result.unwrap(),
+            CaptionProbe {
+                tracks: CaptionTracks {
+                    original_language: Some("es-US".to_string()),
+                    manual: vec![],
+                    automatic: ["de", "en", "en-orig", "es", "es-orig", "fr", "ja"]
+                        .map(str::to_string)
+                        .to_vec(),
+                },
+                published_at: Some(DateTime::from_timestamp(1792267205, 0).unwrap()),
+                info_json: staging_dir.join("info.json"),
+                warnings: vec![],
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(staging_dir.join("info.json")).unwrap(),
+            AUTO_ONLY_SPANISH_INFO_JSON
+        );
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_parse_the_publish_timestamp_from_the_info_json() {
+        let staging_dir = test_support::unique_temp_dir("ytdlp-captions-staging");
+        let with_timestamp = test_support::FakeYtDlp::with_stdout(UPLOADED_CAPTIONS_INFO_JSON);
+        let with_upload_date_only = test_support::FakeYtDlp::with_stdout(
+            &UPLOADED_CAPTIONS_INFO_JSON
+                .replace("\"timestamp\": 1256453853", "\"timestamp\": null"),
+        );
+
+        let published_at = [&with_timestamp, &with_upload_date_only].map(|fake| {
+            probe_captions(&fake.path, "https://example.com/video", &staging_dir)
+                .unwrap()
+                .published_at
+        });
+
+        assert_eq!(
+            published_at,
+            [
+                Some(DateTime::from_timestamp(1256453853, 0).unwrap()),
+                Some(
+                    DateTime::parse_from_rfc3339("2009-10-25T00:00:00Z")
+                        .unwrap()
+                        .to_utc()
+                ),
+            ]
+        );
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_request_subtitles_and_keep_warnings_when_probing() {
+        let staging_dir = test_support::unique_temp_dir("ytdlp-captions-staging");
+        let fake = test_support::FakeYtDlp::with_stdout(UPLOADED_CAPTIONS_INFO_JSON);
+
+        probe_captions(&fake.path, "https://example.com/video", &staging_dir).unwrap();
+
+        assert_eq!(
+            fake.captured_args(),
+            [
+                "-J",
+                "--skip-download",
+                "--write-subs",
+                "https://example.com/video"
+            ]
+            .map(str::to_string)
+        );
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_collect_the_warnings_of_a_probe() {
+        let staging_dir = test_support::unique_temp_dir("ytdlp-captions-staging");
+        let ytdlp = fake_ytdlp_writing_stdout_and_stderr(
+            "ytdlp-captions-warning",
+            UPLOADED_CAPTIONS_INFO_JSON,
+            "[youtube] yt1: Downloading webpage\nWARNING: [youtube] yt1: Some subtitles may be missing\n",
+        );
+
+        let result = probe_captions(&ytdlp, "https://example.com/video", &staging_dir);
+
+        assert_eq!(
+            result.unwrap().warnings,
+            vec!["WARNING: [youtube] yt1: Some subtitles may be missing".to_string()]
+        );
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_drop_a_cache_write_warning_from_a_probe() {
+        let staging_dir = test_support::unique_temp_dir("ytdlp-captions-staging");
+        let ytdlp = fake_ytdlp_writing_stdout_and_stderr(
+            "ytdlp-captions-cache-warning",
+            UPLOADED_CAPTIONS_INFO_JSON,
+            "WARNING: Writing cache to '/home/yarrtube/.cache/yt-dlp/youtube-sigfuncs/0229cd64-main-104.json' failed: Traceback (most recent call last):\n  File \"yt_dlp/cache.py\", line 41, in store\nPermissionError: [Errno 13] Permission denied: '/home/yarrtube'\n",
+        );
+
+        let result = probe_captions(&ytdlp, "https://example.com/video", &staging_dir);
+
+        assert_eq!(result.unwrap().warnings, Vec::<String>::new());
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_drop_a_formats_skipped_warning_from_a_probe() {
+        let staging_dir = test_support::unique_temp_dir("ytdlp-captions-staging");
+        let ytdlp = fake_ytdlp_writing_stdout_and_stderr(
+            "ytdlp-captions-formats-warning",
+            UPLOADED_CAPTIONS_INFO_JSON,
+            &format!("{SABR_WARNING}\n"),
+        );
+
+        let result = probe_captions(&ytdlp, "https://example.com/video", &staging_dir);
+
+        assert_eq!(result.unwrap().warnings, Vec::<String>::new());
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_keep_a_caption_warning_next_to_harmless_ones_in_a_probe() {
+        let staging_dir = test_support::unique_temp_dir("ytdlp-captions-staging");
+        let ytdlp = fake_ytdlp_writing_stdout_and_stderr(
+            "ytdlp-captions-mixed-warnings",
+            UPLOADED_CAPTIONS_INFO_JSON,
+            &format!(
+                "WARNING: Writing cache to '/home/yarrtube/.cache/yt-dlp/youtube-sigfuncs/a.json' failed: Traceback (most recent call last):\n{SABR_WARNING}\nWARNING: [youtube] yt1: Some subtitles may be missing\n"
+            ),
+        );
+
+        let result = probe_captions(&ytdlp, "https://example.com/video", &staging_dir);
+
+        assert_eq!(
+            result.unwrap().warnings,
+            vec!["WARNING: [youtube] yt1: Some subtitles may be missing".to_string()]
+        );
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_keep_a_failure_warning_other_than_a_cache_write_in_a_probe() {
+        let staging_dir = test_support::unique_temp_dir("ytdlp-captions-staging");
+        let ytdlp = fake_ytdlp_writing_stdout_and_stderr(
+            "ytdlp-captions-other-failure-warning",
+            UPLOADED_CAPTIONS_INFO_JSON,
+            "WARNING: [youtube] yt1: Subtitles download failed: HTTP Error 429: Too Many Requests\n",
+        );
+
+        let result = probe_captions(&ytdlp, "https://example.com/video", &staging_dir);
+
+        assert_eq!(
+            result.unwrap().warnings,
+            vec![
+                "WARNING: [youtube] yt1: Subtitles download failed: HTTP Error 429: Too Many Requests"
+                    .to_string()
+            ]
+        );
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_fail_the_probe_on_a_clean_failed_exit() {
+        let staging_dir = test_support::unique_temp_dir("ytdlp-captions-staging");
+        let ytdlp = fake_ytdlp_writing_stderr(
+            "ytdlp-captions-failing",
+            "ERROR: [youtube] yt1: HTTP Error 429: Too Many Requests",
+            1,
+        );
+
+        let result = probe_captions(&ytdlp, "https://example.com/video", &staging_dir);
+
+        assert_eq!(
+            result.map_err(|e| e.to_string()),
+            Err("yt-dlp failed to probe captions for https://example.com/video: ERROR: [youtube] yt1: HTTP Error 429: Too Many Requests".to_string())
+        );
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_fail_the_chapters_fetch_on_a_clean_failed_exit() {
+        let ytdlp = fake_ytdlp_writing_stderr(
+            "ytdlp-chapters-failing",
+            "ERROR: [youtube] yt1: Video unavailable",
+            1,
+        );
+
+        let result = fetch_chapters(&ytdlp, "https://example.com/video");
+
+        assert_eq!(
+            result.map_err(|e| e.to_string()),
+            Err("yt-dlp failed to fetch the chapters of https://example.com/video: ERROR: [youtube] yt1: Video unavailable".to_string())
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_pass_manual_subtitle_flags_for_a_manual_track() {
+        let staging_dir = test_support::unique_temp_dir("ytdlp-subtitles-staging");
+        let fake = test_support::FakeYtDlp::with_downloaded_files("", &["yt1.en.srt"]);
+        let probe = a_probe_in(&staging_dir);
+
+        fetch_subtitles(
+            &fake.path,
+            &probe,
+            &caption_track("en", "en", CaptionSource::Manual),
+            &staging_dir,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fake.captured_args(),
+            [
+                "--load-info-json",
+                &staging_dir.join("info.json").to_string_lossy(),
+                "-o",
+                "%(id)s.%(ext)s",
+                "--skip-download",
+                "--write-subs",
+                "--sub-langs",
+                "en",
+                "--sub-format",
+                "vtt",
+                "--convert-subs",
+                "srt",
+                "--quiet",
+                "--no-warnings",
+            ]
+            .map(str::to_string)
+        );
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_pass_auto_subtitle_flags_for_an_automatic_track() {
+        let staging_dir = test_support::unique_temp_dir("ytdlp-subtitles-staging");
+        let fake = test_support::FakeYtDlp::with_downloaded_files("", &["yt1.en-orig.srt"]);
+        let probe = a_probe_in(&staging_dir);
+
+        fetch_subtitles(
+            &fake.path,
+            &probe,
+            &caption_track("en-orig", "en", CaptionSource::Automatic),
+            &staging_dir,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fake.captured_args(),
+            [
+                "--load-info-json",
+                &staging_dir.join("info.json").to_string_lossy(),
+                "-o",
+                "%(id)s.%(ext)s",
+                "--skip-download",
+                "--write-auto-subs",
+                "--sub-langs",
+                "en-orig",
+                "--sub-format",
+                "vtt",
+                "--convert-subs",
+                "srt",
+                "--quiet",
+                "--no-warnings",
+            ]
+            .map(str::to_string)
+        );
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_return_the_written_srt_and_its_contents() {
+        let staging_dir = test_support::unique_temp_dir("ytdlp-subtitles-staging");
+        std::fs::write(staging_dir.join("info.json"), "{}").unwrap();
+        let srt = "1\n00:00:00,000 --> 00:00:02,000\nHello there\n";
+        let fake = test_support::FakeYtDlp::writing_file("yt1.en.srt", srt);
+        let probe = a_probe_in(&staging_dir);
+
+        let result = fetch_subtitles(
+            &fake.path,
+            &probe,
+            &caption_track("en", "en", CaptionSource::Manual),
+            &staging_dir,
+        );
+
+        assert_eq!(
+            result.unwrap(),
+            FetchedSubtitles {
+                path: staging_dir.join("yt1.en.srt"),
+                srt: srt.to_string(),
+            }
+        );
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_return_the_srt_of_the_requested_track_if_another_is_staged() {
+        let staging_dir = test_support::unique_temp_dir("ytdlp-subtitles-staging");
+        std::fs::write(staging_dir.join("info.json"), "{}").unwrap();
+        std::fs::write(staging_dir.join("yt1.es.srt"), "stale").unwrap();
+        let srt = "1\n00:00:00,000 --> 00:00:02,000\nHello there\n";
+        let fake = test_support::FakeYtDlp::writing_file("yt1.en.srt", srt);
+        let probe = a_probe_in(&staging_dir);
+
+        let result = fetch_subtitles(
+            &fake.path,
+            &probe,
+            &caption_track("en", "en", CaptionSource::Manual),
+            &staging_dir,
+        );
+
+        assert_eq!(
+            result.unwrap(),
+            FetchedSubtitles {
+                path: staging_dir.join("yt1.en.srt"),
+                srt: srt.to_string(),
+            }
+        );
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_fail_when_no_srt_was_written() {
+        let staging_dir = test_support::unique_temp_dir("ytdlp-subtitles-staging");
+        std::fs::write(staging_dir.join("info.json"), "{}").unwrap();
+        let fake = test_support::FakeYtDlp::with_exit_code(0);
+        let probe = a_probe_in(&staging_dir);
+
+        let result = fetch_subtitles(
+            &fake.path,
+            &probe,
+            &caption_track("en", "en", CaptionSource::Manual),
+            &staging_dir,
+        );
+
+        assert_eq!(
+            result.map_err(|e| e.to_string()),
+            Err("yt-dlp wrote no SubRip file for the en subtitles".to_string())
         );
         std::fs::remove_dir_all(&staging_dir).unwrap();
     }
@@ -1711,11 +2846,13 @@ mod tests {
         assert_eq!(
             result,
             DownloadAttempt::Succeeded(DownloadedVideo {
+                height: None,
                 media_path: output_dir.join("My Video.mp4"),
                 thumbnail_path: None,
                 duration_seconds: None,
                 published_at: None,
                 sabr_notice: Some(SABR_WARNING.to_string()),
+                chapters: None,
             })
         );
         std::fs::remove_dir_all(&output_dir).unwrap();
@@ -1828,6 +2965,46 @@ mod tests {
     }
 
     #[test]
+    fn it_should_fail_with_an_install_hint_if_no_binary_exists_for_a_diagnostic_probe() {
+        use test_support::unique_temp_dir;
+
+        let dir = unique_temp_dir("ytdlp-diagnose-missing-binary-message");
+        let missing_path = dir.join("does-not-exist");
+
+        let result = diagnose(&missing_path, "https://example.com/video");
+
+        assert_eq!(
+            result.map(|_| ()).map_err(|e| e.to_string()),
+            Err(format!(
+                "`yt-dlp` was not found at {}. Install yt-dlp there or run update-ytdlp before running yarrtube.",
+                missing_path.display()
+            ))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_should_fail_to_run_if_the_binary_is_not_executable_for_a_diagnostic_probe() {
+        use test_support::unique_temp_dir;
+
+        let dir = unique_temp_dir("ytdlp-diagnose-non-executable-binary");
+        let non_executable_path = dir.join("yt-dlp");
+        std::fs::write(&non_executable_path, "#!/bin/sh\nexit 0\n").unwrap();
+
+        let result = diagnose(&non_executable_path, "https://example.com/video");
+
+        assert_eq!(
+            result.map(|_| ()).map_err(|e| e.to_string()),
+            Err(
+                "Failed to run yt-dlp diagnostic probe for https://example.com/video: Permission denied (os error 13)"
+                    .to_string()
+            )
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     #[cfg(unix)]
     fn it_should_return_the_printed_thumbnail_filename_on_success() {
         use test_support::{FakeYtDlp, unique_temp_dir};
@@ -1935,7 +3112,7 @@ mod tests {
             args_for_quality(Quality::High),
             vec![
                 "-f".to_string(),
-                "bv*+ba/b".to_string(),
+                "bv+ba/b".to_string(),
                 "-S".to_string(),
                 "codec:h264:aac,ext:mp4:m4a".to_string(),
                 "--merge-output-format".to_string(),
@@ -1952,7 +3129,7 @@ mod tests {
             args_for_quality(Quality::Mid),
             vec![
                 "-f".to_string(),
-                "bv*[height<=720]+ba/b[height<=720]".to_string(),
+                "bv[height<=720]+ba/b[height<=720]".to_string(),
                 "-S".to_string(),
                 "codec:h264:aac,ext:mp4:m4a".to_string(),
                 "--merge-output-format".to_string(),
@@ -1969,7 +3146,7 @@ mod tests {
             args_for_quality(Quality::Low),
             vec![
                 "-f".to_string(),
-                "bv*[height<=480]+ba/b[height<=480]".to_string(),
+                "bv[height<=480]+ba/b[height<=480]".to_string(),
                 "-S".to_string(),
                 "codec:h264:aac,ext:mp4:m4a".to_string(),
                 "--merge-output-format".to_string(),
@@ -2009,6 +3186,88 @@ mod tests {
         assert_eq!(
             videos,
             vec![
+                ChannelVideoEntry {
+                    video_id: "vid1".to_string(),
+                    title: "One".to_string()
+                },
+                ChannelVideoEntry {
+                    video_id: "vid2".to_string(),
+                    title: "Two".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_skip_upcoming_entries_when_listing_channel_videos() {
+        let stdout = "{\"id\": \"premiere\", \"title\": \"Soon\", \"live_status\": \"is_upcoming\"}\n{\"id\": \"vid1\", \"title\": \"One\", \"live_status\": null}\n{\"id\": \"vid2\", \"title\": \"Two\"}\n";
+        let fake = test_support::FakeYtDlp::with_stdout(stdout);
+
+        let videos = list_channel_videos(
+            &fake.path,
+            "https://www.youtube.com/@somechannel/videos",
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(
+            videos,
+            vec![
+                ChannelVideoEntry {
+                    video_id: "vid1".to_string(),
+                    title: "One".to_string()
+                },
+                ChannelVideoEntry {
+                    video_id: "vid2".to_string(),
+                    title: "Two".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_skip_live_and_post_live_entries_when_listing_channel_videos() {
+        let stdout = "{\"id\": \"live\", \"title\": \"Live now\", \"live_status\": \"is_live\"}\n{\"id\": \"processing\", \"title\": \"Just ended\", \"live_status\": \"post_live\"}\n{\"id\": \"vid1\", \"title\": \"One\"}\n";
+        let fake = test_support::FakeYtDlp::with_stdout(stdout);
+
+        let videos = list_channel_videos(
+            &fake.path,
+            "https://www.youtube.com/@somechannel/videos",
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(
+            videos,
+            vec![ChannelVideoEntry {
+                video_id: "vid1".to_string(),
+                title: "One".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_keep_entries_with_a_finished_or_absent_live_status() {
+        let stdout = "{\"id\": \"vod\", \"title\": \"Past stream\", \"live_status\": \"was_live\"}\n{\"id\": \"vid1\", \"title\": \"One\", \"live_status\": \"not_live\"}\n{\"id\": \"vid2\", \"title\": \"Two\"}\n";
+        let fake = test_support::FakeYtDlp::with_stdout(stdout);
+
+        let videos = list_channel_videos(
+            &fake.path,
+            "https://www.youtube.com/@somechannel/videos",
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(
+            videos,
+            vec![
+                ChannelVideoEntry {
+                    video_id: "vod".to_string(),
+                    title: "Past stream".to_string()
+                },
                 ChannelVideoEntry {
                     video_id: "vid1".to_string(),
                     title: "One".to_string()
@@ -2068,6 +3327,54 @@ mod tests {
 
         assert!(result.is_err());
         std::fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn it_should_fail_with_an_install_hint_if_no_binary_exists_for_channel_video_listing() {
+        use test_support::unique_temp_dir;
+
+        let dir = unique_temp_dir("ytdlp-channel-videos-missing-binary-message");
+        let missing_path = dir.join("does-not-exist");
+
+        let result = list_channel_videos(
+            &missing_path,
+            "https://www.youtube.com/@somechannel/videos",
+            10,
+        );
+
+        assert_eq!(
+            result.map(|_| ()).map_err(|e| e.to_string()),
+            Err(format!(
+                "`yt-dlp` was not found at {}. Install yt-dlp there or run update-ytdlp before running yarrtube.",
+                missing_path.display()
+            ))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_should_fail_to_run_if_the_binary_is_not_executable_for_channel_video_listing() {
+        use test_support::unique_temp_dir;
+
+        let dir = unique_temp_dir("ytdlp-channel-videos-non-executable-binary");
+        let non_executable_path = dir.join("yt-dlp");
+        std::fs::write(&non_executable_path, "#!/bin/sh\nexit 0\n").unwrap();
+
+        let result = list_channel_videos(
+            &non_executable_path,
+            "https://www.youtube.com/@somechannel/videos",
+            10,
+        );
+
+        assert_eq!(
+            result.map(|_| ()).map_err(|e| e.to_string()),
+            Err(
+                "Failed to run yt-dlp for https://www.youtube.com/@somechannel/videos: Permission denied (os error 13)"
+                    .to_string()
+            )
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Regression test for the JSON-line parsing format (see design.md):

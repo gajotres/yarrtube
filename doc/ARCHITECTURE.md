@@ -49,9 +49,9 @@ flowchart TB
 
 For more information on the architectural decisions and conventions used in Yarrtube you can take a look at the [Rust Architect skill](../.claude/skills/rust-architect/SKILL.md).
 
-## Example: track a channel and download its videos
+## Example: track a channel and download its videos and subtitles
 
-To illustrate this domain-driven flow we can take a look at what happens when a user adds a channel subscription and all the videos end up downloaded:
+To illustrate this domain-driven flow we can take a look at what happens when a user adds a channel subscription and all the videos end up downloaded, with their subtitles:
 
 1. `POST /api/channels` saves the channel and publishes `ChannelCreated` domain event.
 2. The `ReconcileOnChannelCreated` subscriber runs asynchronously, polling the domain events table (which acts like a queue), and runs the first channel sync.
@@ -60,23 +60,67 @@ To illustrate this domain-driven flow we can take a look at what happens when a 
    - The sync reads the channel's most recent uploads from YouTube using the YouTube API.
    - It saves each new video as `PENDING` and publishes one
      `VideoAddedToChannel` domain event per video.
+   - It runs `VideoReconciler` for every stored video (see step 6), which
+     already schedules the new videos' tasks.
    - It schedules the next `ReconcileChannel` task one reconcile interval
      later: the channel's own interval as stored when the sync finishes
      (3 hours by default, editable per channel and playlist from the web UI).
-3. For each `VideoAddedToChannel`, two asynchronous subscribers schedule a task each:
-   - `FetchThumbnailOnVideoAddedToChannel` schedules a `FetchThumbnail`
-     task.
-   - `DownloadVideoOnVideoAddedToChannel` schedules a `DownloadVideo` task.
-4. The `TaskExecutor` runs them. Both call `yt-dlp` inside the video's
-   staging folder (`<videos root>/.downloads/<youtube id>`), take its
-   episode number from the publish time `yt-dlp` reports, and move the
-   result into the show's season folder (see below). The thumbnail usually
-   arrives first, so the UI can show it while the video is still downloading.
-   A finished download publishes `VideoDownloaded`, which asks Plex to scan
-   the show folder when the scan trigger is configured.
-5. Every interval, the `ReconcileChannel` task runs the sync again and schedules
-   the next one. New uploads repeat steps 3–4. The sync also schedules a
-   `FetchThumbnail` for any video still missing its thumbnail.
+3. For each `VideoAddedToChannel`, the `SyncVideoOnVideoAddedToChannel`
+   subscriber schedules a `SyncVideo` task (own `VideoSync` lane). The
+   `VideoReconciler` it runs schedules, as the video's stored state needs,
+   a `FetchThumbnail` task, a `DownloadVideo` task and a `FetchSubtitles`
+   task.
+4. The `TaskExecutor` runs them. The download calls `yt-dlp` inside the
+   video's staging folder (`<videos root>/.downloads/<youtube id>`), takes
+   its episode number from the publish time `yt-dlp` reports, and moves the
+   result into the show's season folder (see below). It also records the
+   chapters `yt-dlp` reports and embeds them in the mp4 (`videos.chapters`,
+   JSON; NULL = never checked, `[]` = none). The thumbnail task is
+   scheduled first, so it usually arrives first and the UI can show it
+   while the video is still downloading.
+   A finished download publishes `VideoDownloaded`, which has two
+   subscribers:
+   - `SyncVideoOnVideoDownloaded` schedules a `SyncVideo` task, whose
+     reconciler schedules the `FetchSubtitles` task.
+   - `ScanPlexFolderOnVideoDownloaded` asks Plex to scan the show folder,
+     when the scan trigger is configured.
+5. The `TaskExecutor` runs `FetchSubtitles` in its own lane, one at a time,
+   so a large backfill never floods YouTube or delays downloads. It probes
+   the video's caption tracks, writes the original-language track as
+   `<episode>.<lang>.srt` (`<lang>` being the base language code, e.g. `es`
+   for `es-US`) and stores its plain-text transcript (`video_transcripts`),
+   then publishes `VideoSubtitlesFetched`, whose
+   `ScanPlexFolderOnVideoSubtitlesFetched` subscriber asks Plex to scan the
+   show folder again so the subtitle shows up. A video with no
+   original-language captions records its first such check
+   (`subtitles_first_missing_at`) and becomes `UNAVAILABLE` once both its
+   publish date and that first check are 7 days old; any failure, or a probe
+   where yt-dlp warned (it can withhold caption tracks silently), leaves it
+   `MISSING`.
+6. Every interval, the `ReconcileChannel` task runs the sync again and schedules
+   the next one. New uploads repeat steps 3–5. Once membership is up to
+   date, the sync runs `VideoReconciler` inline for every stored video of
+   the channel, including the ones it just added, holding each video's lock
+   so it never overlaps a `SyncVideo` task of the same video. Per video it
+   assigns the channel's categories, resets a `DOWNLOADED` video whose file
+   is missing or not mp4, recovers an `ERRORED` video after its 24h
+   cooldown, regenerates missing metadata (relocating a video still in the
+   previous layout), warns about a stranded video, and schedules every step
+   still needed (`FetchThumbnail`, `DownloadVideo`, `FetchSubtitles`,
+   `FetchChapters`, each skipped when one is already pending). That backfills
+   an upgraded library and retries videos whose captions weren't available
+   yet. `FetchChapters` (subtitles lane) reads a `DOWNLOADED` video's
+   chapters with `yt-dlp` when they were never checked, downloading nothing. Only then does
+   it sweep files of the show folder that no stored video accounts for.
+7. `VideoSubtitlesFetched` also has `SyncVideoOnVideoSubtitlesFetched`, which
+   schedules a `SyncVideo` task. When AI and summaries are on and the channel
+   opted in, its reconciler schedules a `SummarizeVideo` task (own `Summaries`
+   lane, one at a time), and so does every later pass for each stored video
+   still without a summary. `VideoSummarizer` fills the prompt and asks Ollama,
+   by map-reduce when the transcript doesn't fit, and stores the result
+   (`video_summaries`). `VideoSearcher` returns it with the playlist, channel
+   and category listings for the detail pane, hiding it unless AI and summaries
+   are on and the video's own source opted in. See [AI features](AI.md).
 
 ```mermaid
 sequenceDiagram
@@ -88,6 +132,7 @@ sequenceDiagram
     participant Tasks as tasks table
     participant Executor as TaskExecutor
     participant YT as YouTube / yt-dlp
+    participant Plex
 
     User->>API: POST /api/channels
     API->>Events: save channel, publish ChannelCreated
@@ -101,9 +146,18 @@ sequenceDiagram
     end
     Reconciler->>Tasks: schedule next ReconcileChannel (now + interval)
 
-    Events->>Tasks: schedule FetchThumbnail + DownloadVideo per video
-    Executor->>Tasks: poll and run tasks
+    Events->>Tasks: schedule SyncVideo per video (SyncVideoOnVideoAddedToChannel)
+    Executor->>Tasks: poll and run SyncVideo (VideoReconciler)
+    Executor->>Tasks: schedule FetchThumbnail + DownloadVideo as needed
     Executor->>YT: yt-dlp fetches thumbnail, then downloads video
+    Executor->>Events: publish VideoDownloaded
+
+    Events->>Tasks: schedule SyncVideo (SyncVideoOnVideoDownloaded)
+    Executor->>Tasks: SyncVideo schedules FetchSubtitles
+    Events->>Plex: scan show folder (if configured)
+    Executor->>YT: yt-dlp probes captions, downloads original-language .srt
+    Executor->>Events: save transcript, publish VideoSubtitlesFetched
+    Events->>Plex: scan show folder again (if configured)
 
     Note over Reconciler,Executor: One interval later, ReconcileChannel<br/>re-syncs and schedules the next run.
 ```
@@ -117,7 +171,7 @@ Each tracked playlist or channel is a TV show under its storage path:
 ├── tvshow.nfo                                  ShowFileWriter, on every sync
 ├── poster.jpg                                  channels only (avatar copy)
 └── Season <year>/                              Season 1/ for a playlist
-    └── S<year>E<MMDDii> - <title>.{mp4,jpg,nfo}  S01E<nnn> - <title>.* for a playlist
+    └── S<year>E<MMDDii> - <title>.{mp4,jpg,nfo,<lang>.srt}  S01E<nnn> - <title>.* for a playlist
 ```
 
 - **Episode number** (`ChannelEpisodeNumber` / `PlaylistEpisodeNumber`) is
@@ -152,8 +206,15 @@ Several layers, from fast/isolated to slow/real:
   for pure logic in `src/lib/` and hooks, and component tests that render
   through the real `QueryClient`/router with only `fetch` mocked. Assert
   user-visible behavior.
-- **Smoke tests** (`smoke-tests/`, Playwright) — end-to-end against the
-  real Docker image, hitting the real YouTube API and downloading a real
-  video with `yt-dlp`. No doubles. Covers the full create → download →
-  playback flow; run manually (locally or via the `workflow_dispatch`
-  workflow), not on every PR.
+- **YouTube contract tests** — `#[ignore]`d `youtube_contract_tests`
+  modules next to each YouTube adapter, run against the real `yt-dlp` and
+  Data API. They pin down what the fakes assume, so a YouTube change is
+  told apart from a bug of ours. Run locally only (they need the network
+  and an API key), not in CI.
+- **End-to-end tests** (`e2e-tests/`, Playwright) — the real Docker image
+  driven through real browsers against a fake YouTube and a Plex stub, one
+  daemon per parallel worker. Covers add → download → playback and the
+  rest of the UI flows; runs in CI on every pull request.
+
+`scripts/run-tests.sh` runs every suite; see
+[DEVELOPMENT.md](DEVELOPMENT.md).

@@ -1,27 +1,60 @@
 import { describe, expect, it } from 'vitest'
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { AppShell } from './App'
 import { ANNOUNCEMENTS_URL } from '@/api/client'
 import { queryKeys } from '@/api/queries'
-import { mockApi, pendingForever, renderWithProviders, type Routes } from '@/test/helpers'
+import { formatDateTime } from '@/lib/formatDateTime'
+import {
+  aCategoryList,
+  aPreferences,
+  aVersion,
+  mockApi,
+  pendingForever,
+  renderWithProviders,
+  type Routes,
+} from '@/test/helpers'
 
 function renderShell({
   route = '/',
   version = pendingForever(),
-}: { route?: string; version?: Routes[string] } = {}) {
+  preferences = aPreferences(),
+}: { route?: string; version?: Routes[string]; preferences?: Routes[string] } = {}) {
   mockApi({
     'GET /api/channels': [],
     'GET /api/playlists': [],
+    'GET /api/categories': aCategoryList(),
     'GET /api/videos/home': pendingForever(),
     'GET /api/tasks': pendingForever(),
     'GET /api/version': version,
+    'GET /api/preferences': preferences,
     [`GET ${ANNOUNCEMENTS_URL}`]: [],
   })
   return renderWithProviders(<AppShell />, { route })
 }
 
 describe('AppShell', () => {
+  it('shows the preferences view at /preferences', async () => {
+    renderShell({ route: '/preferences' })
+
+    expect(await screen.findByRole('heading', { name: 'Preferences' })).toBeInTheDocument()
+  })
+
+  it('draws the saved theme once preferences load', async () => {
+    renderShell({ preferences: aPreferences({ theme: 'dark' }) })
+
+    await waitFor(() => expect(document.documentElement).toHaveClass('dark'))
+    expect(screen.getByRole('switch', { name: 'Dark mode' })).toBeChecked()
+  })
+
+  it('draws the saved light theme over a cached dark one', async () => {
+    document.documentElement.classList.add('dark')
+
+    renderShell({ preferences: aPreferences({ theme: 'light' }) })
+
+    await waitFor(() => expect(document.documentElement).not.toHaveClass('dark'))
+  })
+
   it('opens and closes the sidebar from the header toggle', async () => {
     renderShell()
     const user = userEvent.setup()
@@ -46,7 +79,8 @@ describe('AppShell', () => {
 
     await user.click(screen.getByRole('link', { name: 'Yarrtube' }))
 
-    expect(await screen.findByRole('heading', { name: 'Latest videos' })).toBeInTheDocument()
+    // Home, its videos still loading.
+    await waitFor(() => expect(document.querySelector('main [aria-busy="true"]')).not.toBeNull())
     expect(screen.getByRole('button', { name: 'Open menu' })).toHaveAttribute(
       'aria-expanded',
       'false',
@@ -82,13 +116,13 @@ describe('AppShell', () => {
   })
 
   it('shows the running version next to the logo', async () => {
-    renderShell({ version: { version: 'v0.9.2' } })
+    renderShell({ version: aVersion({ version: 'v0.9.2' }) })
 
     expect(await within(screen.getByRole('banner')).findByText('v0.9.2')).toBeInTheDocument()
   })
 
   it('stays on the current view when the version is clicked', async () => {
-    renderShell({ route: '/tasks', version: { version: 'v0.9.2' } })
+    renderShell({ route: '/tasks', version: aVersion({ version: 'v0.9.2' }) })
     const user = userEvent.setup()
 
     await user.click(await screen.findByText('v0.9.2'))
@@ -96,18 +130,146 @@ describe('AppShell', () => {
     expect(screen.getByText('Loading tasks…')).toBeInTheDocument()
   })
 
+  it('shows an edge badge instead of the version for an edge build', async () => {
+    renderShell({
+      version: aVersion({ version: 'edge-abc1234', channel: 'edge' }),
+    })
+
+    const banner = screen.getByRole('banner')
+    expect(await within(banner).findByRole('button', { name: 'edge' })).toBeInTheDocument()
+    expect(within(banner).queryByText('edge-abc1234')).not.toBeInTheDocument()
+  })
+
+  it('shows the commit of an edge build when its badge is clicked', async () => {
+    renderShell({
+      version: aVersion({ version: 'edge-abc1234', channel: 'edge' }),
+    })
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: 'edge' }))
+
+    const popover = await screen.findByRole('dialog')
+    expect(within(popover).getByRole('link', { name: 'abc1234' })).toHaveAttribute(
+      'href',
+      'https://github.com/sergigp/yarrtube/commit/abc1234def5678abc1234def5678abc1234def56',
+    )
+    expect(within(popover).getByRole('link', { name: 'abc1234' })).toHaveAttribute(
+      'target',
+      '_blank',
+    )
+    expect(within(popover).getByText('Fix sync')).toBeInTheDocument()
+    expect(within(popover).getByText(formatDateTime('2026-10-19T10:00:00Z'))).toBeInTheDocument()
+  })
+
+  it('closes the edge commit popover on Escape', async () => {
+    renderShell({
+      version: aVersion({ version: 'edge-abc1234', channel: 'edge' }),
+    })
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'edge' }))
+    await screen.findByRole('dialog')
+
+    await user.keyboard('{Escape}')
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  })
+
+  it('stays on the current view when the edge badge is clicked', async () => {
+    renderShell({
+      route: '/tasks',
+      version: aVersion({ version: 'edge-abc1234', channel: 'edge' }),
+    })
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: 'edge' }))
+
+    expect(screen.getByText('Loading tasks…')).toBeInTheDocument()
+  })
+
+  it('shows the version of an edge build that carries no commit', async () => {
+    renderShell({
+      version: aVersion({
+        version: 'edge-abc1234',
+        channel: 'edge',
+        commit: null,
+      }),
+    })
+
+    expect(await within(screen.getByRole('banner')).findByText('edge-abc1234')).toBeInTheDocument()
+  })
+
   it('shows no version while it is loading', () => {
     renderShell({ version: pendingForever() })
 
-    expect(screen.getByRole('banner')).toHaveTextContent(/^$/)
+    expect(within(screen.getByRole('banner')).queryByText(/^(v\d|edge)/)).not.toBeInTheDocument()
   })
 
   it('shows no version and no error when the request fails', async () => {
-    const { queryClient } = renderShell({ version: { status: 500, error: 'version unavailable' } })
+    const { queryClient } = renderShell({
+      version: { status: 500, error: 'version unavailable' },
+    })
     await waitFor(() => expect(queryClient.isFetching({ queryKey: queryKeys.version })).toBe(0))
 
-    expect(screen.getByRole('banner')).toHaveTextContent(/^$/)
+    expect(within(screen.getByRole('banner')).queryByText(/^(v\d|edge)/)).not.toBeInTheDocument()
     expect(screen.queryByText(/version unavailable/)).not.toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Yarrtube' })).toBeInTheDocument()
+  })
+
+  it('opens the search dialog from the header search control', async () => {
+    renderShell()
+    const user = userEvent.setup()
+
+    await user.click(within(screen.getByRole('banner')).getByRole('button', { name: 'Search' }))
+
+    expect(await screen.findByRole('combobox', { name: 'Search' })).toHaveFocus()
+  })
+
+  it('opens the search dialog with ⌘K or Ctrl+K, its field focused', async () => {
+    renderShell()
+    const user = userEvent.setup()
+
+    await user.keyboard('{Meta>}k{/Meta}')
+    expect(await screen.findByRole('combobox', { name: 'Search' })).toHaveFocus()
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    await user.keyboard('{Control>}k{/Control}')
+    expect(await screen.findByRole('combobox', { name: 'Search' })).toHaveFocus()
+  })
+
+  it('ignores ⌘K while another dialog is open', async () => {
+    renderShell()
+    const user = userEvent.setup()
+    // Once the library loads, the empty Channels section offers its add row.
+    await screen.findAllByText('None tracked yet.')
+    await user.click(screen.getByRole('button', { name: 'Add channel' }))
+    await screen.findByRole('dialog')
+
+    await user.keyboard('{Meta>}k{/Meta}')
+
+    expect(screen.queryByRole('combobox', { name: 'Search' })).not.toBeInTheDocument()
+  })
+
+  it('slides the phone header away while scrolling down, unless the sidebar is open', async () => {
+    renderShell()
+    const user = userEvent.setup()
+    const scrollTo = (y: number) =>
+      act(() => {
+        Object.defineProperty(window, 'scrollY', { value: y, configurable: true })
+        window.dispatchEvent(new Event('scroll'))
+      })
+
+    scrollTo(300)
+    const hiddenWhileScrollingDown = screen.getByRole('banner').className
+    scrollTo(200)
+    const shownOnScrollUp = screen.getByRole('banner').className
+    scrollTo(400)
+    await user.click(screen.getByRole('button', { name: 'Open menu' }))
+    const shownWithSidebarOpen = screen.getByRole('banner').className
+    scrollTo(0)
+
+    expect(hiddenWhileScrollingDown).toContain('max-sm:-translate-y-full')
+    expect(shownOnScrollUp).not.toContain('max-sm:-translate-y-full')
+    expect(shownWithSidebarOpen).not.toContain('max-sm:-translate-y-full')
   })
 })

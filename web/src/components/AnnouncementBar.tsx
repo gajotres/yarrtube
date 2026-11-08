@@ -9,6 +9,12 @@ import {
 } from '@/lib/announcements'
 import { parseAnnouncementText } from '@/lib/announcementText'
 
+const LINK_CLASS = 'font-medium whitespace-nowrap underline underline-offset-2'
+
+function linkProps(url: string) {
+  return { href: url, target: '_blank', rel: 'noopener noreferrer' }
+}
+
 /**
  * Shows the newest announcement this browser hasn't dismissed, above the
  * header. Renders nothing while loading, on any fetch error, or when every
@@ -24,6 +30,8 @@ export function AnnouncementBar() {
     return null
   }
 
+  const segments = parseAnnouncementText(announcement.text)
+
   const dismiss = () => {
     const next = new Set(dismissed).add(announcement.id)
     setDismissed(next)
@@ -34,18 +42,13 @@ export function AnnouncementBar() {
     <div
       role="region"
       aria-label="Announcement"
-      className="flex shrink-0 items-center gap-3 border-b border-border bg-muted px-4 py-2 text-sm sm:px-6"
+      className="flex shrink-0 items-center gap-3 border-b border-border bg-muted px-4 py-1.5 text-sm sm:px-6 sm:py-2"
     >
+      {/* Wraps rather than truncates, so the whole note shows on phones too. */}
       <p className="min-w-0 flex-1">
-        {parseAnnouncementText(announcement.text).map((segment, index) =>
+        {segments.map((segment, index) =>
           segment.kind === 'link' ? (
-            <a
-              key={index}
-              href={segment.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-medium underline underline-offset-2"
-            >
+            <a key={index} {...linkProps(segment.url)} className={LINK_CLASS}>
               {segment.label}
             </a>
           ) : (

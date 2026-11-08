@@ -76,6 +76,33 @@ the membership diff, as if they were not in the playlist at all.
 - **WHEN** a reconcile pass for a YouTube-linked playlist finds that a downloaded video is now private on YouTube
 - **THEN** the system deletes its stored record and publishes a `VideoRemovedFromPlaylist` event marking it as downloaded, so its local file is removed
 
+### Requirement: Not Yet Watchable Videos Are Not Playlist Members (YouTube-Linked Playlists)
+The system SHALL treat an item of the source YouTube playlist that YouTube
+reports as an upcoming or currently live broadcast as if it were not in the
+playlist at all, even when its privacy status is public or unlisted. Once
+YouTube no longer reports it as upcoming or live, the next reconcile SHALL
+treat it like any other member.
+
+#### Scenario: Playlist contains an upcoming premiere not yet stored
+- **WHEN** a reconcile pass for a YouTube-linked playlist finds a public item that YouTube reports as an upcoming broadcast, with no stored record for that playlist
+- **THEN** the system does not store it, does not fetch its thumbnail, and does not publish a `VideoAddedToPlaylist` event for it
+
+#### Scenario: Playlist contains a video that is live now
+- **WHEN** a reconcile pass for a YouTube-linked playlist finds an item that YouTube reports as a live broadcast
+- **THEN** the system ignores it the same way as an upcoming item
+
+#### Scenario: Stored video is reported as upcoming
+- **WHEN** a reconcile pass for a YouTube-linked playlist finds that a stored video is now reported as an upcoming broadcast
+- **THEN** the system deletes its stored record and publishes a `VideoRemovedFromPlaylist` event, the same as for a video no longer in the playlist
+
+#### Scenario: Premiere becomes watchable
+- **WHEN** a reconcile pass runs after a previously ignored premiere is no longer reported as upcoming or live
+- **THEN** the system stores it with status PENDING, the same as any new public item
+
+#### Scenario: Live-status lookup fails
+- **WHEN** looking up whether a page's items are upcoming or live fails
+- **THEN** the playlist's listing fails, as for any other listing failure
+
 ### Requirement: New Video Persistence (YouTube-Linked Playlists)
 The system SHALL store each video found in a YouTube-linked playlist that is
 not already stored for that playlist, with a status of PENDING and its
@@ -145,22 +172,28 @@ playlist that no longer exists.
 The system SHALL, for every playlist regardless of kind, compare the files
 present in that playlist's show directory (recursively through its season
 folders) against the recorded filename and recorded thumbnail filename of
-each of its Downloaded videos, and heal any divergence it finds. It SHALL
+each of its Downloaded videos, and heal any divergence it finds: a Downloaded
+video whose recorded file is missing is reset by its video sync (see
+`video-sync`), and every file left unaccounted for once every video of the
+pass has been synced is deleted. It SHALL
 treat as protected, and never sweep: the show files (`tvshow.nfo`,
-`poster.jpg`), season folders themselves, every recorded filename and
-thumbnail filename of any video regardless of status, the NFO sharing a
-recorded filename's base name, and every file sharing the episode base name
-of a video whose episode number is recorded but whose download or thumbnail
+`poster.jpg`), season folders themselves, every recorded filename, thumbnail filename and subtitle filename of any video regardless of status, the NFO sharing a
+recorded filename's base name, and every media (`.mp4`), thumbnail (`.jpg`) or NFO (`.nfo`) file under the
+episode base name of a video whose episode number is recorded but whose download or thumbnail
 fetch has not completed yet, because such files are only recorded once the
 download or fetch completes. Legacy per-video folders and flat files
-recorded on a video SHALL be protected the same way.
+recorded on a video SHALL be protected the same way. Every file whose name starts with the base name of a Downloaded video's recorded filename followed by a dot SHALL also be protected while that video's subtitle state is Missing and it is not in the previous per-video-folder layout, because a subtitle file is placed before it is recorded. A file with any other extension under an episode base name, such as a stale `.mkv` or `.webm`, is not protected.
 
 #### Scenario: Downloaded video's file is missing from disk
 - **WHEN** a reconcile pass finds that a Downloaded video's recorded file is not present in its playlist's show directory
-- **THEN** the system resets that video to PENDING, clears its recorded filename, thumbnail filename, and quality, keeps its episode number, and triggers a fresh download of it
+- **THEN** the video's sync resets it to PENDING, resets its subtitle state to Missing and clears its recorded subtitle filename, clears its recorded filename, thumbnail filename, and quality, keeps its episode number, and schedules a thumbnail fetch and a fresh download of it
+
+#### Scenario: Stale file of a video reset by the same pass
+- **WHEN** a reconcile pass finds a Downloaded video whose recorded file is an `.mkv`, and its sync resets it for redownload
+- **THEN** the same pass deletes the `.mkv`, no longer recorded on any video, including when the video has a recorded episode number and the `.mkv` is under its episode base name
 
 #### Scenario: A file on disk is not accounted for by any Downloaded video
-- **WHEN** a reconcile pass finds a file in the playlist's show directory or one of its season folders that is not a show file, not a recorded filename or recorded thumbnail filename or NFO of any video, not a downloader-managed in-progress temporary file, and does not share the episode base name of a video whose number is recorded
+- **WHEN** a reconcile pass finds a file in the playlist's show directory or one of its season folders that is not a show file, not a recorded filename, recorded thumbnail filename, recorded subtitle filename or NFO of any video, not a downloader-managed in-progress temporary file, and does not share the episode base name of a video whose number is recorded
 - **THEN** the system deletes that file
 
 #### Scenario: A downloader-managed in-progress temporary file is present
@@ -195,87 +228,13 @@ recorded on a video SHALL be protected the same way.
 - **WHEN** a reconcile pass changes the title of an In Progress video of the playlist
 - **THEN** the system records the new title, and the files the download is writing under the base name derived from the previous title stay protected because the episode number is recorded
 
-### Requirement: Permanently Failed Video Recovery
-The system SHALL, for every playlist regardless of kind, during each reconcile pass reset any video that has been permanently errored for at least 24 hours back to PENDING and trigger a fresh download of it. A video that became permanently errored less than 24 hours before the pass SHALL be left permanently errored and SHALL NOT have a download triggered by that pass. There is no limit on how many times a given video may be recovered this way. An excluded video SHALL NOT be recovered by this pass regardless of how long ago it was excluded.
+#### Scenario: Video's subtitle file is present
+- **WHEN** a reconcile pass finds a file matching a video's recorded subtitle filename in its season folder
+- **THEN** the system does not treat it as orphaned and does not delete it
 
-#### Scenario: Permanently errored video found during reconcile
-- **WHEN** a reconcile pass finds a video that has been permanently errored for 24 hours or more
-- **THEN** the system resets that video to PENDING, clears its recorded filename and quality, and triggers a fresh download of it
-
-#### Scenario: Video permanently errored less than 24 hours ago
-- **WHEN** a reconcile pass finds a video that became permanently errored less than 24 hours earlier
-- **THEN** the system leaves the video permanently errored and does not trigger a download for it
-
-#### Scenario: Video errors again after being recovered
-- **WHEN** a video that was previously reset by reconcile-driven recovery fails and permanently errors again
-- **THEN** it is recovered again by the first reconcile pass that runs at least 24 hours after it errored, the same as any other permanently errored video
-
-#### Scenario: Excluded video is never recovered
-- **WHEN** a reconcile pass finds an excluded video, however long ago it was excluded
-- **THEN** the system leaves the video excluded and does not trigger a download for it
-
-### Requirement: Missing Metadata Recovery
-The system SHALL, for every playlist, regenerate a downloaded video's
-metadata during a reconcile pass whenever that video is recorded as
-successfully downloaded but has no metadata recorded as populated for it,
-without re-downloading the video's file. When such a video is still stored
-in the previous layout (a per-video folder or flat file), the pass SHALL
-also move its file set into the TV-show layout under its recorded episode
-number (a playlist video is numbered in playlist order when first stored,
-see `tv-show-layout`), recording the new filenames, so
-videos the `migrate-layout` subcommand skipped converge on their own.
-
-#### Scenario: Downloaded video has no recorded metadata
-- **WHEN** a reconcile pass finds a video belonging to the playlist that is recorded as downloaded but has no metadata recorded as populated
-- **THEN** the system attempts to generate that video's metadata again, without re-downloading its file
-
-#### Scenario: Downloaded video already has recorded metadata
-- **WHEN** a reconcile pass finds a video belonging to the playlist that is recorded as downloaded and already has metadata recorded as populated
-- **THEN** the system does not attempt to regenerate its metadata
-
-#### Scenario: Recovered video still in the previous layout
-- **WHEN** a reconcile pass regenerates the metadata of a downloaded video whose recorded file is still in a per-video folder
-- **THEN** the pass moves its file, thumbnail and NFO under the episode base name in the season folder, removes the empty per-video folder, and records the new filenames
-
-### Requirement: Missing Thumbnail Recovery
-The system SHALL, for every playlist, schedule a thumbnail fetch task during
-a reconcile pass for each video that has no recorded thumbnail filename,
-regardless of its download status except as listed below, without affecting that video's download
-status or triggering a redownload. The pass SHALL NOT fetch the thumbnail
-itself, and SHALL NOT schedule one for:
-- a video that already has a thumbnail fetch pending or running,
-- a video the same pass resets for redownload (its download writes its own thumbnail),
-- a video whose download is In Progress,
-- a video whose download status is Excluded (permanently unavailable, so a fetch can never succeed) or Errored (recovery later resets it for redownload, and that download writes its own thumbnail),
-- a video the same pass newly added: its thumbnail fetch is scheduled in reaction to its `VideoAddedToPlaylist` event (see `video-thumbnails`), so recovery only covers videos already stored before the pass.
-
-#### Scenario: Video has no recorded thumbnail
-- **WHEN** a reconcile pass finds a video belonging to the playlist with no recorded thumbnail filename and no thumbnail fetch pending or running for it
-- **THEN** the system schedules a thumbnail fetch task for that video
-
-#### Scenario: Video already has a recorded thumbnail
-- **WHEN** a reconcile pass finds a video belonging to the playlist that already has a recorded thumbnail filename
-- **THEN** the system does not schedule a thumbnail fetch for it
-
-#### Scenario: Video newly added by the same pass
-- **WHEN** a reconcile pass adds a new video to the playlist, and that video has no recorded thumbnail filename
-- **THEN** the pass itself does not schedule a thumbnail fetch for that video; its fetch is scheduled in reaction to its `VideoAddedToPlaylist` event
-
-#### Scenario: Thumbnail fetch already queued
-- **WHEN** a reconcile pass finds a video with no recorded thumbnail filename that already has a thumbnail fetch task pending or running
-- **THEN** the system does not schedule another thumbnail fetch for it
-
-#### Scenario: Retried thumbnail fetch fails again
-- **WHEN** a scheduled thumbnail fetch for a video fails
-- **THEN** the video's status and any other recorded field are left unchanged, and the next reconcile pass schedules another fetch, unless the video's download status has meanwhile become Excluded or Errored
-
-#### Scenario: Excluded video has no recorded thumbnail
-- **WHEN** a reconcile pass finds a video belonging to the playlist with no recorded thumbnail filename whose download status is Excluded
-- **THEN** the system does not schedule a thumbnail fetch for it, on this or any later pass while it stays Excluded
-
-#### Scenario: Errored video has no recorded thumbnail
-- **WHEN** a reconcile pass finds a video belonging to the playlist with no recorded thumbnail filename whose download status is Errored and that the same pass does not reset for redownload
-- **THEN** the system does not schedule a thumbnail fetch for it
+#### Scenario: A subtitle file placed but not yet recorded
+- **WHEN** a reconcile pass finds `<base name>.en.srt`, where `<base name>` is a Downloaded video's recorded filename without its extension, and that video's subtitle state is Missing
+- **THEN** the system does not treat that file as orphaned and does not delete it, even if the video's title has changed since its download
 
 ### Requirement: Reconcile Preserves Concurrent Download Progress
 A reconcile pass refreshing a stored video's title or position SHALL change
@@ -286,33 +245,6 @@ reverted.
 #### Scenario: Download completes while a reconcile refreshes the video's title
 - **WHEN** a video's download changes its status between the time a reconcile pass reads that video and the time the pass stores its refreshed title
 - **THEN** the video keeps the status and download fields set by the download, and gains the refreshed title
-
-### Requirement: Stranded Video Recovery
-The system SHALL, for every playlist regardless of kind, during each reconcile pass trigger a download for every video of the playlist that is stranded. A video is stranded when its download status is Pending, In Progress or Errored Retrying and it has no download task pending or running. The pass SHALL leave the video's download status unchanged, SHALL apply no cooldown, and SHALL NOT treat as stranded a video that the same pass newly adds or resets for redownload. A video whose status is Downloaded, Excluded or Errored is never stranded.
-
-#### Scenario: Errored-retrying video with no download task
-- **WHEN** a reconcile pass finds a video in status Errored Retrying with no download task pending or running for it
-- **THEN** the system triggers a download for that video and leaves its status Errored Retrying
-
-#### Scenario: Pending video with no download task
-- **WHEN** a reconcile pass finds a video in status Pending with no download task pending or running for it
-- **THEN** the system triggers a download for that video
-
-#### Scenario: In-progress video with no download task
-- **WHEN** a reconcile pass finds a video in status In Progress with no download task pending or running for it
-- **THEN** the system triggers a download for that video
-
-#### Scenario: Non-terminal video whose download task is still queued
-- **WHEN** a reconcile pass finds a video in status Pending, In Progress or Errored Retrying that has a download task pending or running
-- **THEN** the system does not trigger another download for it
-
-#### Scenario: Video newly added by the same pass
-- **WHEN** a reconcile pass adds a new Pending video to the playlist
-- **THEN** the pass does not treat it as stranded; its download is triggered by its `VideoAddedToPlaylist` event
-
-#### Scenario: Settled video is never stranded
-- **WHEN** a reconcile pass finds a video in status Downloaded, Excluded or Errored with no download task
-- **THEN** the stranded-video recovery does not trigger a download for it
 
 ### Requirement: Playlist Listing Failure Is Not Fatal
 The system SHALL treat a failure to list a playlist's current items on

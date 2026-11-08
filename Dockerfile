@@ -23,11 +23,17 @@ RUN cargo chef cook --release --locked --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY migrations ./migrations
+# The shipped summary prompt, embedded with include_str!.
+COPY prompts ./prompts
 COPY --from=web-build /web/dist ./web/dist
-# Stamped into the binary as its reported version (`dev` when unset).
+# Stamped into the binary as its reported version (`dev` when unset) and the
+# commit it was built from (sha, subject line, RFC 3339 commit date).
 # Declared after `cargo chef cook` so a new version never invalidates the
 # dependency layer.
 ARG YARRTUBE_VERSION
+ARG YARRTUBE_COMMIT_SHA
+ARG YARRTUBE_COMMIT_SUBJECT
+ARG YARRTUBE_COMMIT_DATE
 RUN cargo build --release --locked
 
 # Bundles a known-good yt-dlp binary into the image at build time, so a

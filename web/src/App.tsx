@@ -1,16 +1,26 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import { BrowserRouter, Link, Route, Routes, useLocation } from 'react-router-dom'
 import { Home } from './components/Home'
 import { PlaylistDetail } from './components/PlaylistDetail'
 import { ChannelDetail } from './components/ChannelDetail'
 import { TasksView } from './components/TasksView'
+import { CategoryDetail } from './components/CategoryDetail'
+import { PreferencesView } from './components/PreferencesView'
 import { AddChannelDialog } from './components/AddChannelDialog'
 import { AddPlaylistDialog } from './components/AddPlaylistDialog'
+import { CategoryDialog } from './components/CategoryDialog'
 import { SIDEBAR_ID, Sidebar } from './components/Sidebar'
 import { SettingsMenu } from './components/SettingsMenu'
+import { AiSettingsView } from './components/AiSettingsView'
+import { ThemeToggle } from './components/ThemeToggle'
 import { AnnouncementBar } from './components/AnnouncementBar'
 import { MobileNavToggle } from './components/MobileNavToggle'
 import { VersionLabel } from './components/VersionLabel'
+import { SearchDialog } from './components/SearchDialog'
+import { SearchTrigger } from './components/SearchTrigger'
+import { useScrollDirection } from './hooks/useScrollDirection'
+import { useSavedTheme } from './hooks/useTheme'
+import { cn } from './lib/utils'
 
 export default function App() {
   return (
@@ -22,7 +32,8 @@ export default function App() {
 
 /** The routed layout; split from `App` so tests can render it in a memory router. */
 export function AppShell() {
-  const [addDialog, setAddDialog] = useState<'channel' | 'playlist' | null>(null)
+  useSavedTheme()
+  const [addDialog, setAddDialog] = useState<'channel' | 'playlist' | 'category' | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const closeSidebar = () => setSidebarOpen(false)
   // The mobile sidebar opens right below the header, wherever it sits: an
@@ -47,6 +58,32 @@ export function AppShell() {
   }, [sidebarOpen])
   const toggleSidebar = () => setSidebarOpen(!sidebarOpen)
 
+  // Below `sm` the header slides away while scrolling down, unless the
+  // sidebar is open or a video player is pinned below it.
+  const scrollDirection = useScrollDirection()
+  const headerHidden =
+    scrollDirection === 'down' &&
+    !sidebarOpen &&
+    !document.querySelector('[data-pinned-player]')
+
+  // ⌘K / Ctrl+K opens search from anywhere, unless another dialog is open.
+  const [searchOpen, setSearchOpen] = useState(false)
+  useEffect(() => {
+    const openSearch = (event: KeyboardEvent) => {
+      if (
+        event.key.toLowerCase() === 'k' &&
+        (event.metaKey || event.ctrlKey) &&
+        !document.querySelector('[role=dialog]')
+      ) {
+        event.preventDefault()
+        setSidebarOpen(false)
+        setSearchOpen(true)
+      }
+    }
+    document.addEventListener('keydown', openSearch)
+    return () => document.removeEventListener('keydown', openSearch)
+  }, [])
+
   // Any navigation closes the mobile sidebar, whatever triggered it.
   const { pathname } = useLocation()
   const [shownPathname, setShownPathname] = useState(pathname)
@@ -56,13 +93,19 @@ export function AppShell() {
   }
 
   return (
-    <div className="flex min-h-dvh flex-col md:h-dvh">
+    <div
+      className="flex min-h-dvh flex-col md:h-dvh"
+      style={headerHidden ? ({ '--header-offset': '0px' } as CSSProperties) : undefined}
+    >
       <div ref={announcementRef} className="shrink-0">
         <AnnouncementBar />
       </div>
       <header
         ref={headerRef}
-        className="sticky top-0 z-20 flex h-(--header-height) shrink-0 items-center gap-4 border-b border-border bg-background px-4 sm:px-6"
+        className={cn(
+          'sticky top-0 z-20 flex h-(--header-height) shrink-0 items-center gap-4 border-b border-border bg-background px-4 transition-transform duration-200 sm:px-6',
+          headerHidden && 'max-sm:-translate-y-full',
+        )}
       >
         <MobileNavToggle open={sidebarOpen} onToggle={toggleSidebar} controls={SIDEBAR_ID} />
         <Link
@@ -71,10 +114,24 @@ export function AppShell() {
           className="flex items-center no-underline"
           aria-label="Yarrtube"
         >
-          <img src="/logo.png" alt="Yarrtube" className="h-10 w-auto sm:h-12" />
+          <img
+            src="/logo.png"
+            alt="Yarrtube"
+            // The intrinsic size reserves the logo's box before the image loads.
+            width={2048}
+            height={768}
+            className="h-10 w-auto sm:h-12"
+          />
         </Link>
         <VersionLabel />
         <div className="ml-auto flex items-center gap-2">
+          <SearchTrigger
+            onOpen={() => {
+              closeSidebar()
+              setSearchOpen(true)
+            }}
+          />
+          <ThemeToggle />
           <SettingsMenu />
         </div>
       </header>
@@ -85,14 +142,19 @@ export function AppShell() {
           onClose={closeSidebar}
           onAddChannel={() => setAddDialog('channel')}
           onAddPlaylist={() => setAddDialog('playlist')}
+          onAddCategory={() => setAddDialog('category')}
         />
         <main className="min-w-0 flex-1 md:min-h-0 md:overflow-y-auto">
-          <div className="h-full px-4 pt-4 pb-6 sm:px-6 md:pt-6">
+          {/* The container video grids size their columns by. */}
+          <div className="@container h-full px-4 pt-4 pb-6 sm:px-6 md:pt-6">
             <Routes>
               <Route path="/" element={<Home />} />
               <Route path="/playlists/:id" element={<PlaylistDetail />} />
               <Route path="/channels/:id" element={<ChannelDetail />} />
               <Route path="/tasks" element={<TasksView />} />
+              <Route path="/preferences" element={<PreferencesView />} />
+              <Route path="/ai" element={<AiSettingsView />} />
+              <Route path="/categories/:id" element={<CategoryDetail />} />
             </Routes>
           </div>
         </main>
@@ -105,6 +167,11 @@ export function AppShell() {
         open={addDialog === 'playlist'}
         onOpenChange={(open) => !open && setAddDialog(null)}
       />
+      <CategoryDialog
+        open={addDialog === 'category'}
+        onOpenChange={(open) => !open && setAddDialog(null)}
+      />
+      <SearchDialog open={searchOpen} onOpenChange={setSearchOpen} />
     </div>
   )
 }

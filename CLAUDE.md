@@ -14,19 +14,21 @@ from the old per-video-folder layout.
 
 Docs: `doc/INSTALLATION.md` (Docker, Compose, every environment variable),
 `doc/DEVELOPMENT.md` (building from source), `doc/PLEX.md` (Plex TV Shows
-library, scan trigger), `doc/UPGRADING-TO-0.9.0.md` (layout migration
+library, scan trigger, subtitles), `doc/CATEGORIES.md` (categories in the
+web UI and as Plex smart playlists), `doc/UPGRADING-TO-0.9.0.md` (layout migration
 from 0.8.x, temporary), `doc/ARCHITECTURE.md`. Every merge to `main` that
-passes CI is tagged `vX.Y.Z` and released automatically: CI bumps the latest
-tag's patch number, or uses the `Cargo.toml` version when that's ahead (bump
-it in the PR to cut a minor/major release), then calls
-`.github/workflows/release.yml` to publish the multi-arch image to
-`ghcr.io`. Pushing a `vX.Y.Z` tag by hand still triggers a release too.
+passes CI is tagged and released automatically to `ghcr.io/gajotres/yarrtube`.
+The workflow increments the latest patch tag or uses `Cargo.toml` when higher,
+then publishes `latest`, `X.Y.Z` and `X.Y`, followed by a GitHub release.
+Manual builds publish `edge`. This fork intentionally does not publish SHA image
+tags. See "Deploy" in `doc/DEVELOPMENT.md`.
 
 ## Commands
 
 ```bash
+scripts/run-tests.sh                  # every suite: web, rust, contract, e2e
 cargo build --release                 # build
-cargo test --locked                   # run all tests
+cargo test --locked                   # Rust unit/integration tests only
 cargo test <substring>                # run a single test / module by name filter
 cargo fmt --all -- --check            # formatting check (CI enforces this)
 cargo clippy --all-targets --all-features --locked -- -D warnings   # lint (CI enforces this, warnings fail)
@@ -42,12 +44,26 @@ npm run typecheck   # tsc, strict mode
 npm run build       # produces dist/, embedded into the binary by cargo build
 ```
 
+### Verifying a change
+
+Before calling a change done, run the fast suites:
+`scripts/run-tests.sh --only web --only rust` (about 40 s: web typecheck, lint
+and tests; Rust fmt, clippy and tests), or just the suite of the side you
+touched. The slow suites (contract, end-to-end) are not run per change: CI runs
+the end-to-end suite on every push (`--ci`), and `/audit-change` runs every
+suite, contract included, before auditing. Run the full `scripts/run-tests.sh`
+yourself only when asked or when a change touches what only those suites cover
+(the Docker image, the YouTube adapters, the e2e specs). The script checks its
+dependencies first and lists anything missing: install or build what it names
+rather than skipping the suite. On failure it prints only the failing tests and
+the path of the full logs.
+
 ## Frontend testing (web/)
 
 Tests are colocated with what they test (`foo.ts` → `foo.test.ts`) and run in
 jsdom with Vitest + Testing Library. The whole suite must stay fast (seconds)
 and deterministic — anything needing the real backend or real downloads
-belongs in `smoke-tests/`, not here.
+belongs in `e2e-tests/`, not here.
 
 The one mocking rule: **only the network boundary (`fetch`) is mocked** — via
 `mockApi` from `src/test/helpers.tsx`, a route table keyed by

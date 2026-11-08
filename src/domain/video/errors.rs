@@ -1,3 +1,4 @@
+use crate::domain::category::CategoryId;
 use crate::domain::channel::ChannelHandle;
 use crate::domain::playlist::PlaylistId;
 use crate::domain::video::VideoId;
@@ -18,6 +19,7 @@ impl std::error::Error for VideoError {}
 pub enum ListVideosError {
     PlaylistNotFound(PlaylistId),
     ChannelNotFound(ChannelHandle),
+    CategoryNotFound(CategoryId),
     Repository(anyhow::Error),
 }
 
@@ -26,6 +28,7 @@ impl fmt::Display for ListVideosError {
         match self {
             Self::PlaylistNotFound(id) => write!(f, "playlist {id} not found"),
             Self::ChannelNotFound(id) => write!(f, "channel {id} not found"),
+            Self::CategoryNotFound(id) => write!(f, "category {id} not found"),
             Self::Repository(e) => write!(f, "{e}"),
         }
     }
@@ -38,6 +41,8 @@ pub enum UpdateWatchStateError {
     VideoNotFound(VideoId),
     VideoNotDownloaded(VideoId),
     ChannelNotFound(ChannelHandle),
+    CategoryNotFound(CategoryId),
+    PlaylistNotFound(PlaylistId),
     Repository(anyhow::Error),
 }
 
@@ -47,9 +52,34 @@ impl fmt::Display for UpdateWatchStateError {
             Self::VideoNotFound(id) => write!(f, "video {id} not found"),
             Self::VideoNotDownloaded(id) => write!(f, "video {id} is not downloaded"),
             Self::ChannelNotFound(id) => write!(f, "channel {id} not found"),
+            Self::CategoryNotFound(id) => write!(f, "category {id} not found"),
+            Self::PlaylistNotFound(id) => write!(f, "playlist {id} not found"),
             Self::Repository(e) => write!(f, "{e}"),
         }
     }
 }
 
 impl std::error::Error for UpdateWatchStateError {}
+
+#[derive(Debug)]
+pub enum ReadSubtitlesError {
+    PlaylistNotFound(PlaylistId),
+    ChannelNotFound(ChannelHandle),
+    VideoNotFound(VideoId),
+    SubtitlesNotFound(VideoId),
+    Repository(anyhow::Error),
+}
+
+impl fmt::Display for ReadSubtitlesError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PlaylistNotFound(id) => write!(f, "playlist {id} not found"),
+            Self::ChannelNotFound(id) => write!(f, "channel {id} not found"),
+            Self::VideoNotFound(id) => write!(f, "video {id} not found"),
+            Self::SubtitlesNotFound(id) => write!(f, "video {id} has no subtitles"),
+            Self::Repository(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for ReadSubtitlesError {}

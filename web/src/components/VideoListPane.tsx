@@ -1,11 +1,12 @@
 import { TriangleAlert } from 'lucide-react'
 import { videoMediaUrl } from '@/api/client'
 import type { Video, VideoStatus } from '@/api/types'
-import { formatDuration } from '@/lib/formatDuration'
 import { Thumbnail } from './Thumbnail'
-import { WatchedTick } from './WatchedTick'
+import { ThumbnailOverlay } from './ThumbnailOverlay'
 import { Beacon } from './Beacon'
 import { VideoActionsMenu } from './VideoActionsMenu'
+import { VideoRowsSkeleton } from './VideoSkeletons'
+import { formatAge } from '@/lib/relativeAge'
 import { cn } from '@/lib/utils'
 
 const STATUS_MESSAGES: Record<string, string> = {
@@ -25,18 +26,20 @@ function VideoStatusIndicator({ status }: { status: VideoStatus }) {
 
   const message = STATUS_MESSAGES[status] ?? 'This video is pending.'
   return (
-    <TriangleAlert className="size-3.5 shrink-0 text-amber-600" role="img" aria-label={message}>
+    <TriangleAlert className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" role="img" aria-label={message}>
       <title>{message}</title>
     </TriangleAlert>
   )
 }
 
-interface VideoListPaneProps {
-  /** Names the container in the empty message ("channel" or "playlist"). */
+interface VideoListPaneProps<T extends Video> {
+  /** Names the container in the empty message ("channel", "playlist" or "category"). */
   noun: string
-  /** The channel/playlist path the thumbnails are served under. */
-  basePath: string
-  videos: Video[] | undefined
+  /** The channel/playlist path a video's thumbnail is served under. */
+  basePathOf: (video: T) => string
+  /** The name of the channel or playlist a video comes from. */
+  sourceNameOf: (video: T) => string
+  videos: T[] | undefined
   error: Error | null
   selectedVideoId: string | null
   onSelect: (id: string) => void
@@ -44,35 +47,38 @@ interface VideoListPaneProps {
 
 /**
  * The scrollable video list beside a detail view's player: one row per
- * video with its thumbnail, watched tick, duration, download status and
+ * video with its thumbnail, watch state, duration, download status and
  * actions menu, highlighting the selected one. The menu sits beside the
- * row's select button, not inside it, so opening it never selects the video;
- * the selected row has none, since its detail pane shows one.
+ * row's select button, not inside it, so opening it never selects the video.
  */
-export function VideoListPane({
+export function VideoListPane<T extends Video>({
   noun,
-  basePath,
+  basePathOf,
+  sourceNameOf,
   videos,
   error,
   selectedVideoId,
   onSelect,
-}: VideoListPaneProps) {
+}: VideoListPaneProps<T>) {
   return (
     <div className="md:h-full md:min-h-0 md:overflow-y-auto">
       {error && <p className="text-sm text-destructive">Failed to load videos: {error.message}</p>}
-      {!error && !videos && <p className="text-sm text-muted-foreground">Loading videos…</p>}
+      {!error && !videos && <VideoRowsSkeleton count={8} />}
       {!error && videos && videos.length === 0 && (
         <p className="text-sm text-muted-foreground">No videos recorded for this {noun} yet.</p>
       )}
       {!error && videos && videos.length > 0 && (
-        <ul className="flex flex-col divide-y divide-border">
+        <ul className="flex flex-col">
           {videos.map((video) => {
             const active = selectedVideoId === video.id
+            const age = formatAge(video.published_at)
             return (
               <li
                 key={video.id}
                 className={cn(
-                  'flex items-start gap-1 rounded-md pr-1 transition-colors hover:bg-accent',
+                  // The separator is a straight line, not a border: a border
+                  // on the rounded row would curl up at its corners.
+                  'relative flex items-start gap-1 rounded-md pr-1 transition-colors not-last:after:absolute not-last:after:inset-x-2 not-last:after:bottom-0 not-last:after:h-px not-last:after:bg-border hover:bg-accent',
                   active && 'bg-accent',
                 )}
               >
@@ -84,40 +90,46 @@ export function VideoListPane({
                     <Thumbnail
                       src={
                         video.thumbnail_filename
-                          ? videoMediaUrl(basePath, video.thumbnail_filename)
+                          ? videoMediaUrl(basePathOf(video), video.thumbnail_filename)
                           : null
                       }
-                      className="aspect-video w-24 rounded-md object-cover"
+                      className={cn(
+                        'aspect-video w-24 rounded-md object-cover',
+                        video.watched && 'opacity-60',
+                      )}
                     />
-                    <WatchedTick watched={video.watched} />
-                    {formatDuration(video.duration_seconds) && (
-                      <span className="absolute right-1 bottom-1 rounded bg-black/75 px-1 py-0.5 text-[10px] font-medium text-white">
-                        {formatDuration(video.duration_seconds)}
-                      </span>
-                    )}
+                    <ThumbnailOverlay
+                      watched={video.watched}
+                      positionSeconds={video.position_seconds}
+                      durationSeconds={video.duration_seconds}
+                      size="row"
+                    />
                   </div>
-                  <span
-                    className={cn(
-                      'min-w-0 flex-1 text-sm leading-snug text-foreground',
-                      active && 'font-medium text-primary',
-                    )}
-                  >
-                    {video.title}
+                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span
+                      className={cn(
+                        'text-sm leading-snug',
+                        active
+                          ? 'font-medium text-primary'
+                          : video.watched
+                            ? 'text-muted-foreground'
+                            : 'text-foreground',
+                      )}
+                    >
+                      {video.title}
+                    </span>
+                    {age && <span className="text-xs text-muted-foreground">{age}</span>}
                   </span>
                   <VideoStatusIndicator status={video.status} />
                 </button>
-                {active ? (
-                  // The detail pane holds the selected video's menu; the
-                  // placeholder keeps the row's title from re-wrapping.
-                  <span aria-hidden className="mt-2 size-7 shrink-0" />
-                ) : (
-                  <VideoActionsMenu
-                    videoId={video.id}
-                    title={video.title}
-                    markable={!video.watched && video.status === 'DOWNLOADED'}
-                    className="mt-2"
-                  />
-                )}
+                <VideoActionsMenu
+                  videoId={video.id}
+                  recordId={video.record_id}
+                  title={video.title}
+                  sourceName={sourceNameOf(video)}
+                  markable={!video.watched && video.status === 'DOWNLOADED'}
+                  className="mt-2"
+                />
               </li>
             )
           })}

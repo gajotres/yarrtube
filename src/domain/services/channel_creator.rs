@@ -5,6 +5,7 @@ use crate::domain::playlist::PlaylistPath;
 use crate::domain::shared::{Quality, ReconcileInterval};
 use crate::infrastructure::repositories::filesystem_channel_avatar_repository::ChannelAvatarRepository;
 use crate::infrastructure::repositories::sqlite_channel_repository::ChannelRepository;
+use crate::infrastructure::repositories::sqlite_preferences_repository::PreferencesRepository;
 use crate::infrastructure::repositories::youtube_channel_repository::{
     ResolvedChannel, YoutubeChannelRepository,
 };
@@ -28,6 +29,7 @@ pub struct ChannelCreator {
     avatar_repository: Arc<dyn ChannelAvatarRepository>,
     event_publisher: Arc<dyn EventPublisher>,
     clock: Arc<dyn Clock>,
+    preferences_repository: Arc<dyn PreferencesRepository>,
 }
 
 impl ChannelCreator {
@@ -37,6 +39,7 @@ impl ChannelCreator {
         avatar_repository: Arc<dyn ChannelAvatarRepository>,
         event_publisher: Arc<dyn EventPublisher>,
         clock: Arc<dyn Clock>,
+        preferences_repository: Arc<dyn PreferencesRepository>,
     ) -> Self {
         Self {
             repository,
@@ -44,11 +47,13 @@ impl ChannelCreator {
             avatar_repository,
             event_publisher,
             clock,
+            preferences_repository,
         }
     }
 }
 
 pub trait ChannelCreatorApi: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
     fn create(
         &self,
         id: ChannelHandle,
@@ -56,6 +61,8 @@ pub trait ChannelCreatorApi: Send + Sync {
         video_limit: VideoLimit,
         reconcile_interval: ReconcileInterval,
         path: PlaylistPath,
+        summaries_enabled: bool,
+        categorization_enabled: bool,
     ) -> Result<CreateChannelOutcome, CreateChannelError>;
 }
 
@@ -67,7 +74,11 @@ impl ChannelCreatorApi for ChannelCreator {
         video_limit: VideoLimit,
         reconcile_interval: ReconcileInterval,
         path: PlaylistPath,
+        summaries_enabled: bool,
+        categorization_enabled: bool,
     ) -> Result<CreateChannelOutcome, CreateChannelError> {
+        self.ensure_summaries_available(summaries_enabled)?;
+        self.ensure_categorization_available(categorization_enabled)?;
         if let Some(existing) = self.find_existing(&id)? {
             return Ok(CreateChannelOutcome::AlreadyExisted(existing));
         }
@@ -84,7 +95,9 @@ impl ChannelCreatorApi for ChannelCreator {
             path,
             avatar_filename,
             self.clock.now(),
-        );
+        )
+        .with_summaries_enabled(summaries_enabled)
+        .with_categorization_enabled(categorization_enabled);
         self.insert_channel(&channel)?;
         self.publish_channel_created(&channel)?;
         info!(channel_id = %channel.id, name = %channel.name, "created channel");
@@ -93,6 +106,46 @@ impl ChannelCreatorApi for ChannelCreator {
 }
 
 impl ChannelCreator {
+    /// Enabling categorization needs it available in the preferences.
+    fn ensure_categorization_available(
+        &self,
+        categorization_enabled: bool,
+    ) -> Result<(), CreateChannelError> {
+        if !categorization_enabled {
+            return Ok(());
+        }
+        let preferences = self
+            .preferences_repository
+            .find()
+            .map_err(CreateChannelError::Repository)?
+            .unwrap_or_default();
+        if preferences.categorization_available() {
+            Ok(())
+        } else {
+            Err(CreateChannelError::CategorizationUnavailable)
+        }
+    }
+
+    /// Enabling summaries needs AI and summaries on in the preferences.
+    fn ensure_summaries_available(
+        &self,
+        summaries_enabled: bool,
+    ) -> Result<(), CreateChannelError> {
+        if !summaries_enabled {
+            return Ok(());
+        }
+        let preferences = self
+            .preferences_repository
+            .find()
+            .map_err(CreateChannelError::Repository)?
+            .unwrap_or_default();
+        if preferences.summaries_available() {
+            Ok(())
+        } else {
+            Err(CreateChannelError::SummariesUnavailable)
+        }
+    }
+
     /// Matches every stored channel rather than calling `find`, since the
     /// stored handle may differ from `id` in case.
     fn find_existing(&self, id: &ChannelHandle) -> Result<Option<Channel>, CreateChannelError> {

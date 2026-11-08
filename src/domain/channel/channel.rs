@@ -15,6 +15,8 @@ pub struct Channel {
     pub path: PlaylistPath,
     pub avatar_filename: Option<String>,
     pub created_at: DateTime<Utc>,
+    pub summaries_enabled: bool,
+    pub categorization_enabled: bool,
 }
 
 impl Channel {
@@ -40,7 +42,13 @@ impl Channel {
             path,
             avatar_filename,
             created_at,
+            summaries_enabled: false,
+            categorization_enabled: false,
         }
+    }
+
+    pub fn with_path(self, path: PlaylistPath) -> Self {
+        Self { path, ..self }
     }
 
     pub fn with_quality(self, quality: Quality) -> Self {
@@ -57,6 +65,20 @@ impl Channel {
     pub fn with_reconcile_interval(self, reconcile_interval: ReconcileInterval) -> Self {
         Self {
             reconcile_interval,
+            ..self
+        }
+    }
+
+    pub fn with_summaries_enabled(self, summaries_enabled: bool) -> Self {
+        Self {
+            summaries_enabled,
+            ..self
+        }
+    }
+
+    pub fn with_categorization_enabled(self, categorization_enabled: bool) -> Self {
+        Self {
+            categorization_enabled,
             ..self
         }
     }

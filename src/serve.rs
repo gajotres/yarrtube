@@ -1,12 +1,17 @@
 use crate::application::http::{self, ApiServices, RunningVersion, VideosRoot};
 use crate::application::{subscribers, tasks};
 use crate::domain::services::{
-    ChannelAvatarRestorer, ChannelCreator, ChannelDeleter, ChannelPreviewer, ChannelUpdater,
-    ChannelVideoReconciler, ChannelViewSearcher, DirectorySearcher, InternalVideoReconciler,
-    LayoutMigrator, MetadataGenerator, PlaylistCreator, PlaylistDeleter, PlaylistPreviewer,
-    PlaylistSearcher, PlaylistUpdater, PlaylistVideoReconciler, PlexFolderScanner, ShowFileWriter,
-    TaskViewSearcher, ThumbnailFetcher, VideoDownloader, VideoFileDeleter, VideoRelocator,
-    VideoSearcher, VideoWatchStateUpdater,
+    CategoryCreator, CategoryDeleter, CategoryMemberRemover, CategoryUpdater,
+    CategoryVideoCollector, CategoryViewSearcher, ChannelAvatarRestorer, ChannelCreator,
+    ChannelDeleter, ChannelPreviewer, ChannelUpdater, ChannelVideoReconciler, ChannelViewSearcher,
+    ChapterFetcher, DirectorySearcher, InternalVideoReconciler, LayoutMigrator, LlmServerSearcher,
+    MetadataGenerator, PlaylistCreator, PlaylistDeleter, PlaylistPreviewer, PlaylistUpdater,
+    PlaylistVideoReconciler, PlaylistViewSearcher, PlexFolderScanner, PlexLabelSyncer,
+    PlexLabelSyncerApi, PreferencesSearcher, PreferencesUpdater, QualityUpgrader, ShowFileWriter,
+    ShowMover, SubtitleFetcher, SubtitleReader, TaskViewSearcher, ThumbnailFetcher,
+    VideoCategorizer, VideoCategoryAssigner, VideoCategoryChoiceSearcher, VideoCategoryEditor,
+    VideoDownloader, VideoFileDeleter, VideoOwnerFinder, VideoReconciler, VideoRelocator,
+    VideoSearcher, VideoSummarizer, VideoWatchStateUpdater,
 };
 use crate::domain::video::STAGING_DIRNAME;
 use crate::infrastructure::client::ytdlp_updater::{RealYtdlpUpdater, YtdlpUpdater, target_path};
@@ -20,7 +25,7 @@ use crate::infrastructure::repositories::plex_library_repository::{
     HttpPlexLibraryRepository, PlexConfig, PlexLibraryRepository,
 };
 use crate::infrastructure::repositories::task_executor::{HandlerRegistry, TaskExecutor};
-use crate::infrastructure::shared::app_version::APP_VERSION;
+use crate::infrastructure::shared::app_version::AppVersion;
 use crate::infrastructure::shared::web_assets::WebAssets;
 use crate::infrastructure::shared::{sqlite_connection, sqlite_migrations};
 use anyhow::{Context, Result};
@@ -45,6 +50,7 @@ const DEFAULT_RETRY_BASE_DELAY_SECONDS: i64 = 150;
 const DEFAULT_VIDEOS_PATH: &str = "/videos";
 const DEFAULT_DOWNLOAD_CONCURRENCY: usize = 2;
 const DEFAULT_AVATARS_PATH: &str = "avatars";
+pub(crate) const DEFAULT_YOUTUBE_API_URL: &str = "https://www.googleapis.com/youtube/v3";
 /// The parent directories the add dialog's folder browser defaults to, seeded
 /// under the videos root at startup so the browser is never empty on a fresh
 /// install.
@@ -52,7 +58,7 @@ const DEFAULT_STORAGE_DIRECTORIES: &[&str] = &["playlists", "channels"];
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 /// How long shutdown waits for in-flight blocking work before exiting.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const DEFAULT_BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn run() -> ExitCode {
     tracing_subscriber::fmt()
@@ -96,7 +102,11 @@ pub fn run() -> ExitCode {
     // These use a blocking HTTP client, so they run on this thread outside the
     // tokio runtime rather than inside it (a blocking client can't run on a
     // tokio worker thread).
-    run_startup_ytdlp_update();
+    if ytdlp_self_update_enabled() {
+        run_startup_ytdlp_update();
+    } else {
+        info!("yt-dlp self-update is off, leaving yt-dlp as it is");
+    }
     run_startup_database_check();
     run_startup_youtube_api_key_check();
     run_startup_storage_directories_check();
@@ -115,14 +125,24 @@ pub fn run() -> ExitCode {
         }
     };
     let plex = plex_integration();
-    let task_executor = Arc::new(task_executor(&infrastructure));
-    if let Err(e) = prepare_task_queue(&infrastructure, &task_executor) {
+    let plex_label_syncer = plex
+        .clone()
+        .map(|plex| plex_label_syncer(&infrastructure, plex));
+    let task_executor = Arc::new(task_executor(&infrastructure, plex_label_syncer.clone()));
+    if let Err(e) = prepare_task_queue(&infrastructure, &task_executor, plex_label_syncer.as_ref())
+    {
         error!(error = %e, "failed to prepare the task queue");
         return ExitCode::FAILURE;
     }
 
     startup_done.store(true, Ordering::SeqCst);
-    let exit_code = runtime.block_on(run_async(infrastructure, task_executor, plex, shutdown_rx));
+    let exit_code = runtime.block_on(run_async(
+        infrastructure,
+        task_executor,
+        plex,
+        plex_label_syncer,
+        shutdown_rx,
+    ));
     // Don't wait on blocking work such as a download in progress: a task
     // left running is recovered and retried on the next start.
     runtime.shutdown_timeout(SHUTDOWN_TIMEOUT);
@@ -141,6 +161,7 @@ pub(crate) fn build_infrastructure() -> Result<InfrastructureContainer> {
     InfrastructureContainer::new(InfrastructureSettings {
         db_path: db_path(),
         youtube_api_key: youtube_api_key(),
+        youtube_api_url: youtube_api_url(),
         videos_path: PathBuf::from(videos_path()),
         avatars_path: avatars_path(),
         ytdlp_path: target_path(),
@@ -200,6 +221,46 @@ fn parse_download_concurrency(value: Option<String>) -> usize {
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|concurrency| *concurrency > 0)
         .unwrap_or(DEFAULT_DOWNLOAD_CONCURRENCY)
+}
+
+/// Where the YouTube Data API requests go: Google's, unless pointed at a
+/// fake YouTube (`YARRTUBE_YOUTUBE_API_URL`).
+fn youtube_api_url() -> String {
+    parse_youtube_api_url(std::env::var("YARRTUBE_YOUTUBE_API_URL").ok())
+}
+
+/// The configured root without a trailing `/`, defaulting when unset or empty.
+fn parse_youtube_api_url(value: Option<String>) -> String {
+    value
+        .map(|url| url.trim_end_matches('/').to_string())
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| DEFAULT_YOUTUBE_API_URL.to_string())
+}
+
+/// Whether the daemon keeps its `yt-dlp` up to date; `YARRTUBE_YTDLP_SELF_UPDATE=false`
+/// turns it off, for running against a stand-in `yt-dlp`.
+fn ytdlp_self_update_enabled() -> bool {
+    parse_ytdlp_self_update(std::env::var("YARRTUBE_YTDLP_SELF_UPDATE").ok())
+}
+
+/// Only `false` turns the self-update off.
+fn parse_ytdlp_self_update(value: Option<String>) -> bool {
+    value.as_deref().map(str::trim) != Some("false")
+}
+
+/// How often the task executor and the event consumer check for work;
+/// `YARRTUBE_BACKGROUND_POLL_INTERVAL_MS` shortens it for tests.
+fn background_poll_interval() -> Duration {
+    parse_background_poll_interval(std::env::var("YARRTUBE_BACKGROUND_POLL_INTERVAL_MS").ok())
+}
+
+/// A positive number of milliseconds, defaulting otherwise.
+fn parse_background_poll_interval(value: Option<String>) -> Duration {
+    value
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_BACKGROUND_POLL_INTERVAL)
 }
 
 fn videos_path() -> String {
@@ -283,6 +344,7 @@ fn run_startup_staging_directory_check() {
 /// for unset variables). Library sections are discovered, not configured.
 /// When absent, nothing Plex-related is wired and the daemon behaves exactly
 /// as without the integration; a partial configuration is warned about.
+#[derive(Clone)]
 struct PlexIntegration {
     repository: Arc<dyn PlexLibraryRepository>,
     plex_videos_path: String,
@@ -336,10 +398,12 @@ fn run_startup_youtube_api_key_check() {
 }
 
 /// Must run before the task executor starts polling: requeues tasks a
-/// previous run left `running` and seeds the recurring yt-dlp self-update.
+/// previous run left `running`, seeds the recurring yt-dlp self-update and,
+/// with Plex configured, requests a Plex label sync.
 fn prepare_task_queue(
     infrastructure: &InfrastructureContainer,
     task_executor: &TaskExecutor,
+    plex_label_syncer: Option<&PlexLabelSyncer>,
 ) -> Result<()> {
     task_executor
         .recover_stuck_tasks()
@@ -352,6 +416,10 @@ fn prepare_task_queue(
         update_ytdlp_first_run_at,
     )
     .context("failed to schedule the recurring yt-dlp self-update task")?;
+    plex_label_syncer
+        .map(|syncer| syncer.request_sync(infrastructure.clock.now()))
+        .transpose()
+        .context("failed to request the Plex label sync")?;
     Ok(())
 }
 
@@ -362,24 +430,37 @@ fn api_services(infrastructure: &InfrastructureContainer) -> ApiServices {
             infrastructure.youtube_playlist_repository.clone(),
             infrastructure.event_publisher.clone(),
             infrastructure.clock.clone(),
+            infrastructure.preferences_repository.clone(),
         ),
         playlist_deleter: PlaylistDeleter::new(
             infrastructure.playlist_repository.clone(),
             infrastructure.video_repository.clone(),
+            infrastructure.video_transcript_repository.clone(),
+            infrastructure.video_summary_repository.clone(),
             infrastructure.playlist_video_repository.clone(),
             infrastructure.event_publisher.clone(),
             infrastructure.task_repository.clone(),
+            infrastructure.video_categories_repository.clone(),
+            infrastructure.video_category_verdict_repository.clone(),
         ),
         playlist_previewer: PlaylistPreviewer::new(
             infrastructure.youtube_playlist_repository.clone(),
         ),
-        playlist_searcher: PlaylistSearcher::new(infrastructure.playlist_repository.clone()),
         playlist_updater: PlaylistUpdater::new(
             infrastructure.playlist_repository.clone(),
             infrastructure.task_repository.clone(),
             infrastructure.clock.clone(),
+            infrastructure.preferences_repository.clone(),
         ),
         playlist_video_reconciler: playlist_video_reconciler(infrastructure),
+        playlist_view_searcher: PlaylistViewSearcher::new(
+            infrastructure.playlist_repository.clone(),
+            infrastructure.playlist_video_repository.clone(),
+            infrastructure.video_repository.clone(),
+            infrastructure.task_repository.clone(),
+            infrastructure.event_repository.clone(),
+            videos_path(),
+        ),
         video_searcher: VideoSearcher::new(
             infrastructure.playlist_repository.clone(),
             infrastructure.playlist_video_repository.clone(),
@@ -388,6 +469,10 @@ fn api_services(infrastructure: &InfrastructureContainer) -> ApiServices {
             infrastructure.video_repository.clone(),
             infrastructure.video_metadata_repository.clone(),
             infrastructure.clock.clone(),
+            infrastructure.category_repository.clone(),
+            category_video_collector(infrastructure),
+            infrastructure.preferences_repository.clone(),
+            infrastructure.video_summary_repository.clone(),
         ),
         task_view_searcher: TaskViewSearcher::new(
             infrastructure.task_repository.clone(),
@@ -403,25 +488,34 @@ fn api_services(infrastructure: &InfrastructureContainer) -> ApiServices {
             infrastructure.channel_avatar_repository.clone(),
             infrastructure.event_publisher.clone(),
             infrastructure.clock.clone(),
+            infrastructure.preferences_repository.clone(),
         ),
         channel_deleter: ChannelDeleter::new(
             infrastructure.channel_repository.clone(),
             infrastructure.video_repository.clone(),
+            infrastructure.video_transcript_repository.clone(),
+            infrastructure.video_summary_repository.clone(),
             infrastructure.channel_video_repository.clone(),
             infrastructure.channel_avatar_repository.clone(),
             infrastructure.event_publisher.clone(),
             infrastructure.task_repository.clone(),
+            infrastructure.video_categories_repository.clone(),
+            infrastructure.video_category_verdict_repository.clone(),
         ),
         channel_previewer: ChannelPreviewer::new(infrastructure.youtube_channel_repository.clone()),
         channel_updater: ChannelUpdater::new(
             infrastructure.channel_repository.clone(),
             infrastructure.task_repository.clone(),
             infrastructure.clock.clone(),
+            infrastructure.preferences_repository.clone(),
         ),
         channel_view_searcher: ChannelViewSearcher::new(
             infrastructure.channel_repository.clone(),
             infrastructure.channel_video_repository.clone(),
             infrastructure.video_repository.clone(),
+            infrastructure.task_repository.clone(),
+            infrastructure.event_repository.clone(),
+            videos_path(),
         ),
         channel_video_reconciler: channel_video_reconciler(infrastructure),
         directory_searcher: DirectorySearcher::new(infrastructure.directory_repository.clone()),
@@ -429,20 +523,114 @@ fn api_services(infrastructure: &InfrastructureContainer) -> ApiServices {
             infrastructure.video_repository.clone(),
             infrastructure.channel_repository.clone(),
             infrastructure.channel_video_repository.clone(),
+            infrastructure.playlist_repository.clone(),
+            infrastructure.playlist_video_repository.clone(),
             infrastructure.clock.clone(),
+            infrastructure.category_repository.clone(),
+            category_video_collector(infrastructure),
+        ),
+        subtitle_reader: SubtitleReader::new(
+            infrastructure.playlist_repository.clone(),
+            infrastructure.playlist_video_repository.clone(),
+            infrastructure.channel_repository.clone(),
+            infrastructure.channel_video_repository.clone(),
+            infrastructure.video_repository.clone(),
+            infrastructure.video_file_repository.clone(),
+            videos_path(),
         ),
         videos_root: VideosRoot(videos_path()),
-        running_version: RunningVersion(APP_VERSION.to_string()),
+        running_version: RunningVersion(AppVersion::current()),
+        preferences_searcher: PreferencesSearcher::new(
+            infrastructure.preferences_repository.clone(),
+        ),
+        preferences_updater: PreferencesUpdater::new(
+            infrastructure.preferences_repository.clone(),
+            infrastructure.video_repository.clone(),
+            infrastructure.clock.clone(),
+            infrastructure.video_category_verdict_repository.clone(),
+            infrastructure.category_lock.clone(),
+        ),
+        llm_server_searcher: LlmServerSearcher::new(infrastructure.llm_server_repository.clone()),
+        video_category_choice_searcher: VideoCategoryChoiceSearcher::new(
+            infrastructure.video_repository.clone(),
+            video_owner_finder(infrastructure),
+            infrastructure.category_repository.clone(),
+            infrastructure.video_category_verdict_repository.clone(),
+        ),
+        video_category_editor: VideoCategoryEditor::new(
+            infrastructure.video_repository.clone(),
+            video_owner_finder(infrastructure),
+            infrastructure.category_repository.clone(),
+            infrastructure.channel_repository.clone(),
+            infrastructure.playlist_repository.clone(),
+            infrastructure.channel_video_repository.clone(),
+            infrastructure.playlist_video_repository.clone(),
+            infrastructure.video_category_verdict_repository.clone(),
+            video_category_assigner(infrastructure),
+            infrastructure.task_repository.clone(),
+            infrastructure.clock.clone(),
+        ),
+        category_creator: CategoryCreator::new(
+            infrastructure.category_repository.clone(),
+            infrastructure.channel_repository.clone(),
+            infrastructure.playlist_repository.clone(),
+            video_category_assigner(infrastructure),
+            infrastructure.clock.clone(),
+        ),
+        category_updater: CategoryUpdater::new(
+            infrastructure.category_repository.clone(),
+            infrastructure.channel_repository.clone(),
+            infrastructure.playlist_repository.clone(),
+            video_category_assigner(infrastructure),
+            infrastructure.video_category_verdict_repository.clone(),
+        ),
+        category_deleter: CategoryDeleter::new(
+            infrastructure.category_repository.clone(),
+            infrastructure.video_category_verdict_repository.clone(),
+            video_category_assigner(infrastructure),
+        ),
+        category_view_searcher: CategoryViewSearcher::new(
+            infrastructure.category_repository.clone(),
+            infrastructure.channel_repository.clone(),
+            infrastructure.playlist_repository.clone(),
+            category_video_collector(infrastructure),
+            infrastructure.video_category_verdict_repository.clone(),
+        ),
+        show_mover: ShowMover::new(
+            infrastructure.playlist_repository.clone(),
+            infrastructure.channel_repository.clone(),
+            infrastructure.playlist_video_repository.clone(),
+            infrastructure.channel_video_repository.clone(),
+            infrastructure.video_repository.clone(),
+            infrastructure.task_repository.clone(),
+            infrastructure.event_repository.clone(),
+            infrastructure.video_file_repository.clone(),
+            infrastructure.event_publisher.clone(),
+            infrastructure.show_locks.clone(),
+            videos_path(),
+        ),
     }
+}
+
+fn category_video_collector(infrastructure: &InfrastructureContainer) -> CategoryVideoCollector {
+    CategoryVideoCollector::new(
+        infrastructure.channel_repository.clone(),
+        infrastructure.channel_video_repository.clone(),
+        infrastructure.playlist_repository.clone(),
+        infrastructure.playlist_video_repository.clone(),
+        infrastructure.video_repository.clone(),
+        infrastructure.video_categories_repository.clone(),
+    )
 }
 
 fn event_consumer(
     infrastructure: &InfrastructureContainer,
     plex: Option<PlexIntegration>,
+    plex_label_syncer: Option<PlexLabelSyncer>,
 ) -> DomainEventsConsumer {
     DomainEventsConsumer::new(
         infrastructure.event_repository.clone(),
-        event_subscribers(infrastructure, plex),
+        event_subscribers(infrastructure, plex, plex_label_syncer),
         infrastructure.clock.clone(),
     )
 }
@@ -450,6 +638,7 @@ fn event_consumer(
 fn event_subscribers(
     infrastructure: &InfrastructureContainer,
     plex: Option<PlexIntegration>,
+    plex_label_syncer: Option<PlexLabelSyncer>,
 ) -> SubscriberRegistry {
     subscribers::registry(
         playlist_video_reconciler(infrastructure),
@@ -460,6 +649,8 @@ fn event_subscribers(
         infrastructure.clock.clone(),
         videos_path(),
         plex.map(plex_folder_scanner),
+        plex_label_syncer,
+        CategoryMemberRemover::new(infrastructure.category_repository.clone()),
     )
 }
 
@@ -467,28 +658,61 @@ fn plex_folder_scanner(plex: PlexIntegration) -> PlexFolderScanner {
     PlexFolderScanner::new(videos_path(), plex.plex_videos_path, plex.repository)
 }
 
-fn task_executor(infrastructure: &InfrastructureContainer) -> TaskExecutor {
+fn plex_label_syncer(
+    infrastructure: &InfrastructureContainer,
+    plex: PlexIntegration,
+) -> PlexLabelSyncer {
+    PlexLabelSyncer::new(
+        plex.repository,
+        infrastructure.episode_labels_repository.clone(),
+        infrastructure.category_playlist_repository.clone(),
+        infrastructure.video_categories_repository.clone(),
+        infrastructure.category_repository.clone(),
+        infrastructure.video_repository.clone(),
+        video_owner_finder(infrastructure),
+        infrastructure.task_repository.clone(),
+        infrastructure.clock.clone(),
+        videos_path(),
+        plex.plex_videos_path,
+    )
+}
+
+fn task_executor(
+    infrastructure: &InfrastructureContainer,
+    plex_label_syncer: Option<PlexLabelSyncer>,
+) -> TaskExecutor {
     TaskExecutor::new(
         infrastructure.task_repository.clone(),
-        task_handlers(infrastructure),
+        task_handlers(infrastructure, plex_label_syncer),
         infrastructure.clock.clone(),
         retry_base_delay_seconds(),
         download_concurrency(),
     )
 }
 
-fn task_handlers(infrastructure: &InfrastructureContainer) -> HandlerRegistry {
+fn task_handlers(
+    infrastructure: &InfrastructureContainer,
+    plex_label_syncer: Option<PlexLabelSyncer>,
+) -> HandlerRegistry {
     tasks::registry(
         playlist_video_reconciler(infrastructure),
         channel_video_reconciler(infrastructure),
         video_downloader(infrastructure),
         thumbnail_fetcher(infrastructure),
+        subtitle_fetcher(infrastructure),
+        chapter_fetcher(infrastructure),
+        quality_upgrader(infrastructure),
+        video_summarizer(infrastructure),
+        video_categorizer(infrastructure),
+        video_reconciler(infrastructure),
         infrastructure.video_repository.clone(),
         VideoFileDeleter::new(infrastructure.video_file_repository.clone(), videos_path()),
         infrastructure.task_repository.clone(),
         infrastructure.clock.clone(),
         infrastructure.ytdlp_updater.clone(),
         target_path(),
+        ytdlp_self_update_enabled(),
+        plex_label_syncer,
     )
 }
 
@@ -496,6 +720,8 @@ fn playlist_video_reconciler(infrastructure: &InfrastructureContainer) -> Playli
     PlaylistVideoReconciler::new(
         infrastructure.playlist_repository.clone(),
         infrastructure.video_repository.clone(),
+        infrastructure.video_transcript_repository.clone(),
+        infrastructure.video_summary_repository.clone(),
         infrastructure.playlist_video_repository.clone(),
         infrastructure.youtube_playlist_items_repository.clone(),
         infrastructure.event_publisher.clone(),
@@ -503,6 +729,9 @@ fn playlist_video_reconciler(infrastructure: &InfrastructureContainer) -> Playli
         internal_video_reconciler(infrastructure),
         show_file_writer(infrastructure),
         infrastructure.clock.clone(),
+        infrastructure.show_locks.clone(),
+        infrastructure.video_categories_repository.clone(),
+        infrastructure.video_category_verdict_repository.clone(),
     )
 }
 
@@ -510,6 +739,8 @@ fn channel_video_reconciler(infrastructure: &InfrastructureContainer) -> Channel
     ChannelVideoReconciler::new(
         infrastructure.channel_repository.clone(),
         infrastructure.video_repository.clone(),
+        infrastructure.video_transcript_repository.clone(),
+        infrastructure.video_summary_repository.clone(),
         infrastructure.channel_video_repository.clone(),
         infrastructure.channel_videos_repository.clone(),
         infrastructure.event_publisher.clone(),
@@ -522,6 +753,9 @@ fn channel_video_reconciler(infrastructure: &InfrastructureContainer) -> Channel
             infrastructure.channel_avatar_repository.clone(),
         )),
         infrastructure.clock.clone(),
+        infrastructure.show_locks.clone(),
+        infrastructure.video_categories_repository.clone(),
+        infrastructure.video_category_verdict_repository.clone(),
     )
 }
 
@@ -568,13 +802,48 @@ fn internal_video_reconciler(
 ) -> Arc<InternalVideoReconciler> {
     Arc::new(InternalVideoReconciler::new(
         infrastructure.video_repository.clone(),
-        metadata_generator(infrastructure),
-        infrastructure.video_metadata_repository.clone(),
+        infrastructure.video_file_repository.clone(),
+        video_reconciler(infrastructure),
+        videos_path(),
+    ))
+}
+
+fn video_category_assigner(infrastructure: &InfrastructureContainer) -> VideoCategoryAssigner {
+    VideoCategoryAssigner::new(
+        infrastructure.video_repository.clone(),
+        infrastructure.video_category_verdict_repository.clone(),
+        infrastructure.video_categories_repository.clone(),
+        infrastructure.category_repository.clone(),
+        infrastructure.channel_video_repository.clone(),
+        infrastructure.playlist_video_repository.clone(),
+        infrastructure.event_publisher.clone(),
+        infrastructure.category_lock.clone(),
+    )
+}
+
+fn video_reconciler(infrastructure: &InfrastructureContainer) -> VideoReconciler {
+    VideoReconciler::new(
+        infrastructure.video_repository.clone(),
+        video_owner_finder(infrastructure),
         infrastructure.task_repository.clone(),
         infrastructure.video_file_repository.clone(),
-        thumbnail_fetcher(infrastructure),
+        infrastructure.video_metadata_repository.clone(),
+        metadata_generator(infrastructure),
         video_relocator(infrastructure),
+        infrastructure.video_lock.clone(),
         infrastructure.clock.clone(),
+        video_category_assigner(infrastructure),
+        infrastructure.preferences_repository.clone(),
+        video_categorizer(infrastructure),
+    )
+}
+
+fn video_owner_finder(infrastructure: &InfrastructureContainer) -> Arc<VideoOwnerFinder> {
+    Arc::new(VideoOwnerFinder::new(
+        infrastructure.channel_video_repository.clone(),
+        infrastructure.playlist_video_repository.clone(),
+        infrastructure.channel_repository.clone(),
+        infrastructure.playlist_repository.clone(),
         videos_path(),
     ))
 }
@@ -584,7 +853,63 @@ fn thumbnail_fetcher(infrastructure: &InfrastructureContainer) -> Arc<ThumbnailF
         infrastructure.video_repository.clone(),
         infrastructure.video_downloader_repository.clone(),
         infrastructure.video_file_repository.clone(),
-        infrastructure.task_repository.clone(),
+        infrastructure.clock.clone(),
+        videos_path(),
+    ))
+}
+
+fn chapter_fetcher(infrastructure: &InfrastructureContainer) -> Arc<ChapterFetcher> {
+    Arc::new(ChapterFetcher::new(
+        infrastructure.video_repository.clone(),
+        infrastructure.video_downloader_repository.clone(),
+        infrastructure.clock.clone(),
+    ))
+}
+
+fn video_summarizer(infrastructure: &InfrastructureContainer) -> Arc<VideoSummarizer> {
+    Arc::new(VideoSummarizer::new(
+        infrastructure.video_repository.clone(),
+        video_owner_finder(infrastructure),
+        infrastructure.preferences_repository.clone(),
+        infrastructure.video_transcript_repository.clone(),
+        infrastructure.video_file_repository.clone(),
+        infrastructure.llm_server_repository.clone(),
+        infrastructure.video_summary_repository.clone(),
+        infrastructure.clock.clone(),
+    ))
+}
+
+fn video_categorizer(infrastructure: &InfrastructureContainer) -> Arc<VideoCategorizer> {
+    Arc::new(VideoCategorizer::new(
+        infrastructure.preferences_repository.clone(),
+        video_owner_finder(infrastructure),
+        infrastructure.category_repository.clone(),
+        infrastructure.video_category_verdict_repository.clone(),
+        infrastructure.video_summary_repository.clone(),
+        infrastructure.llm_server_repository.clone(),
+        video_category_assigner(infrastructure),
+        infrastructure.clock.clone(),
+    ))
+}
+
+fn quality_upgrader(infrastructure: &InfrastructureContainer) -> Arc<QualityUpgrader> {
+    Arc::new(QualityUpgrader::new(
+        infrastructure.video_repository.clone(),
+        infrastructure.video_downloader_repository.clone(),
+        infrastructure.video_file_repository.clone(),
+        infrastructure.event_publisher.clone(),
+        infrastructure.clock.clone(),
+        videos_path(),
+    ))
+}
+
+fn subtitle_fetcher(infrastructure: &InfrastructureContainer) -> Arc<SubtitleFetcher> {
+    Arc::new(SubtitleFetcher::new(
+        infrastructure.video_repository.clone(),
+        infrastructure.video_transcript_repository.clone(),
+        infrastructure.video_downloader_repository.clone(),
+        infrastructure.video_file_repository.clone(),
+        infrastructure.event_publisher.clone(),
         infrastructure.clock.clone(),
         videos_path(),
     ))
@@ -642,11 +967,15 @@ async fn run_async(
     infrastructure: InfrastructureContainer,
     task_executor: Arc<TaskExecutor>,
     plex: Option<PlexIntegration>,
+    plex_label_syncer: Option<PlexLabelSyncer>,
     shutdown: oneshot::Receiver<()>,
 ) -> ExitCode {
     tokio::spawn(heartbeat_loop());
-    tokio::spawn(Arc::new(event_consumer(&infrastructure, plex)).run(BACKGROUND_POLL_INTERVAL));
-    tokio::spawn(task_executor.run(BACKGROUND_POLL_INTERVAL));
+    let poll_interval = background_poll_interval();
+    tokio::spawn(
+        Arc::new(event_consumer(&infrastructure, plex, plex_label_syncer)).run(poll_interval),
+    );
+    tokio::spawn(task_executor.run(poll_interval));
 
     tokio::select! {
         result = serve_http(port(), api_services(&infrastructure)) => {
@@ -908,23 +1237,65 @@ mod tests {
     }
 
     #[test]
+    fn it_should_request_the_label_sync_at_startup_only_if_plex_is_configured() {
+        let queued: Vec<Vec<String>> = [
+            None,
+            plex_integration_from(
+                Some("http://plex:32400".to_string()),
+                Some("token".to_string()),
+                Some("/plex/videos".to_string()),
+            ),
+        ]
+        .into_iter()
+        .map(|plex| {
+            let db = TestDatabase::new();
+            let infrastructure = test_infrastructure(&db);
+            let syncer = plex.map(|plex| plex_label_syncer(&infrastructure, plex));
+            let executor = task_executor(&infrastructure, syncer.clone());
+            prepare_task_queue(&infrastructure, &executor, syncer.as_ref()).unwrap();
+            infrastructure
+                .task_repository
+                .list_non_completed()
+                .unwrap()
+                .into_iter()
+                .map(|task| task.task_type)
+                .collect()
+        })
+        .collect();
+
+        assert_eq!(
+            queued,
+            vec![
+                vec!["update_ytdlp".to_string()],
+                vec!["update_ytdlp".to_string(), "sync_plex_labels".to_string()],
+            ]
+        );
+    }
+
+    #[test]
     fn it_should_register_a_handler_for_every_task_type() {
         let db = TestDatabase::new();
         let infrastructure = test_infrastructure(&db);
 
-        let handlers = task_handlers(&infrastructure);
+        let handlers = task_handlers(&infrastructure, None);
 
         assert_eq!(
             handlers.keys().map(String::as_str).collect::<BTreeSet<_>>(),
             BTreeSet::from([
+                "categorize_video",
                 "delete_channel_files",
                 "delete_playlist_files",
                 "delete_video_file",
                 "download_video",
+                "fetch_chapters",
+                "fetch_subtitles",
                 "fetch_thumbnail",
                 "reconcile_channel",
                 "reconcile_playlist",
+                "summarize_video",
+                "sync_video",
                 "update_ytdlp",
+                "upgrade_quality",
             ])
         );
     }
@@ -934,7 +1305,7 @@ mod tests {
         let db = TestDatabase::new();
         let infrastructure = test_infrastructure(&db);
 
-        let subscribers = event_subscribers(&infrastructure, None);
+        let subscribers = event_subscribers(&infrastructure, None, None);
 
         assert_eq!(
             subscribers
@@ -943,13 +1314,15 @@ mod tests {
                 .collect::<BTreeMap<_, _>>(),
             BTreeMap::from([
                 ("channel_created", 1),
-                ("channel_deleted", 1),
+                ("channel_deleted", 2),
                 ("playlist_created", 1),
-                ("playlist_deleted", 1),
-                ("video_added_to_channel", 2),
-                ("video_added_to_playlist", 2),
+                ("playlist_deleted", 2),
+                ("video_added_to_channel", 1),
+                ("video_added_to_playlist", 1),
+                ("video_downloaded", 1),
                 ("video_removed_from_channel", 1),
                 ("video_removed_from_playlist", 1),
+                ("video_subtitles_fetched", 1),
             ])
         );
     }
@@ -969,7 +1342,7 @@ mod tests {
             (Some("http://plex:32400"), Some("token"), None),
         ];
 
-        let scan_subscribers: Vec<Option<usize>> = configurations
+        let scan_subscribers: Vec<(Option<usize>, Option<usize>)> = configurations
             .into_iter()
             .map(|(url, token, videos_path)| {
                 plex_integration_from(
@@ -979,13 +1352,24 @@ mod tests {
                 )
             })
             .map(|plex| {
-                event_subscribers(&infrastructure, plex)
-                    .get("video_downloaded")
-                    .map(Vec::len)
+                let subscribers = event_subscribers(&infrastructure, plex, None);
+                (
+                    subscribers.get("video_downloaded").map(Vec::len),
+                    subscribers.get("video_subtitles_fetched").map(Vec::len),
+                )
             })
             .collect();
 
-        assert_eq!(scan_subscribers, vec![Some(1), None, None, None]);
+        // Without Plex, each event keeps only the video sync.
+        assert_eq!(
+            scan_subscribers,
+            vec![
+                (Some(2), Some(2)),
+                (Some(1), Some(1)),
+                (Some(1), Some(1)),
+                (Some(1), Some(1)),
+            ]
+        );
     }
 
     #[test]
@@ -998,14 +1382,66 @@ mod tests {
             Some("/plex/videos".to_string()),
         );
 
-        let handlers = task_handlers(&infrastructure);
-        let subscribers = event_subscribers(&infrastructure, plex);
+        let handlers = task_handlers(&infrastructure, None);
+        let subscribers = event_subscribers(&infrastructure, plex, None);
 
         assert!(!handlers.contains_key("reconcile_plex_collections"));
         assert_eq!(
             ["playlist_deleted", "channel_deleted"]
                 .map(|event_type| subscribers.get(event_type).map(Vec::len)),
-            [Some(1), Some(1)]
+            [Some(2), Some(2)]
+        );
+    }
+
+    #[test]
+    fn it_should_read_the_youtube_api_url_or_default_it() {
+        let urls: Vec<String> = [
+            None,
+            Some(""),
+            Some("http://stub:1/youtube/v3"),
+            Some("http://stub:1/youtube/v3/"),
+        ]
+        .into_iter()
+        .map(|value| parse_youtube_api_url(value.map(str::to_string)))
+        .collect();
+
+        assert_eq!(
+            urls,
+            vec![
+                DEFAULT_YOUTUBE_API_URL.to_string(),
+                DEFAULT_YOUTUBE_API_URL.to_string(),
+                "http://stub:1/youtube/v3".to_string(),
+                "http://stub:1/youtube/v3".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn it_should_turn_the_ytdlp_self_update_off_only_if_false() {
+        let enabled: Vec<bool> = [None, Some("true"), Some("abc"), Some("false")]
+            .into_iter()
+            .map(|value| parse_ytdlp_self_update(value.map(str::to_string)))
+            .collect();
+
+        assert_eq!(enabled, vec![true, true, true, false]);
+    }
+
+    #[test]
+    fn it_should_read_the_background_poll_interval_or_default_it() {
+        let intervals: Vec<Duration> = [None, Some("0"), Some("-1"), Some("abc"), Some("250")]
+            .into_iter()
+            .map(|value| parse_background_poll_interval(value.map(str::to_string)))
+            .collect();
+
+        assert_eq!(
+            intervals,
+            vec![
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Duration::from_millis(250),
+            ]
         );
     }
 
@@ -1068,6 +1504,7 @@ mod tests {
         InfrastructureContainer::new(InfrastructureSettings {
             db_path: db.path(),
             youtube_api_key: String::new(),
+            youtube_api_url: DEFAULT_YOUTUBE_API_URL.to_string(),
             videos_path: unique_temp_dir("serve-registry-videos"),
             avatars_path: unique_temp_dir("serve-registry-avatars"),
             ytdlp_path: PathBuf::from("yt-dlp"),

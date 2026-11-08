@@ -1,8 +1,14 @@
 import { useState, type FormEvent } from 'react'
-import type { UpdatePlaylistRequest } from '@/api/client'
+import { movePlaylist, type UpdatePlaylistRequest } from '@/api/client'
+import { useCategoriesShown } from '@/api/queries'
 import type { PlaylistListItem } from '@/api/types'
 import { intervalForm, intervalMinutes, type IntervalForm } from '@/lib/reconcileInterval'
+import { useSourceCategoriesField } from '@/hooks/useSourceCategoriesField'
+import { CategoryPicker } from './CategoryPicker'
+import { LocationLine } from './LocationLine'
+import { MoveSourceDialog } from './MoveSourceDialog'
 import { ReconcileIntervalField } from './ReconcileIntervalField'
+import { SourceAiSection } from './SourceAiSection'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 
@@ -20,9 +26,31 @@ export function EditPlaylistDialog({
   onOpenChange,
   onSave,
 }: EditPlaylistDialogProps) {
+  const [moving, setMoving] = useState(false)
+  if (moving) {
+    return (
+      <MoveSourceDialog
+        kind="playlist"
+        name={playlist.name}
+        currentPath={playlist.path}
+        onMove={(path) => movePlaylist(playlist.id, path)}
+        onClose={() => {
+          setMoving(false)
+          onOpenChange(false)
+        }}
+      />
+    )
+  }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="gap-5 p-6 sm:max-w-md">
+      {/* Focus the first setting, not the Location line's "Move…" above it. */}
+      <DialogContent
+        className="gap-5 p-6 sm:max-w-md"
+        onOpenAutoFocus={(event) => {
+          event.preventDefault()
+          document.getElementById('edit-playlist-interval')?.focus()
+        }}
+      >
         <DialogTitle>Edit {playlist.name} settings</DialogTitle>
         <DialogDescription className="sr-only">
           Change how often {playlist.name} is checked for new videos.
@@ -33,6 +61,7 @@ export function EditPlaylistDialog({
           playlist={playlist}
           onSave={onSave}
           onClose={() => onOpenChange(false)}
+          onMoveRequest={() => setMoving(true)}
         />
       </DialogContent>
     </Dialog>
@@ -43,28 +72,47 @@ interface EditPlaylistFormProps {
   playlist: PlaylistListItem
   onSave: (changes: UpdatePlaylistRequest) => Promise<void>
   onClose: () => void
+  /** Leaves the form unsaved for the move dialog. */
+  onMoveRequest: () => void
 }
 
-function EditPlaylistForm({ playlist, onSave, onClose }: EditPlaylistFormProps) {
+function EditPlaylistForm({ playlist, onSave, onClose, onMoveRequest }: EditPlaylistFormProps) {
   const [interval, changeInterval] = useState<IntervalForm>(
     intervalForm(playlist.reconcile_interval_minutes),
   )
+  const [summariesEnabled, setSummariesEnabled] = useState(playlist.summaries_enabled)
+  const [categorizationEnabled, setCategorizationEnabled] = useState(playlist.categorization_enabled)
 
   const [error, setError] = useState<Error | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const categories = useSourceCategoriesField({ kind: 'playlist', id: playlist.id })
+  const withCategories = useCategoriesShown()
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const minutes = intervalMinutes(interval)
     if (minutes === null) return
-    if (minutes === playlist.reconcile_interval_minutes) {
+    const changes: UpdatePlaylistRequest = {
+      ...(minutes !== playlist.reconcile_interval_minutes && { reconcile_interval_minutes: minutes }),
+      ...(summariesEnabled !== playlist.summaries_enabled && {
+        summaries_enabled: summariesEnabled,
+      }),
+      ...(categorizationEnabled !== playlist.categorization_enabled && {
+        categorization_enabled: categorizationEnabled,
+      }),
+    }
+    const changesSettings = Object.keys(changes).length > 0
+    if (!changesSettings && !categories.changed) {
       onClose()
       return
     }
     setSubmitting(true)
     setError(null)
     try {
-      await onSave({ reconcile_interval_minutes: minutes })
+      if (changesSettings) {
+        await onSave(changes)
+      }
+      await categories.save()
       onClose()
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)))
@@ -75,7 +123,30 @@ function EditPlaylistForm({ playlist, onSave, onClose }: EditPlaylistFormProps) 
 
   return (
     <form className="flex min-w-0 flex-col gap-5" onSubmit={handleSubmit}>
+      <LocationLine
+        path={playlist.path}
+        onMove={onMoveRequest}
+        moveBlocked={playlist.work_in_progress}
+      />
       <ReconcileIntervalField id="edit-playlist-interval" value={interval} onChange={changeInterval} />
+      <SourceAiSection
+        idPrefix="edit-playlist"
+        summaries={{
+          checked: summariesEnabled,
+          onChange: setSummariesEnabled,
+          enabledOnSource: playlist.summaries_enabled,
+        }}
+        categorization={{
+          checked: categorizationEnabled,
+          onChange: setCategorizationEnabled,
+          enabledOnSource: playlist.categorization_enabled,
+        }}
+        onNavigateAway={onClose}
+      />
+      {withCategories && (
+        <CategoryPicker value={categories.value} onChange={categories.onChange} />
+      )}
+
       {error && <p className="text-sm text-destructive">{error.message}</p>}
       <Button type="submit" disabled={submitting} className="self-start">
         {submitting ? 'Saving…' : 'Save'}

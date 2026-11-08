@@ -7,7 +7,7 @@ Tracks whether each video has been watched, and where playback stopped, so the w
 ## Requirements
 
 ### Requirement: Watch State Per YouTube Video
-The system SHALL record, for each video, whether it has been watched and its saved playback position in whole seconds. A video that has never been played SHALL be unwatched with a saved position of 0. Watch state SHALL belong to the YouTube video: every change SHALL apply to every stored copy of that YouTube video, whichever playlist or channel tracks it.
+The system SHALL record, for each video, whether it has been watched and its saved playback position in whole seconds. A video that has never been played SHALL be unwatched with a saved position of 0. Watch state SHALL belong to the YouTube video: every change SHALL apply to every stored copy of that YouTube video, whichever playlist or channel tracks it. A download SHALL NOT undo a watch state recorded while it was in flight.
 
 #### Scenario: A newly recorded video is unwatched
 - **WHEN** a video is recorded for a playlist or channel for the first time
@@ -20,6 +20,10 @@ The system SHALL record, for each video, whether it has been watched and its sav
 #### Scenario: Watch state survives a redownload
 - **WHEN** a watched video's file goes missing and the video is scheduled for a fresh download
 - **THEN** the video stays watched
+
+#### Scenario: Watch state survives a download in flight
+- **WHEN** a video's watch state changes while its download is in progress, e.g. because another copy of it was marked watched, and the download then succeeds, fails or ends excluded
+- **THEN** the video keeps the watch state recorded during the download
 
 ### Requirement: Record Playback Progress
 The system SHALL provide an HTTP endpoint that, given a YouTube video ID and a playback position in whole seconds (plus, optionally, the duration reported by the player), records playback progress for every stored copy of that video. Each report SHALL state whether the client believed the video watched when its playback began (`was_watched`). A report SHALL be stale when it states the video was unwatched but the video is now watched. The video was marked watched after that playback began, so the reported position predates the mark. A stale report SHALL change nothing. The recorded duration SHALL be used. The reported duration SHALL be used only when no duration is recorded. When included, the reported duration SHALL be a positive number of whole seconds. The endpoint SHALL respond with HTTP status 200 on success, including stale reports, with a body stating whether the video is watched once the report is applied (`{ "watched": true }` or `{ "watched": false }`). It SHALL accept requests sent as a browser beacon on page unload.
@@ -104,7 +108,7 @@ The system SHALL provide an HTTP endpoint that, given a YouTube video ID, marks 
 
 #### Scenario: Every stored copy is marked
 - **WHEN** a client marks as watched a video tracked by both a channel and a playlist
-- **THEN** both stored copies are watched
+- **THEN** both stored copies are watched, and both the channel's and the playlist's unwatched counts drop by one
 
 #### Scenario: Marking drops the video from continue watching
 - **WHEN** a client marks as watched a video listed under "Continue watching"
@@ -114,12 +118,12 @@ The system SHALL provide an HTTP endpoint that, given a YouTube video ID, marks 
 - **WHEN** a client marks as watched a video that is already watched
 - **THEN** the daemon responds with HTTP status 204 and the video's watched time is unchanged
 
-#### Scenario: Video not downloaded
-- **WHEN** a client marks as watched a video none of whose stored copies has finished downloading
-- **THEN** the daemon responds with HTTP status 400 and changes nothing
-
 #### Scenario: Unknown video
 - **WHEN** a client marks as watched a YouTube video ID that no playlist or channel tracks
+- **THEN** the daemon responds with HTTP status 400 and changes nothing
+
+#### Scenario: Video not downloaded
+- **WHEN** a client marks as watched a video none of whose stored copies has finished downloading
 - **THEN** the daemon responds with HTTP status 400 and changes nothing
 
 ### Requirement: Last Played Time
@@ -152,3 +156,45 @@ The system SHALL record, for each video, the time playback progress was last rec
 #### Scenario: Rejected progress records nothing
 - **WHEN** a progress report is rejected as invalid or for an unknown video
 - **THEN** no video's last played time changes
+
+### Requirement: Mark A Category Watched
+The system SHALL provide an HTTP endpoint that, given a category's identifier, marks every downloaded video of every member of the category as watched, including every other stored copy of those videos. Videos that have not finished downloading SHALL be left unchanged. The endpoint SHALL respond with HTTP status 204. When no category has the identifier, the endpoint SHALL respond with HTTP status 404.
+
+#### Scenario: Category marked watched
+- **WHEN** a client marks the category "Chess" watched, and its channel and playlist members have downloaded, unwatched videos
+- **THEN** the daemon responds with HTTP status 204, every downloaded video of both members is watched, and the category's unwatched count is 0
+
+#### Scenario: Copies outside the category
+- **WHEN** a video of a member of the category is also tracked by a source outside the category, and the category is marked watched
+- **THEN** that other copy is watched too
+
+#### Scenario: Videos still downloading
+- **WHEN** a member of the category has a video that has not finished downloading, and the category is marked watched
+- **THEN** that video stays unwatched
+
+#### Scenario: Unknown category
+- **WHEN** a client marks a category identifier that does not exist watched
+- **THEN** the daemon responds with HTTP status 404
+
+### Requirement: Mark A Playlist Watched
+The system SHALL provide an HTTP endpoint that, given a tracked playlist's ID, marks every downloaded video of that playlist as watched, including every other stored copy of those videos, such as their copies in channels. Videos in the playlist that have not finished downloading SHALL be left unchanged. The endpoint SHALL respond with HTTP status 204.
+
+#### Scenario: Marking a playlist watched
+- **WHEN** a client marks a tracked playlist as watched
+- **THEN** the daemon responds with HTTP status 204, every downloaded video of the playlist is watched, and its unwatched count becomes 0
+
+#### Scenario: Copies in channels are marked too
+- **WHEN** a client marks a playlist as watched and one of its downloaded videos is also tracked by a channel
+- **THEN** the channel's copy is watched too, and the channel's unwatched count drops accordingly
+
+#### Scenario: Playlist videos still downloading are left unchanged
+- **WHEN** a client marks a playlist as watched while some of its videos are pending or downloading
+- **THEN** those videos stay unwatched
+
+#### Scenario: Playlist does not exist
+- **WHEN** a client marks as watched a playlist ID that is not currently tracked
+- **THEN** the daemon responds with HTTP status 400 and changes nothing
+
+#### Scenario: Invalid playlist ID
+- **WHEN** a client marks as watched a value that is not a valid playlist ID
+- **THEN** the daemon responds with HTTP status 400 and changes nothing

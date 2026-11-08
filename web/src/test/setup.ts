@@ -1,12 +1,21 @@
 import '@testing-library/jest-dom/vitest'
+import { afterEach } from 'vitest'
+import { viewport } from './viewport'
 
 // jsdom implements neither `matchMedia` nor `ResizeObserver`; the components
 // only need them to exist (VideoDetail starts expanded on desktop widths,
-// Description measures overflow).
+// Description measures overflow). Every query matches only on a desktop
+// viewport, which `useDesktopViewport()` opts a test into.
+afterEach(() => {
+  viewport.desktop = false
+  // The theme lives on <html>, which outlives each test's render.
+  document.documentElement.classList.remove('dark')
+})
+
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
   value: (query: string) => ({
-    matches: false,
+    matches: viewport.desktop,
     media: query,
     onchange: null,
     addEventListener: () => {},
@@ -75,3 +84,11 @@ if (!Element.prototype.hasPointerCapture) {
 if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {}
 }
+// jsdom has no layout, so no element scrolling either (the chapter rail scrolls itself).
+if (!Element.prototype.scrollTo) {
+  Element.prototype.scrollTo = () => {}
+}
+
+// jsdom has no media playback: its `pause()`/`load()` log "Not implemented".
+HTMLMediaElement.prototype.pause = () => {}
+HTMLMediaElement.prototype.load = () => {}

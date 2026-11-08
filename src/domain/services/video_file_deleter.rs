@@ -27,21 +27,23 @@ impl VideoFileDeleter {
 }
 
 pub trait VideoFileDeleterApi: Send + Sync {
-    /// Deletes a removed video's downloaded file, and its thumbnail file if
-    /// any, from disk, scheduled by
+    /// Deletes a removed video's downloaded file, and its thumbnail and
+    /// subtitle files if any, from disk, scheduled by
     /// `subscribers::delete_video_file_on_video_removed_from_playlist`/
     /// `..._channel` whenever a downloaded video is removed from its
     /// container. `output_dir` is the container's already-resolved output
-    /// directory. An episode's media file, its NFO and its thumbnail are
-    /// deleted from its season folder, leaving the show files and the
-    /// folder in place; a legacy video's per-video folder is removed as one
-    /// unit, a legacy flat video's file and thumbnail individually. No-ops
-    /// (without erroring) for either entry it has no recorded filename for,
-    /// or no matching entry is found, so the task is safe to retry.
+    /// directory. An episode's media file, its NFO, its thumbnail and its
+    /// subtitle file are deleted from its season folder, leaving the show
+    /// files and the folder in place; a legacy video's per-video folder is
+    /// removed as one unit, a legacy flat video's file and thumbnail
+    /// individually. No-ops (without erroring) for any entry it has no
+    /// recorded filename for, or no matching entry is found, so the task is
+    /// safe to retry.
     fn delete_video_file(
         &self,
         filename: Option<String>,
         thumbnail_filename: Option<String>,
+        subtitle_filename: Option<String>,
         output_dir: &Path,
     ) -> anyhow::Result<()>;
 
@@ -72,10 +74,12 @@ impl VideoFileDeleterApi for VideoFileDeleter {
         &self,
         filename: Option<String>,
         thumbnail_filename: Option<String>,
+        subtitle_filename: Option<String>,
         output_dir: &Path,
     ) -> anyhow::Result<()> {
         self.delete_video_entry(filename, output_dir)?;
-        self.delete_thumbnail_entry(thumbnail_filename, output_dir)
+        self.delete_sidecar_entry(thumbnail_filename, "thumbnail", output_dir)?;
+        self.delete_sidecar_entry(subtitle_filename, "subtitle", output_dir)
     }
 
     fn delete_playlist_video_files(
@@ -123,16 +127,22 @@ impl VideoFileDeleter {
             .try_for_each(|entry| self.delete_entry(output_dir, entry))
     }
 
-    fn delete_thumbnail_entry(
+    /// A file recorded next to the video's own, e.g. its thumbnail or
+    /// subtitle file.
+    fn delete_sidecar_entry(
         &self,
-        thumbnail_filename: Option<String>,
+        sidecar_filename: Option<String>,
+        kind: &str,
         output_dir: &Path,
     ) -> anyhow::Result<()> {
-        let Some(thumbnail_filename) = thumbnail_filename else {
-            debug!("video has no recorded thumbnail filename, skipping file deletion");
+        let Some(sidecar_filename) = sidecar_filename else {
+            debug!(
+                kind,
+                "video has no recorded sidecar filename, skipping file deletion"
+            );
             return Ok(());
         };
-        self.delete_entry(output_dir, owning_entry(&thumbnail_filename))
+        self.delete_entry(output_dir, owning_entry(&sidecar_filename))
     }
 
     fn delete_entry(&self, output_dir: &Path, entry: &str) -> anyhow::Result<()> {
@@ -174,6 +184,7 @@ mod tests {
             .delete_video_file(
                 Some("Season 1/S01E001 - Video.mp4".into()),
                 None,
+                None,
                 dir.path(),
             )
             .unwrap();
@@ -191,6 +202,7 @@ mod tests {
             .delete_video_file(
                 Some("My Video/My Video.mp4".to_string()),
                 Some("My Video/My Video.jpg".to_string()),
+                None,
                 Path::new("/videos/playlist"),
             )
             .unwrap();
@@ -213,6 +225,7 @@ mod tests {
             .delete_video_file(
                 Some("My Video.mp4".to_string()),
                 Some("My Video.jpg".to_string()),
+                None,
                 Path::new("/videos/playlist"),
             )
             .unwrap();
@@ -238,7 +251,7 @@ mod tests {
         let (deleter, repo) = deleter(FakeVideoFileRepository::default());
 
         deleter
-            .delete_video_file(None, None, Path::new("/videos/playlist"))
+            .delete_video_file(None, None, None, Path::new("/videos/playlist"))
             .unwrap();
 
         assert!(repo.deleted_calls.lock().unwrap().is_empty());

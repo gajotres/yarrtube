@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { useWatchProgress } from './useWatchProgress'
-import { aVideo, mockApi } from '@/test/helpers'
+import { useCategories, usePlaylists } from '@/api/queries'
+import { aCategoryList, aPlaylist, aVideo, mockApi } from '@/test/helpers'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -304,6 +305,28 @@ describe('useWatchProgress', () => {
     expect(element.currentTime).toBe(0)
   })
 
+  it('refetches the playlist list when the watched state changes', async () => {
+    const listPlaylists = vi.fn(() => [aPlaylist()])
+    mockApi({
+      'GET /api/playlists': listPlaylists,
+      'POST /api/videos/abc/progress': { watched: true },
+    })
+    const element = fakeVideoElement({ currentTime: 290, duration: 300 })
+    const video = aVideo({ id: 'abc', watched: false })
+    renderHook(
+      () => {
+        usePlaylists()
+        useWatchProgress(element, video)
+      },
+      { wrapper: Wrapper },
+    )
+    await waitFor(() => expect(listPlaylists).toHaveBeenCalledOnce())
+
+    element.dispatchEvent(new Event('pause'))
+
+    await waitFor(() => expect(listPlaylists).toHaveBeenCalledTimes(2))
+  })
+
   it('reports through a beacon when the page hides', () => {
     const sendBeacon = vi.fn(() => true)
     Object.defineProperty(window.navigator, 'sendBeacon', {
@@ -329,5 +352,31 @@ describe('useWatchProgress', () => {
     element.dispatchEvent(new Event('pause'))
 
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('refetches categories when a report flips the watched state', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const fetchMock = mockApi({
+      'GET /api/categories': aCategoryList(),
+      'POST /api/videos/abc/progress': { watched: true },
+    })
+    const element = fakeVideoElement({ currentTime: 95, duration: 100, paused: false })
+    const video = aVideo({ id: 'abc', watched: false })
+    renderHook(
+      () => {
+        useCategories()
+        useWatchProgress(element, video)
+      },
+      { wrapper: Wrapper },
+    )
+    await settle()
+    const categoryFetches = () =>
+      fetchMock.mock.calls.filter(([url]) => url === '/api/categories').length
+    const before = categoryFetches()
+
+    playUntilNextReport(element)
+    await settle()
+
+    await waitFor(() => expect([before, categoryFetches()]).toEqual([1, 2]))
   })
 })

@@ -41,7 +41,7 @@ describe('AnnouncementBar', () => {
     expect(link).toHaveAttribute('href', 'https://example.com/docs')
     expect(link).toHaveAttribute('target', '_blank')
     expect(link).toHaveAttribute('rel', 'noopener noreferrer')
-    expect(screen.getByRole('region', { name: 'Announcement' })).toHaveTextContent(
+    expect(screen.getByText(/New release, see/).parentElement).toHaveTextContent(
       'New release, see docs now',
     )
   })
@@ -116,5 +116,20 @@ describe('AnnouncementBar', () => {
     ])
 
     expect(await screen.findByRole('region', { name: 'Announcement' })).toHaveTextContent('First')
+  })
+
+  it('wraps the whole text with its links inline, then the dismiss control', async () => {
+    renderBar([
+      anAnnouncement({ text: 'A long release note, see [docs](https://example.com/docs)' }),
+    ])
+
+    const region = await screen.findByRole('region', { name: 'Announcement' })
+    expect(screen.getByText(/A long release note/).parentElement).not.toHaveClass(
+      'max-sm:truncate',
+    )
+    expect(screen.getByRole('link', { name: 'docs' })).toBeVisible()
+    expect(region.lastElementChild).toBe(
+      screen.getByRole('button', { name: 'Dismiss announcement' }),
+    )
   })
 })
