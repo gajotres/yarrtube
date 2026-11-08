@@ -20,6 +20,7 @@ import {
   fetchTasks,
   fetchVersion,
   fetchVideos,
+  getVideoCategories,
   listCategories,
   listCategoryVideos,
   markCategoryWatched,
@@ -29,6 +30,8 @@ import {
   patchPreferences,
   updateChannel,
   updatePlaylist,
+  setVideoCategory,
+  deleteVideoAiVerdicts,
   type UpdateChannelRequest,
   type UpdatePlaylistRequest,
 } from './client'
@@ -48,6 +51,7 @@ import type {
   PreferencesPatch,
   Task,
   Video,
+  VideoCategories,
 } from './types'
 import { anyWorkInProgress } from '@/lib/libraryPolling'
 import {
@@ -90,6 +94,7 @@ export const queryKeys = {
   playlistPreview: (value: string) => ['playlist-preview', value] as const,
   channelPreview: (value: string) => ['channel-preview', value] as const,
   videoSearch: (text: string) => ['video-search', text] as const,
+  videoCategories: (recordId: string) => ['videos', recordId, 'categories'] as const,
 }
 
 /** Shortest trimmed text the daemon searches video titles for. */
@@ -124,6 +129,18 @@ export function useCategoryVideos(id: string): UseQueryResult<CategoryVideo[], E
     queryKey: queryKeys.categoryVideos(id),
     queryFn: () => listCategoryVideos(id),
     refetchInterval: LIVE_INTERVAL_MS,
+  })
+}
+
+/** A video copy's categories with where each comes from; idle until `enabled`. */
+export function useVideoCategories(
+  recordId: string,
+  enabled: boolean,
+): UseQueryResult<VideoCategories, Error> {
+  return useQuery({
+    queryKey: queryKeys.videoCategories(recordId),
+    queryFn: () => getVideoCategories(recordId),
+    enabled,
   })
 }
 
@@ -459,6 +476,46 @@ export function useUpdatePlaylistSettings(): (
       await invalidateLibrary()
     },
     [invalidateLibrary],
+  )
+}
+
+/**
+ * Returns a function that sets a video copy's category by hand, showing the
+ * categories it responds with, then refetches the library and the home videos.
+ */
+export function useSetVideoCategory(): (
+  recordId: string,
+  categoryId: string,
+  belongs: boolean,
+) => Promise<void> {
+  const queryClient = useQueryClient()
+  const invalidateLibraryAndHome = useInvalidateLibraryAndHome()
+  return useCallback(
+    async (recordId: string, categoryId: string, belongs: boolean) => {
+      const categories = await setVideoCategory(recordId, categoryId, belongs)
+      queryClient.setQueryData(queryKeys.videoCategories(recordId), categories)
+      await invalidateLibraryAndHome()
+    },
+    [queryClient, invalidateLibraryAndHome],
+  )
+}
+
+/**
+ * Returns a function that deletes a video copy's AI verdicts, then refetches
+ * its categories, the library and the home videos.
+ */
+export function useRerunVideoAi(): (recordId: string) => Promise<void> {
+  const queryClient = useQueryClient()
+  const invalidateLibraryAndHome = useInvalidateLibraryAndHome()
+  return useCallback(
+    async (recordId: string) => {
+      await deleteVideoAiVerdicts(recordId)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.videoCategories(recordId) }),
+        invalidateLibraryAndHome(),
+      ])
+    },
+    [queryClient, invalidateLibraryAndHome],
   )
 }
 

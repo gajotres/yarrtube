@@ -34,25 +34,24 @@ spec: decisions here feed OpenSpec changes later.
   shipped version, embedded at build time (`SummaryPrompt::shipped()`):
   shipping a new version is changing that one path. Users who never saved a
   prompt get it on upgrade; a saved prompt is kept until "Reset to default".
-- Categorization settings exist before categorization itself: nothing reads
-  them yet. On the AI page, categorization has its own switch, model, context
-  length (4096), temperature (0), thinking (on) and wrapping prompt
+- On the AI page, categorization has its own switch, model, context length
+  (4096), temperature (0), thinking (on) and wrapping prompt
   (`prompts/categorization/v2.md`, plain text with no sections or variables,
   saved like the summary prompt): the values `evals/categories` runs with,
   still under evaluation. Each category has an optional AI prompt (`ai_prompt`)
   describing the videos it should hold, written in the category dialog, when
   adding it or under "Edit settings", while AI, categories and categorization
-  are all on, and each source a `categorization_enabled` opt-in. What the model will get
-  is the wrapping prompt plus the category's prompt.
+  are all on, and each source a `categorization_enabled` opt-in. What the model
+  gets is the wrapping prompt plus the video's details and the category's
+  prompt, see [How a video is categorized](#how-a-video-is-categorized).
 
 ## Starting point in the codebase
 
 - `video-subtitles` already stores a plain-text transcript per video
   (state Missing / Fetched / Unavailable), explicitly so it can later be
   summarised.
-- `video-categories` already supports per-video categories: a video whose
-  source is in no category keeps categories set individually, "none until a
-  classifier sets any". Source categories take precedence.
+- `video-categories`: a video belongs to its source's categories plus every
+  category with a `yes` verdict for it.
 
 ## Constraints
 
@@ -116,6 +115,66 @@ spec: decisions here feed OpenSpec changes later.
 - Everything is logged at info level: each call sent, with the video's id and
   title but not the prompt, each answer, how long each call and the whole
   summary took, and the video's length. Failures are logged at error level.
+
+### How a video is categorized
+
+- Each (video, category) pair gets at most one **verdict**: `yes`, `no` or
+  `unavailable`, stored in `video_category_verdicts` with the model, its
+  one-sentence reason and when. A pair with a verdict is never asked again,
+  so reconcile passes don't repeat hours of calls.
+- A video's categories are its source's categories plus every category with a
+  `yes` verdict. Plex labels follow through `video_categories_changed`.
+- The video sync schedules a `categorize_video` task when AI, categories and
+  categorization are on, the video's channel or playlist has
+  `categorization_enabled`, its summary is Generated, and a category is
+  **pending**: it has an AI prompt, the source isn't a member of it, and the
+  video has no verdict for it. The video is categorized from its summary, so
+  its source needs summaries on too.
+- The task runs in the summaries lane, so one Ollama call runs at a time. It
+  re-checks those conditions, reads the pending categories again, and asks
+  once per category: the saved (or shipped) categorization prompt as system
+  message; the title, channel or playlist name, length, chapters, summary,
+  category name and AI prompt as user message. Temperature 0, context 4096,
+  at most 3072 output tokens (stops runaway thinking), the answer's JSON
+  schema as `format`, and thinking when the model supports it. Each verdict is
+  stored as it comes, unless meanwhile its category was deleted, its video
+  removed, the user set that pair by hand, or the categorization settings or
+  the category's AI prompt changed: then the answer is dropped and the pair
+  stays pending, asked again with the new prompt.
+- The answer is read after the last `</think>`: a JSON object with a boolean
+  `belongs` and a `reason`.
+- A rejected call (unusable answer, output limit hit, refused, past the
+  30-minute timeout) fails the task once every pending category was tried; the
+  retry asks only the ones still pending. On the last attempt each rejected
+  category gets an `unavailable` verdict. Ollama down, or the model not
+  installed, stops the run with a warning and leaves the rest pending for a
+  later sync.
+- Saving a new Ollama URL, categorization model or prompt deletes every
+  `unavailable` verdict; a new AI prompt for a category deletes that
+  category's. `yes` and `no` verdicts are final: editing or clearing a
+  category's prompt, turning a source's categorization off, or turning AI off
+  keeps them, and the categories they give.
+- Deleting a category deletes its verdicts; removing a video, or deleting its
+  source, deletes the video's.
+- A verdict is **decided by** the AI or the user. The user sets one per pair
+  from a video's **Edit categories…** dialog (`PUT
+  /api/videos/{record_id}/categories/{category_id}`), replacing the AI's; a
+  category the video's source is a member of can't be set (409). A pair with
+  a user verdict is never pending, so the AI never asks about it.
+- **Re-running** deletes AI verdicts (`yes`, `no` and `unavailable`) and keeps
+  user ones, then recomputes the categories of the videos that had one, in one
+  `video_categories_changed`: per video (`DELETE /api/videos/{record_id}/ai-verdicts`,
+  then its sync), per channel or playlist (`DELETE
+  /api/{channels,playlists}/{id}/ai-verdicts`, then its reconcile pass) and per
+  category (`DELETE /api/categories/{id}/ai-verdicts`, then each affected
+  video's sync). With categorization off nothing is asked again, so it just
+  clears: the video dialog and the source menu then read **Clear AI
+  categories** (`GET /api/videos/{record_id}/categories` reports the source's
+  `categorization_enabled`). **Re-evaluate** in a category's settings is
+  disabled while its prompt has unsaved edits, since the AI asks with the
+  saved one. `GET /api/categories` reports each category's `ai_verdict_count`.
+- Each verdict is logged at info level with the video, category, verdict,
+  reason, tokens and duration; skips at info, rejected calls at error.
 
 ### How a summary is shown
 
@@ -191,9 +250,8 @@ spec: decisions here feed OpenSpec changes later.
   Hybrid: embeddings shortlist, LLM confirms.
 - Automatic assignment means precision matters most (a wrong category is
   visible noise); measure it before turning it on.
-- Open: precedence with source categories. Today a source's categories win
-  over per-video ones. Should the classifier run only for videos whose source
-  is in no category, or add to them?
+- Decided: the AI adds to the source's categories; it never removes one. See
+  [How a video is categorized](#how-a-video-is-categorized).
 
 ## Feature C: Ask the video
 
@@ -239,6 +297,5 @@ How evals work here, for every feature: [`evals/README.md`](../evals/README.md).
 
 - Backlog: summarize and categorize every stored video, or only new or
   unwatched ones?
-- Categorization precedence vs source categories (see Feature B).
 - Translated titles: does yarrtube store a localized title instead of the
   original? Check before the summary feature relies on it.

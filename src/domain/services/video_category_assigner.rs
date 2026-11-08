@@ -1,20 +1,26 @@
 use crate::domain::category::{Category, CategoryId, CategoryMember};
 use crate::domain::event::DomainEvent;
 use crate::domain::video::VideoRecordId;
-use crate::domain::video_category::{VideoCategories, VideoCategoriesChanged};
+use crate::domain::video_category::{
+    VideoCategories, VideoCategoriesChanged, VideoCategoryVerdict,
+};
 use crate::infrastructure::repositories::sqlite_category_repository::CategoryRepository;
 use crate::infrastructure::repositories::sqlite_channel_video_repository::ChannelVideoRepository;
 use crate::infrastructure::repositories::sqlite_playlist_video_repository::PlaylistVideoRepository;
 use crate::infrastructure::repositories::sqlite_video_categories_repository::VideoCategoriesRepository;
+use crate::infrastructure::repositories::sqlite_video_category_verdict_repository::VideoCategoryVerdictRepository;
+use crate::infrastructure::repositories::sqlite_video_repository::VideoRepository;
 use crate::infrastructure::shared::category_lock::CategoryLock;
 use crate::infrastructure::shared::domain_events::event_publisher::EventPublisher;
 use std::collections::HashMap;
 use std::sync::{Arc, MutexGuard};
 
-/// Keeps each stored video record's categories in line with its source's
-/// (the source regime) and announces every change in one batched event.
+/// Keeps each stored video record's categories at its source's plus its yes
+/// verdicts' and announces every change in one batched event.
 #[derive(Clone)]
 pub struct VideoCategoryAssigner {
+    video_repository: Arc<dyn VideoRepository>,
+    video_category_verdict_repository: Arc<dyn VideoCategoryVerdictRepository>,
     video_categories_repository: Arc<dyn VideoCategoriesRepository>,
     category_repository: Arc<dyn CategoryRepository>,
     channel_video_repository: Arc<dyn ChannelVideoRepository>,
@@ -24,7 +30,10 @@ pub struct VideoCategoryAssigner {
 }
 
 impl VideoCategoryAssigner {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        video_repository: Arc<dyn VideoRepository>,
+        video_category_verdict_repository: Arc<dyn VideoCategoryVerdictRepository>,
         video_categories_repository: Arc<dyn VideoCategoriesRepository>,
         category_repository: Arc<dyn CategoryRepository>,
         channel_video_repository: Arc<dyn ChannelVideoRepository>,
@@ -33,6 +42,8 @@ impl VideoCategoryAssigner {
         category_lock: Arc<CategoryLock>,
     ) -> Self {
         Self {
+            video_repository,
+            video_category_verdict_repository,
             video_categories_repository,
             category_repository,
             channel_video_repository,
@@ -48,14 +59,14 @@ pub trait VideoCategoryAssignerApi: Send + Sync {
     /// callers of `reassign_category` hold it from before they change the
     /// categories it is computed from until it returns.
     fn lock(&self) -> MutexGuard<'_, ()>;
-    /// Source regime for one record of `source`: its set = the source's
-    /// categories. No-op when the source is in no category (AI regime).
+    /// Sets one record of `source` to the source's categories plus its yes
+    /// verdicts.
     fn assign_video(&self, video_id: &VideoRecordId, source: &CategoryMember)
     -> anyhow::Result<()>;
     /// After `category_id`'s members changed or it was deleted: recomputes every
     /// record of `previous_members`, of its current members and of records
-    /// still holding it, against `categories` (the state to apply). The
-    /// records of a source in no category only lose `category_id`.
+    /// still holding it, against `categories` (the state to apply): each
+    /// gets its source's categories plus its yes verdicts.
     fn reassign_category(
         &self,
         category_id: &CategoryId,
@@ -64,6 +75,26 @@ pub trait VideoCategoryAssignerApi: Send + Sync {
     ) -> anyhow::Result<()>;
     /// Announces a rename: one event naming every record holding `category_id`.
     fn announce_renamed(&self, category_id: &CategoryId) -> anyhow::Result<()>;
+    /// Under the lock: false, storing nothing, when the video or the
+    /// category is gone; else saves `verdict` and sets the record to its
+    /// `source`'s categories plus its yes verdicts, announcing a change. A
+    /// video removed meanwhile leaves nothing stored either.
+    fn apply_verdict(
+        &self,
+        verdict: &VideoCategoryVerdict,
+        source: &CategoryMember,
+    ) -> anyhow::Result<bool>;
+    /// `apply_verdict`, also storing nothing when `still_current`, asked
+    /// under the lock, says the verdict is outdated.
+    fn apply_verdict_if(
+        &self,
+        verdict: &VideoCategoryVerdict,
+        source: &CategoryMember,
+        still_current: &dyn Fn() -> anyhow::Result<bool>,
+    ) -> anyhow::Result<bool>;
+    /// Under the lock: sets each of `video_ids` to its source's categories
+    /// plus its yes verdicts, announcing the changed ones in one event.
+    fn recompute(&self, video_ids: &[VideoRecordId]) -> anyhow::Result<()>;
 }
 
 impl VideoCategoryAssignerApi for VideoCategoryAssigner {
@@ -77,11 +108,7 @@ impl VideoCategoryAssignerApi for VideoCategoryAssigner {
         source: &CategoryMember,
     ) -> anyhow::Result<()> {
         let _guard = self.lock();
-        let category_ids = self.categories_of(source)?;
-        if category_ids.is_empty() {
-            return Ok(());
-        }
-        self.save_and_announce(Self::each_in(vec![video_id.clone()], &category_ids))
+        self.recompute_record(video_id, source)
     }
 
     fn reassign_category(
@@ -99,7 +126,7 @@ impl VideoCategoryAssignerApi for VideoCategoryAssigner {
         );
         let desired = sources
             .iter()
-            .map(|source| self.desired_for_source(source, category_id, categories))
+            .map(|source| self.desired_for_source(source, categories))
             .collect::<anyhow::Result<Vec<_>>>()?
             .concat();
         self.save_and_announce(desired)
@@ -110,6 +137,37 @@ impl VideoCategoryAssignerApi for VideoCategoryAssigner {
             .video_categories_repository
             .list_in_category(category_id)?;
         self.announce(&holding)
+    }
+
+    fn apply_verdict(
+        &self,
+        verdict: &VideoCategoryVerdict,
+        source: &CategoryMember,
+    ) -> anyhow::Result<bool> {
+        self.apply_verdict_if(verdict, source, &|| Ok(true))
+    }
+
+    fn apply_verdict_if(
+        &self,
+        verdict: &VideoCategoryVerdict,
+        source: &CategoryMember,
+        still_current: &dyn Fn() -> anyhow::Result<bool>,
+    ) -> anyhow::Result<bool> {
+        let _guard = self.lock();
+        let categories = self.category_repository.list()?;
+        if !self.pair_exists(verdict, &categories)? || !still_current()? {
+            return Ok(false);
+        }
+        self.video_category_verdict_repository.save(verdict)?;
+        self.recompute_with(&verdict.video_id, source, &categories)?;
+        self.forget_if_removed(&verdict.video_id)
+    }
+
+    fn recompute(&self, video_ids: &[VideoRecordId]) -> anyhow::Result<()> {
+        let _guard = self.lock();
+        let categories = self.category_repository.list()?;
+        let desired = self.desired_for_records(video_ids, &categories)?;
+        self.save_and_announce(desired)
     }
 }
 
@@ -182,41 +240,154 @@ impl VideoCategoryAssigner {
             .collect()
     }
 
-    /// The current categories holding `source`; empty when it is in none
-    /// (the AI regime).
-    fn categories_of(&self, source: &CategoryMember) -> anyhow::Result<Vec<CategoryId>> {
+    /// Whether the video of `verdict` is still stored and its category is in
+    /// `categories`, the current categories.
+    fn pair_exists(
+        &self,
+        verdict: &VideoCategoryVerdict,
+        categories: &[Category],
+    ) -> anyhow::Result<bool> {
+        Ok(categories
+            .iter()
+            .any(|category| category.id == verdict.category_id)
+            && self.video_repository.find(&verdict.video_id)?.is_some())
+    }
+
+    /// Deletes what was just stored for `video_id` when the video was removed
+    /// meanwhile: its removal, taking no lock, may have deleted its verdicts
+    /// and categories before they were stored. True when it is still there.
+    fn forget_if_removed(&self, video_id: &VideoRecordId) -> anyhow::Result<bool> {
+        if self.video_repository.find(video_id)?.is_some() {
+            return Ok(true);
+        }
+        self.video_category_verdict_repository
+            .delete_for_video(video_id)?;
+        self.video_categories_repository.delete(video_id)?;
+        Ok(false)
+    }
+
+    /// Sets `video_id`, a record of `source`, to the source's categories plus
+    /// its yes verdicts; the caller holds the lock.
+    fn recompute_record(
+        &self,
+        video_id: &VideoRecordId,
+        source: &CategoryMember,
+    ) -> anyhow::Result<()> {
         let categories = self.category_repository.list()?;
-        Ok(Self::source_category_ids(source, &categories))
+        self.recompute_with(video_id, source, &categories)
     }
 
-    /// Each of `video_ids` in exactly `category_ids`.
-    fn each_in(video_ids: Vec<VideoRecordId>, category_ids: &[CategoryId]) -> Vec<VideoCategories> {
-        video_ids
+    /// `recompute` against `categories`, the current categories; the caller
+    /// holds the lock.
+    fn recompute_with(
+        &self,
+        video_id: &VideoRecordId,
+        source: &CategoryMember,
+        categories: &[Category],
+    ) -> anyhow::Result<()> {
+        let desired = self.with_yes_verdicts(
+            vec![video_id.clone()],
+            &Self::source_category_ids(source, categories),
+        )?;
+        self.save_and_announce(desired)
+    }
+
+    /// Each of `video_ids` held by a source, in order, with its source's
+    /// categories in `categories` plus its yes verdicts; the others are left
+    /// out.
+    fn desired_for_records(
+        &self,
+        video_ids: &[VideoRecordId],
+        categories: &[Category],
+    ) -> anyhow::Result<Vec<VideoCategories>> {
+        let records = video_ids
+            .iter()
+            .map(|video_id| {
+                Ok(self.source_of(video_id)?.map(|source| {
+                    (
+                        video_id.clone(),
+                        Self::source_category_ids(&source, categories),
+                    )
+                }))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
             .into_iter()
-            .map(|video_id| VideoCategories::new(video_id, category_ids.to_vec()))
-            .collect()
+            .flatten()
+            .collect::<Vec<_>>();
+        if records.is_empty() {
+            return Ok(Vec::new());
+        }
+        let held: Vec<VideoRecordId> = records.iter().map(|(id, _)| id.clone()).collect();
+        let yes = self.yes_categories(&held)?;
+        Ok(records
+            .into_iter()
+            .map(|(video_id, category_ids)| {
+                let mut ids = category_ids;
+                ids.extend(yes.get(&video_id).cloned().unwrap_or_default());
+                VideoCategories::new(video_id, ids)
+            })
+            .collect())
     }
 
-    /// Every record of `source` after `category_id` changed: each with the
-    /// source's categories when it is in any (source regime), else its own
-    /// categories without `category_id` (AI regime, the others are kept).
+    /// The channel holding `video_id`, else the playlist holding it.
+    fn source_of(&self, video_id: &VideoRecordId) -> anyhow::Result<Option<CategoryMember>> {
+        if let Some(channel_video) = self.channel_video_repository.find_by_video(video_id)? {
+            return Ok(Some(CategoryMember::Channel(channel_video.channel_id)));
+        }
+        Ok(self
+            .playlist_video_repository
+            .find_by_video(video_id)?
+            .map(|playlist_video| CategoryMember::Playlist(playlist_video.playlist_id)))
+    }
+
+    /// Every record of `source`, each with the source's categories in
+    /// `categories` plus its yes verdicts.
     fn desired_for_source(
         &self,
         source: &CategoryMember,
-        category_id: &CategoryId,
         categories: &[Category],
     ) -> anyhow::Result<Vec<VideoCategories>> {
-        let category_ids = Self::source_category_ids(source, categories);
         let record_ids = self.record_ids(source)?;
-        if !category_ids.is_empty() {
-            return Ok(Self::each_in(record_ids, &category_ids));
+        self.with_yes_verdicts(record_ids, &Self::source_category_ids(source, categories))
+    }
+
+    /// Each of `video_ids` in `category_ids` plus the categories of its yes
+    /// verdicts.
+    fn with_yes_verdicts(
+        &self,
+        video_ids: Vec<VideoRecordId>,
+        category_ids: &[CategoryId],
+    ) -> anyhow::Result<Vec<VideoCategories>> {
+        if video_ids.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(self
-            .video_categories_repository
-            .find_many(&record_ids)?
+        let mut yes = self.yes_categories(&video_ids)?;
+        Ok(video_ids
             .into_iter()
-            .map(|current| current.without(category_id))
+            .map(|video_id| {
+                let mut ids = category_ids.to_vec();
+                ids.extend(yes.remove(&video_id).unwrap_or_default());
+                VideoCategories::new(video_id, ids)
+            })
             .collect())
+    }
+
+    /// The categories of the yes verdicts of each of `video_ids` having one.
+    fn yes_categories(
+        &self,
+        video_ids: &[VideoRecordId],
+    ) -> anyhow::Result<HashMap<VideoRecordId, Vec<CategoryId>>> {
+        Ok(self
+            .video_category_verdict_repository
+            .find_many(video_ids)?
+            .into_iter()
+            .filter(VideoCategoryVerdict::is_yes)
+            .fold(HashMap::new(), |mut yes, verdict| {
+                yes.entry(verdict.video_id)
+                    .or_default()
+                    .push(verdict.category_id);
+                yes
+            }))
     }
 
     fn record_ids(&self, source: &CategoryMember) -> anyhow::Result<Vec<VideoRecordId>> {
@@ -266,6 +437,9 @@ impl VideoCategoryAssigner {
     /// The sets of `desired` that differ from the stored ones, in record id
     /// order.
     fn changed(&self, desired: Vec<VideoCategories>) -> anyhow::Result<Vec<VideoCategories>> {
+        if desired.is_empty() {
+            return Ok(Vec::new());
+        }
         let ids: Vec<VideoRecordId> = desired.iter().map(|d| d.video_id.clone()).collect();
         let current = self.video_categories_repository.find_many(&ids)?;
         let mut changed: Vec<VideoCategories> = desired

@@ -1,19 +1,29 @@
-import { EllipsisVertical, Check, EyeOff } from 'lucide-react'
+import { EllipsisVertical, Check, EyeOff, Tags } from 'lucide-react'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { useMarkVideoWatched, useSetPlaylistExcludedFromHome } from '@/api/queries'
+import {
+  useCategoriesShown,
+  useMarkVideoWatched,
+  useSetPlaylistExcludedFromHome,
+} from '@/api/queries'
+import { useEditVideoCategories } from '@/hooks/useEditVideoCategories'
 import { errorMessage } from '@/lib/errorMessage'
 import { homeSettingAction } from '@/lib/homeSetting'
 import { cn } from '@/lib/utils'
 
 interface VideoActionsMenuProps {
+  /** The YouTube video id. */
   videoId: string
+  /** The stored copy's `record_id`, naming it to the categories routes. */
+  recordId: string
   /** Names the video in the trigger's label and the failure alert. */
   title: string
+  /** The channel or playlist the copy comes from. */
+  sourceName: string
   /** When false, "Mark as watched" is disabled. */
   markable: boolean
   /** The playlist the card is sourced from, offered for exclusion from home. */
@@ -24,13 +34,17 @@ interface VideoActionsMenuProps {
 /** A vertical "⋮" menu of actions on one video. */
 export function VideoActionsMenu({
   videoId,
+  recordId,
   title,
+  sourceName,
   markable,
   excludablePlaylist,
   className,
 }: VideoActionsMenuProps) {
   const markVideoWatched = useMarkVideoWatched()
   const setPlaylistExcludedFromHome = useSetPlaylistExcludedFromHome()
+  const categoriesShown = useCategoriesShown()
+  const editCategories = useEditVideoCategories()
 
   return (
     <DropdownMenu modal={false}>
@@ -73,6 +87,12 @@ export function VideoActionsMenu({
           >
             <EyeOff />
             Exclude "{excludablePlaylist.name}" from home
+          </DropdownMenuItem>
+        )}
+        {categoriesShown && (
+          <DropdownMenuItem onSelect={() => editCategories({ recordId, title, sourceName })}>
+            <Tags />
+            Edit categories…
           </DropdownMenuItem>
         )}
       </DropdownMenuContent>

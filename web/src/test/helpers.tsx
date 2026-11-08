@@ -5,6 +5,7 @@ import { MemoryRouter, type InitialEntry } from 'react-router-dom'
 import { vi } from 'vitest'
 import SHIPPED_PROMPT from '../../../prompts/summaries/v3.md?raw'
 import SHIPPED_CATEGORIZATION_PROMPT from '../../../prompts/categorization/v2.md?raw'
+import { VideoCategoriesEditor } from '@/components/VideoCategoriesEditor'
 import type {
   Announcement,
   AppVersion,
@@ -20,6 +21,7 @@ import type {
   Preferences,
   Task,
   Video,
+  VideoCategoryChoice,
 } from '@/api/types'
 
 /**
@@ -105,7 +107,9 @@ export function renderWithProviders(
   })
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={[route]}>{children}</MemoryRouter>
+      <VideoCategoriesEditor>
+        <MemoryRouter initialEntries={[route]}>{children}</MemoryRouter>
+      </VideoCategoriesEditor>
     </QueryClientProvider>
   )
   return { ...render(ui, { wrapper }), queryClient }
@@ -155,6 +159,7 @@ export function aVideo(overrides: Partial<Video> = {}): Video {
   uniqueId += 1
   return {
     id: `video-${uniqueId}`,
+    record_id: `record-${uniqueId}`,
     title: `Video ${uniqueId}`,
     status: 'DOWNLOADED',
     quality: 'high',
@@ -179,6 +184,7 @@ export function aHomeVideo(overrides: Partial<HomeVideo> = {}): HomeVideo {
   uniqueId += 1
   return {
     id: `video-${uniqueId}`,
+    record_id: `record-${uniqueId}`,
     title: `Video ${uniqueId}`,
     thumbnail_filename: null,
     duration_seconds: 120,
@@ -209,6 +215,21 @@ export function aCategoryVideo(overrides: Partial<CategoryVideo> = {}): Category
       avatar_filename: null,
     },
     category_ids: [],
+    ...overrides,
+  }
+}
+
+export function aVideoCategoryChoice(
+  overrides: Partial<VideoCategoryChoice> = {},
+): VideoCategoryChoice {
+  uniqueId += 1
+  return {
+    id: `category-${uniqueId}`,
+    name: `Category ${uniqueId}`,
+    color: '#f59e0b',
+    belongs: false,
+    from: null,
+    verdict: null,
     ...overrides,
   }
 }
@@ -258,6 +279,7 @@ export function aCategory(overrides: Partial<Category> = {}): Category {
     color: '#f59e0b',
     ai_prompt: null,
     unwatched_count: 0,
+    ai_verdict_count: 0,
     channels: [],
     playlists: [],
     ...overrides,

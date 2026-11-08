@@ -1,7 +1,8 @@
+use crate::domain::preferences::Preferences;
 use crate::domain::services::{
-    MetadataGenerator, MetadataGeneratorApi, Relocation, VideoCategoryAssigner,
-    VideoCategoryAssignerApi, VideoOwnerFinder, VideoOwnerFinderApi, VideoRelocator,
-    VideoRelocatorApi,
+    MetadataGenerator, MetadataGeneratorApi, Relocation, VideoCategorizer, VideoCategorizerApi,
+    VideoCategoryAssigner, VideoCategoryAssignerApi, VideoOwnerFinder, VideoOwnerFinderApi,
+    VideoRelocator, VideoRelocatorApi,
 };
 use crate::domain::video::{
     Video, VideoOwner, VideoRecordId, VideoStatus, VideoSyncPlan, VideoTarget, nfo_path_for,
@@ -36,6 +37,7 @@ pub struct VideoReconciler {
     clock: Arc<dyn Clock>,
     video_category_assigner: VideoCategoryAssigner,
     preferences_repository: Arc<dyn PreferencesRepository>,
+    video_categorizer: Arc<VideoCategorizer>,
 }
 
 impl VideoReconciler {
@@ -52,6 +54,7 @@ impl VideoReconciler {
         clock: Arc<dyn Clock>,
         video_category_assigner: VideoCategoryAssigner,
         preferences_repository: Arc<dyn PreferencesRepository>,
+        video_categorizer: Arc<VideoCategorizer>,
     ) -> Self {
         Self {
             video_repository,
@@ -65,6 +68,7 @@ impl VideoReconciler {
             clock,
             video_category_assigner,
             preferences_repository,
+            video_categorizer,
         }
     }
 }
@@ -93,7 +97,13 @@ impl VideoReconcilerApi for VideoReconciler {
         self.repair_metadata(&video, &owner);
         self.warn_if_stranded(&video)?;
         let summaries_wanted = video.is_summarizable() && self.summaries_wanted(&owner)?;
-        self.schedule_steps(&video, &owner.target, summaries_wanted)
+        let categorization_wanted = self.categorization_wanted(&video, &owner)?;
+        self.schedule_steps(
+            &video,
+            &owner.target,
+            summaries_wanted,
+            categorization_wanted,
+        )
     }
 }
 
@@ -236,12 +246,20 @@ impl VideoReconciler {
 
     /// Whether the videos of `owner` get an AI summary.
     fn summaries_wanted(&self, owner: &VideoOwner) -> anyhow::Result<bool> {
-        Ok(owner.summaries_enabled
-            && self
-                .preferences_repository
-                .find()?
-                .unwrap_or_default()
-                .summaries_available())
+        Ok(owner.summaries_enabled && self.preferences()?.summaries_available())
+    }
+
+    /// The saved preferences, or the defaults.
+    fn preferences(&self) -> anyhow::Result<Preferences> {
+        Ok(self.preferences_repository.find()?.unwrap_or_default())
+    }
+
+    /// Whether `video` has categories pending for the AI.
+    fn categorization_wanted(&self, video: &Video, owner: &VideoOwner) -> anyhow::Result<bool> {
+        Ok(owner.categorization_enabled
+            && self.preferences()?.categorization_available()
+            && video.is_categorizable()
+            && !self.video_categorizer.pending(video, owner)?.is_empty())
     }
 
     fn schedule_steps(
@@ -249,14 +267,20 @@ impl VideoReconciler {
         video: &Video,
         target: &VideoTarget,
         summaries_wanted: bool,
+        categorization_wanted: bool,
     ) -> anyhow::Result<()> {
-        VideoSyncPlan::for_video(video, summaries_wanted, self.clock.now())
-            .steps
-            .iter()
-            .try_for_each(|step| {
-                self.task_repository
-                    .schedule(&step.task_for(video, target), self.clock.now())
-            })
+        VideoSyncPlan::for_video(
+            video,
+            summaries_wanted,
+            categorization_wanted,
+            self.clock.now(),
+        )
+        .steps
+        .iter()
+        .try_for_each(|step| {
+            self.task_repository
+                .schedule(&step.task_for(video, target), self.clock.now())
+        })
     }
 }
 

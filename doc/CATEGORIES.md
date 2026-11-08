@@ -26,6 +26,67 @@ channel or playlist can be in several categories.
 - **Colored chips** on video cards and **unwatched counts** in the sidebar.
 - **Mark all watched** for the whole category at once.
 
+## Fix a video by hand
+
+Every video's **⋮** menu has **Edit categories…**: every category as a chip,
+filled when the video is in it. Click a chip to add the video to that
+category or take it out.
+
+- A chip with a lock, marked **From \<channel or playlist\>**, comes from the
+  video's source: change the source's categories instead.
+- A chip marked **AI** was decided by the AI (see below). Clicking it replaces
+  the AI's answer with yours.
+- What you set by hand is never changed by the AI, nor by any **Re-run AI**
+  or **Clear AI categories**, even when you set it while the AI is still
+  answering for that video.
+
+## Let AI fill them
+
+With [AI](AI.md) on, a category can also gather videos from sources outside
+it:
+
+1. In **Settings → AI**, turn on categorization (summaries too: a video is
+   judged from its summary).
+2. Give the category an **AI prompt** in its **Edit settings**, describing the
+   videos it should hold.
+3. Turn on categorization for the channels and playlists whose videos should
+   be judged.
+
+Once a video of those sources has a summary, the AI asks once per category
+with a prompt whether it belongs, and adds it to every category it fits. It
+never removes a category a video gets from its source.
+
+This happens on the video's next sync after its summary, at the latest its
+source's next reconcile pass (every 3 hours by default), so a new video
+shows its AI categories some time after it appears.
+
+To ask the AI again, deleting its answers (not yours) so the categories it
+gave go at once:
+
+- **One video**: **Re-run AI** in its **Edit categories…** dialog. With its
+  source's categorization off it reads **Clear AI categories**.
+- **A channel or playlist**: **Re-run AI categorization** in its page's **⋮**
+  menu. With categorization off, for that source or in **Settings → AI**, it
+  reads **Clear AI categories**: the AI categories go and nothing is asked
+  again.
+- **A category**, e.g. after editing its prompt: **Re-evaluate N videos** in
+  its **Edit settings**, below the AI prompt. Save the prompt first: the
+  button waits for it, since the AI asks with the saved prompt.
+
+The videos are synced straight away, so the AI asks again within minutes when
+categorization is on.
+
+Good to know:
+
+- Otherwise each answer is final: editing a category's prompt, turning a
+  source's categorization off or turning AI off doesn't re-judge anything or
+  remove the categories the AI gave.
+- A video the AI couldn't judge is tried again after you change the model,
+  the categorization prompt, the Ollama URL, or that category's prompt.
+- Judging takes a while (10 s to 100 s per video and category on a small
+  machine) and runs in the background: look for _Categorizing …_ in the
+  Tasks page (**AI** tab).
+
 ## In Plex
 
 Each category becomes a **smart playlist** in Plex: its unwatched episodes,

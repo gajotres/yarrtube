@@ -34,7 +34,10 @@ pub mod subtitle_fetcher;
 pub mod subtitle_reader;
 pub mod task_view_searcher;
 pub mod thumbnail_fetcher;
+pub mod video_categorizer;
 pub mod video_category_assigner;
+pub mod video_category_choice_searcher;
+pub mod video_category_editor;
 pub mod video_downloader;
 pub mod video_file_deleter;
 pub mod video_owner_finder;
@@ -82,7 +85,12 @@ pub use subtitle_fetcher::{SubtitleFetcher, SubtitleFetcherApi};
 pub use subtitle_reader::{SubtitleReader, SubtitleReaderApi};
 pub use task_view_searcher::{TaskViewSearcher, TaskViewSearcherApi};
 pub use thumbnail_fetcher::{ThumbnailFetcher, ThumbnailFetcherApi};
+pub use video_categorizer::{VideoCategorizer, VideoCategorizerApi};
 pub use video_category_assigner::{VideoCategoryAssigner, VideoCategoryAssignerApi};
+pub use video_category_choice_searcher::{
+    VideoCategoryChoiceSearcher, VideoCategoryChoiceSearcherApi,
+};
+pub use video_category_editor::{VideoCategoryEditor, VideoCategoryEditorApi};
 pub use video_downloader::{VideoDownloader, VideoDownloaderApi};
 pub use video_file_deleter::{VideoFileDeleter, VideoFileDeleterApi};
 pub use video_owner_finder::{VideoOwnerFinder, VideoOwnerFinderApi};

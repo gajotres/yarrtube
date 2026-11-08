@@ -3,7 +3,7 @@ pub mod dto;
 use super::blocking::run_blocking;
 use super::error::ApiError;
 use super::validation::required;
-use super::videos::update_watch_state_error;
+use super::videos::{edit_video_categories_error, update_watch_state_error};
 use crate::domain::category::{
     CategoryColor, CategoryId, CategoryMember, CategoryName, CategoryPrompt, CreateCategoryError,
     DeleteCategoryError, UpdateCategoryError,
@@ -13,7 +13,8 @@ use crate::domain::playlist::PlaylistId;
 use crate::domain::services::{
     CategoryCreator, CategoryCreatorApi, CategoryDeleter, CategoryDeleterApi, CategoryUpdate,
     CategoryUpdater, CategoryUpdaterApi, CategoryViewSearcher, CategoryViewSearcherApi,
-    NewCategory, VideoWatchStateUpdater, VideoWatchStateUpdaterApi,
+    NewCategory, VideoCategoryEditor, VideoCategoryEditorApi, VideoWatchStateUpdater,
+    VideoWatchStateUpdaterApi,
 };
 use axum::Json;
 use axum::extract::{Path, State};
@@ -115,6 +116,19 @@ pub async fn set_category_members(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn delete_category_ai_verdicts(
+    State(video_category_editor): State<VideoCategoryEditor>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let id = CategoryId::new(id)?;
+
+    run_blocking(move || video_category_editor.rerun_category(&id))
+        .await?
+        .map_err(edit_video_categories_error)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn mark_category_watched(
     State(video_watch_state_updater): State<VideoWatchStateUpdater>,
     Path(id): Path<String>,
@@ -154,6 +168,7 @@ fn update_category_error(error: UpdateCategoryError) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::http::test_support::{video_category_assigner, video_category_editor};
     use crate::domain::category::Category;
     use crate::domain::channel::{Channel, VideoLimit};
     use crate::domain::channel_video::ChannelVideo;
@@ -162,8 +177,11 @@ mod tests {
     use crate::domain::playlist_video::PlaylistVideo;
     use crate::domain::services::{CategoryVideoCollector, VideoCategoryAssigner};
     use crate::domain::shared::{Quality, ReconcileInterval};
+    use crate::domain::task::{ScheduledTask, Task, TaskStatus};
     use crate::domain::video::{Video, VideoId, VideoRecordId};
-    use crate::domain::video_category::{VideoCategories, VideoCategoriesChanged};
+    use crate::domain::video_category::{
+        Verdict, VerdictAuthor, VideoCategories, VideoCategoriesChanged, VideoCategoryVerdict,
+    };
     use crate::infrastructure::repositories::sqlite_category_repository::{
         CategoryRepository, SqliteCategoryRepository,
     };
@@ -179,8 +197,14 @@ mod tests {
     use crate::infrastructure::repositories::sqlite_playlist_video_repository::{
         PlaylistVideoRepository, SqlitePlaylistVideoRepository,
     };
+    use crate::infrastructure::repositories::sqlite_task_repository::{
+        SqliteTaskRepository, TaskRepository,
+    };
     use crate::infrastructure::repositories::sqlite_video_categories_repository::{
         SqliteVideoCategoriesRepository, VideoCategoriesRepository,
+    };
+    use crate::infrastructure::repositories::sqlite_video_category_verdict_repository::{
+        SqliteVideoCategoryVerdictRepository, VideoCategoryVerdictRepository,
     };
     use crate::infrastructure::repositories::sqlite_video_repository::{
         SqliteVideoRepository, VideoRepository,
@@ -351,6 +375,8 @@ mod tests {
             &video,
         );
         let video_category_assigner = VideoCategoryAssigner::new(
+            Arc::new(SqliteVideoRepository::new(db.database())),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
             video_categories_repository.clone(),
             repository.clone(),
             Arc::new(SqliteChannelVideoRepository::new(db.database())),
@@ -653,6 +679,7 @@ mod tests {
             channel_repository,
             playlist_repository,
             category_video_collector(&db),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = list(category_view_searcher).await;
@@ -684,6 +711,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.database())),
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             category_video_collector(&db),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = list(category_view_searcher).await;
@@ -716,6 +744,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.database())),
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             category_video_collector(&db),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = list(category_view_searcher).await;
@@ -786,6 +815,7 @@ mod tests {
             channel_repository,
             playlist_repository,
             category_video_collector(&db),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = list(category_view_searcher).await;
@@ -837,6 +867,7 @@ mod tests {
             channel_repository,
             playlist_repository,
             category_video_collector(&db),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = list(category_view_searcher).await;
@@ -892,6 +923,7 @@ mod tests {
             channel_repository,
             playlist_repository,
             category_video_collector(&db),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = list(category_view_searcher).await;
@@ -940,6 +972,7 @@ mod tests {
             channel_repository,
             playlist_repository,
             category_video_collector(&db),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = list(category_view_searcher).await;
@@ -979,6 +1012,7 @@ mod tests {
             channel_repository,
             playlist_repository,
             category_video_collector(&db),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = list(category_view_searcher).await;
@@ -1019,6 +1053,7 @@ mod tests {
             channel_repository,
             playlist_repository,
             category_video_collector(&db),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = list(category_view_searcher).await;
@@ -1048,6 +1083,7 @@ mod tests {
             channel_repository,
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner(db.database()),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = rename(category_updater, chess.id.as_str(), "Board games").await;
@@ -1093,6 +1129,8 @@ mod tests {
         ];
         video_categories_repository.save_many(&stored).unwrap();
         let video_category_assigner = VideoCategoryAssigner::new(
+            Arc::new(SqliteVideoRepository::new(db.database())),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
             video_categories_repository.clone(),
             repository.clone(),
             Arc::new(SqliteChannelVideoRepository::new(db.database())),
@@ -1108,6 +1146,7 @@ mod tests {
             channel_repository,
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner,
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = rename(category_updater, chess.id.as_str(), "Board games").await;
@@ -1141,6 +1180,7 @@ mod tests {
             channel_repository,
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner(db.database()),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = update(
@@ -1180,6 +1220,7 @@ mod tests {
             channel_repository,
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner(db.database()),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = update(
@@ -1204,6 +1245,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn it_should_make_unavailable_verdicts_pending_when_a_category_prompt_changes() {
+        let db = TestDatabase::new();
+        let repository = Arc::new(SqliteCategoryRepository::new(db.database()));
+        let verdict_repository = Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database()));
+        let video = downloaded_video("vid1");
+        let tech = Category {
+            ai_prompt: CategoryPrompt::new("Programming").unwrap(),
+            ..category(None, "Tech")
+        };
+        let food = category(None, "Food");
+        repository.insert(&tech).unwrap();
+        repository.insert(&food).unwrap();
+        let food_unavailable = unavailable_verdict(&video, &food);
+        verdict_repository
+            .save(&unavailable_verdict(&video, &tech))
+            .unwrap();
+        verdict_repository.save(&food_unavailable).unwrap();
+        let category_updater = CategoryUpdater::new(
+            repository,
+            Arc::new(SqliteChannelRepository::new(db.database())),
+            Arc::new(SqlitePlaylistRepository::new(db.database())),
+            video_category_assigner(db.database()),
+            verdict_repository.clone(),
+        );
+
+        let response = update(
+            category_updater,
+            tech.id.as_str(),
+            UpdateCategoryRequest {
+                name: None,
+                color: None,
+                ai_prompt: Some("Programming and gadgets".to_string()),
+            },
+        )
+        .await;
+
+        assert_eq!(response, Ok(StatusCode::NO_CONTENT));
+        assert_eq!(
+            verdict_repository
+                .find_many(std::slice::from_ref(&video.id))
+                .unwrap(),
+            vec![food_unavailable]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_keep_unavailable_verdicts_when_a_category_prompt_is_saved_unchanged() {
+        let db = TestDatabase::new();
+        let repository = Arc::new(SqliteCategoryRepository::new(db.database()));
+        let verdict_repository = Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database()));
+        let video = downloaded_video("vid1");
+        let tech = Category {
+            ai_prompt: CategoryPrompt::new("Programming").unwrap(),
+            ..category(None, "Tech")
+        };
+        repository.insert(&tech).unwrap();
+        let tech_unavailable = unavailable_verdict(&video, &tech);
+        verdict_repository.save(&tech_unavailable).unwrap();
+        let category_updater = CategoryUpdater::new(
+            repository.clone(),
+            Arc::new(SqliteChannelRepository::new(db.database())),
+            Arc::new(SqlitePlaylistRepository::new(db.database())),
+            video_category_assigner(db.database()),
+            verdict_repository.clone(),
+        );
+
+        let response = update(
+            category_updater,
+            tech.id.as_str(),
+            UpdateCategoryRequest {
+                name: None,
+                color: Some("#ff0000".to_string()),
+                ai_prompt: Some("Programming".to_string()),
+            },
+        )
+        .await;
+
+        assert_eq!(response, Ok(StatusCode::NO_CONTENT));
+        assert_eq!(
+            repository.list().unwrap(),
+            vec![Category {
+                color: color("#ff0000"),
+                ..tech
+            }]
+        );
+        assert_eq!(
+            verdict_repository
+                .find_many(std::slice::from_ref(&video.id))
+                .unwrap(),
+            vec![tech_unavailable]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_keep_verdicts_when_a_category_prompt_is_edited_or_cleared() {
+        let db = TestDatabase::new();
+        let repository = Arc::new(SqliteCategoryRepository::new(db.database()));
+        let verdict_repository = Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database()));
+        let (yes, no) = (downloaded_video("vid1"), downloaded_video("vid2"));
+        let sicilian = Category {
+            ai_prompt: CategoryPrompt::new("The Sicilian Defense").unwrap(),
+            ..category(None, "Sicilian")
+        };
+        repository.insert(&sicilian).unwrap();
+        let mut verdicts = vec![
+            yes_verdict(&yes, &sicilian),
+            VideoCategoryVerdict {
+                verdict: Verdict::No,
+                ..yes_verdict(&no, &sicilian)
+            },
+        ];
+        verdicts
+            .iter()
+            .for_each(|verdict| verdict_repository.save(verdict).unwrap());
+        verdicts.sort_by(|a, b| a.video_id.as_str().cmp(b.video_id.as_str()));
+        let category_updater = CategoryUpdater::new(
+            repository,
+            Arc::new(SqliteChannelRepository::new(db.database())),
+            Arc::new(SqlitePlaylistRepository::new(db.database())),
+            video_category_assigner(db.database()),
+            verdict_repository.clone(),
+        );
+
+        let edited = update(
+            category_updater.clone(),
+            sicilian.id.as_str(),
+            prompt_request("Any Sicilian line"),
+        )
+        .await;
+        let edited_verdicts = verdict_repository
+            .find_many(&[yes.id.clone(), no.id.clone()])
+            .unwrap();
+        let cleared = update(category_updater, sicilian.id.as_str(), prompt_request(" ")).await;
+
+        assert_eq!(
+            (edited, cleared),
+            (Ok(StatusCode::NO_CONTENT), Ok(StatusCode::NO_CONTENT))
+        );
+        assert_eq!(edited_verdicts, verdicts);
+        assert_eq!(
+            verdict_repository
+                .find_many(&[yes.id.clone(), no.id.clone()])
+                .unwrap(),
+            verdicts
+        );
+    }
+
+    #[tokio::test]
     async fn it_should_remove_the_ai_prompt_of_a_category() {
         let db = TestDatabase::new();
         let repository = Arc::new(SqliteCategoryRepository::new(db.database()));
@@ -1217,6 +1406,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.database())),
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner(db.database()),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = update(
@@ -1254,6 +1444,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.database())),
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner(db.database()),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = update(
@@ -1306,6 +1497,8 @@ mod tests {
             )])
             .unwrap();
         let video_category_assigner = VideoCategoryAssigner::new(
+            Arc::new(SqliteVideoRepository::new(db.database())),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
             video_categories_repository.clone(),
             repository.clone(),
             Arc::new(SqliteChannelVideoRepository::new(db.database())),
@@ -1321,6 +1514,7 @@ mod tests {
             channel_repository,
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner,
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = update(
@@ -1349,6 +1543,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.database())),
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner(db.database()),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = update(
@@ -1384,6 +1579,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.database())),
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner(db.database()),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = rename(category_updater, chess.id.as_str(), "Chess").await;
@@ -1411,6 +1607,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.database())),
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner(db.database()),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = rename(category_updater, chess.id.as_str(), "sports").await;
@@ -1438,6 +1635,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.database())),
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner(db.database()),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = update(
@@ -1537,6 +1735,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.database())),
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner(db.database()),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = rename(category_updater, "missing", "Chess").await;
@@ -1576,8 +1775,11 @@ mod tests {
             ..category(None, "Chess")
         };
         repository.insert(&chess).unwrap();
-        let category_deleter =
-            CategoryDeleter::new(repository.clone(), video_category_assigner(db.database()));
+        let category_deleter = CategoryDeleter::new(
+            repository.clone(),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
+            video_category_assigner(db.database()),
+        );
 
         let response = delete(category_deleter, chess.id.as_str()).await;
 
@@ -1623,6 +1825,8 @@ mod tests {
             )])
             .unwrap();
         let video_category_assigner = VideoCategoryAssigner::new(
+            Arc::new(SqliteVideoRepository::new(db.database())),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
             video_categories_repository.clone(),
             repository.clone(),
             Arc::new(SqliteChannelVideoRepository::new(db.database())),
@@ -1633,7 +1837,11 @@ mod tests {
             )),
             Arc::new(CategoryLock::default()),
         );
-        let category_deleter = CategoryDeleter::new(repository.clone(), video_category_assigner);
+        let category_deleter = CategoryDeleter::new(
+            repository.clone(),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
+            video_category_assigner,
+        );
 
         let response = delete(category_deleter, funny.id.as_str()).await;
 
@@ -1675,12 +1883,20 @@ mod tests {
                 video,
             )
         });
-        // The channel is in no category: its videos' categories were set
-        // per video (by a classifier), not from the channel.
+        // The channel is in no category: its videos' categories come from
+        // their yes verdicts.
         let chess = category(None, "Chess");
         let funny = category(None, "Funny");
         repository.insert(&chess).unwrap();
         repository.insert(&funny).unwrap();
+        let verdict_repository = SqliteVideoCategoryVerdictRepository::new(db.database());
+        [(&first, &chess), (&first, &funny), (&second, &chess)]
+            .into_iter()
+            .for_each(|(video, category)| {
+                verdict_repository
+                    .save(&yes_verdict(video, category))
+                    .unwrap()
+            });
         video_categories_repository
             .save_many(&[
                 VideoCategories::new(first.id.clone(), vec![chess.id.clone(), funny.id.clone()]),
@@ -1688,6 +1904,8 @@ mod tests {
             ])
             .unwrap();
         let video_category_assigner = VideoCategoryAssigner::new(
+            Arc::new(SqliteVideoRepository::new(db.database())),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
             video_categories_repository.clone(),
             repository.clone(),
             Arc::new(SqliteChannelVideoRepository::new(db.database())),
@@ -1698,7 +1916,11 @@ mod tests {
             )),
             Arc::new(CategoryLock::default()),
         );
-        let category_deleter = CategoryDeleter::new(repository, video_category_assigner);
+        let category_deleter = CategoryDeleter::new(
+            repository,
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
+            video_category_assigner,
+        );
 
         let response = delete(category_deleter, funny.id.as_str()).await;
 
@@ -1719,10 +1941,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn it_should_delete_a_categorys_verdicts_with_it() {
+        let db = TestDatabase::new();
+        let repository = Arc::new(SqliteCategoryRepository::new(db.database()));
+        let video_repository = SqliteVideoRepository::new(db.database());
+        let verdict_repository = Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database()));
+        let video_categories_repository =
+            Arc::new(SqliteVideoCategoriesRepository::new(db.database()));
+        SqliteChannelRepository::new(db.database())
+            .insert(&channel("@GothamChess"))
+            .unwrap();
+        let video = downloaded_video("vid1");
+        save_channel_video(
+            &video_repository,
+            &SqliteChannelVideoRepository::new(db.database()),
+            "@GothamChess",
+            &video,
+        );
+        let (chess, funny) = (category(None, "Chess"), category(None, "Funny"));
+        repository.insert(&chess).unwrap();
+        repository.insert(&funny).unwrap();
+        let chess_yes = yes_verdict(&video, &chess);
+        verdict_repository.save(&chess_yes).unwrap();
+        verdict_repository
+            .save(&yes_verdict(&video, &funny))
+            .unwrap();
+        video_categories_repository
+            .save_many(&[VideoCategories::new(
+                video.id.clone(),
+                vec![chess.id.clone(), funny.id.clone()],
+            )])
+            .unwrap();
+        let video_category_assigner = VideoCategoryAssigner::new(
+            Arc::new(SqliteVideoRepository::new(db.database())),
+            verdict_repository.clone(),
+            video_categories_repository.clone(),
+            repository.clone(),
+            Arc::new(SqliteChannelVideoRepository::new(db.database())),
+            Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+            Arc::new(SqliteEventPublisher::new(
+                db.database(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
+            Arc::new(CategoryLock::default()),
+        );
+        let category_deleter = CategoryDeleter::new(
+            repository,
+            verdict_repository.clone(),
+            video_category_assigner,
+        );
+
+        let response = delete(category_deleter, funny.id.as_str()).await;
+
+        assert_eq!(response, Ok(StatusCode::NO_CONTENT));
+        assert_eq!(
+            verdict_repository
+                .find_many(std::slice::from_ref(&video.id))
+                .unwrap(),
+            vec![chess_yes]
+        );
+        assert_eq!(
+            video_categories_repository
+                .find_many(std::slice::from_ref(&video.id))
+                .unwrap(),
+            vec![VideoCategories::new(
+                video.id.clone(),
+                vec![chess.id.clone()]
+            )]
+        );
+    }
+
+    #[tokio::test]
     async fn it_should_fail_to_delete_a_missing_category() {
         let db = TestDatabase::new();
         let category_deleter = CategoryDeleter::new(
             Arc::new(SqliteCategoryRepository::new(db.database())),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
             video_category_assigner(db.database()),
         );
 
@@ -1753,6 +2047,7 @@ mod tests {
             channel_repository,
             playlist_repository,
             video_category_assigner(db.database()),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = set_members(
@@ -1793,6 +2088,7 @@ mod tests {
             channel_repository,
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner(db.database()),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = set_members(
@@ -1827,6 +2123,7 @@ mod tests {
             channel_repository,
             playlist_repository,
             video_category_assigner(db.database()),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = set_members(
@@ -1864,6 +2161,7 @@ mod tests {
             channel_repository,
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner(db.database()),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = set_members(
@@ -1910,6 +2208,8 @@ mod tests {
         let chess = category(None, "Chess");
         repository.insert(&chess).unwrap();
         let video_category_assigner = VideoCategoryAssigner::new(
+            Arc::new(SqliteVideoRepository::new(db.database())),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
             video_categories_repository.clone(),
             repository.clone(),
             Arc::new(SqliteChannelVideoRepository::new(db.database())),
@@ -1925,6 +2225,7 @@ mod tests {
             channel_repository,
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner,
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = set_members(
@@ -1979,6 +2280,8 @@ mod tests {
             )])
             .unwrap();
         let video_category_assigner = VideoCategoryAssigner::new(
+            Arc::new(SqliteVideoRepository::new(db.database())),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
             video_categories_repository.clone(),
             repository.clone(),
             Arc::new(SqliteChannelVideoRepository::new(db.database())),
@@ -1994,6 +2297,7 @@ mod tests {
             channel_repository,
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner,
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = set_members(
@@ -2013,6 +2317,84 @@ mod tests {
         assert_eq!(
             event_repository.list_eligible().unwrap(),
             vec![categories_changed_event(1, &[&video])]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_keep_yes_verdict_categories_when_a_source_leaves_a_category() {
+        let db = TestDatabase::new();
+        let repository = Arc::new(SqliteCategoryRepository::new(db.database()));
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        let video_repository = SqliteVideoRepository::new(db.database());
+        let verdict_repository = Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database()));
+        let video_categories_repository =
+            Arc::new(SqliteVideoCategoriesRepository::new(db.database()));
+        let event_repository = SqliteEventRepository::new(db.database());
+        channel_repository.insert(&channel("@GothamChess")).unwrap();
+        let (kept, dropped) = (downloaded_video("vid1"), downloaded_video("vid2"));
+        [&kept, &dropped].into_iter().for_each(|video| {
+            save_channel_video(
+                &video_repository,
+                &SqliteChannelVideoRepository::new(db.database()),
+                "@GothamChess",
+                video,
+            )
+        });
+        let chess = Category {
+            members: vec![channel_member("@GothamChess")],
+            ..category(None, "Chess")
+        };
+        repository.insert(&chess).unwrap();
+        verdict_repository
+            .save(&yes_verdict(&kept, &chess))
+            .unwrap();
+        video_categories_repository
+            .save_many(&[
+                VideoCategories::new(kept.id.clone(), vec![chess.id.clone()]),
+                VideoCategories::new(dropped.id.clone(), vec![chess.id.clone()]),
+            ])
+            .unwrap();
+        let video_category_assigner = VideoCategoryAssigner::new(
+            Arc::new(SqliteVideoRepository::new(db.database())),
+            verdict_repository,
+            video_categories_repository.clone(),
+            repository.clone(),
+            Arc::new(SqliteChannelVideoRepository::new(db.database())),
+            Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+            Arc::new(SqliteEventPublisher::new(
+                db.database(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
+            Arc::new(CategoryLock::default()),
+        );
+        let category_updater = CategoryUpdater::new(
+            repository,
+            channel_repository,
+            Arc::new(SqlitePlaylistRepository::new(db.database())),
+            video_category_assigner,
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
+        );
+
+        let response = set_members(
+            category_updater,
+            chess.id.as_str(),
+            members_request(&[], &[]),
+        )
+        .await;
+
+        assert_eq!(response, Ok(StatusCode::NO_CONTENT));
+        assert_eq!(
+            video_categories_repository
+                .find_many(&[kept.id.clone(), dropped.id.clone()])
+                .unwrap(),
+            vec![
+                VideoCategories::new(kept.id.clone(), vec![chess.id.clone()]),
+                VideoCategories::none(dropped.id.clone()),
+            ]
+        );
+        assert_eq!(
+            event_repository.list_eligible().unwrap(),
+            vec![categories_changed_event(1, &[&dropped])]
         );
     }
 
@@ -2050,6 +2432,8 @@ mod tests {
             )])
             .unwrap();
         let video_category_assigner = VideoCategoryAssigner::new(
+            Arc::new(SqliteVideoRepository::new(db.database())),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
             video_categories_repository.clone(),
             repository.clone(),
             Arc::new(SqliteChannelVideoRepository::new(db.database())),
@@ -2065,6 +2449,7 @@ mod tests {
             channel_repository,
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner,
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = set_members(
@@ -2118,6 +2503,8 @@ mod tests {
         let chess = category(None, "Chess");
         repository.insert(&chess).unwrap();
         let video_category_assigner = VideoCategoryAssigner::new(
+            Arc::new(SqliteVideoRepository::new(db.database())),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
             video_categories_repository.clone(),
             repository.clone(),
             Arc::new(SqliteChannelVideoRepository::new(db.database())),
@@ -2133,6 +2520,9 @@ mod tests {
             channel_repository,
             playlist_repository,
             video_category_assigner,
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(
+                unused_connection(),
+            )),
         );
 
         let response = set_members(
@@ -2182,6 +2572,8 @@ mod tests {
             )])
             .unwrap();
         let video_category_assigner = VideoCategoryAssigner::new(
+            Arc::new(SqliteVideoRepository::new(db.database())),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
             video_categories_repository.clone(),
             repository.clone(),
             Arc::new(SqliteChannelVideoRepository::new(db.database())),
@@ -2197,6 +2589,7 @@ mod tests {
             channel_repository,
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner,
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = set_members(
@@ -2248,6 +2641,8 @@ mod tests {
             )])
             .unwrap();
         let video_category_assigner = VideoCategoryAssigner::new(
+            Arc::new(SqliteVideoRepository::new(db.database())),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
             video_categories_repository.clone(),
             repository.clone(),
             Arc::new(SqliteChannelVideoRepository::new(db.database())),
@@ -2263,6 +2658,7 @@ mod tests {
             channel_repository,
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner,
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = set_members(
@@ -2301,6 +2697,7 @@ mod tests {
             channel_repository,
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner(db.database()),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = set_members(
@@ -2342,6 +2739,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.database())),
             Arc::new(SqlitePlaylistRepository::new(db.database())),
             video_category_assigner(db.database()),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database())),
         );
 
         let response = set_members(category_updater, "missing", members_request(&[], &[])).await;
@@ -2453,6 +2851,171 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn it_should_rerun_a_categorys_ai_verdicts() {
+        let db = TestDatabase::new();
+        SqliteChannelRepository::new(db.database())
+            .insert(&channel("@chess"))
+            .unwrap();
+        let [first, second, unjudged] = ["vid1", "vid2", "vid3"].map(downloaded_video);
+        [&first, &second, &unjudged].into_iter().for_each(|video| {
+            save_channel_video(
+                &SqliteVideoRepository::new(db.database()),
+                &SqliteChannelVideoRepository::new(db.database()),
+                "@chess",
+                video,
+            )
+        });
+        let repository = SqliteCategoryRepository::new(db.database());
+        let food = category(None, "Food for thought");
+        let tech = category(None, "Tech");
+        [&food, &tech]
+            .into_iter()
+            .for_each(|category| repository.insert(category).unwrap());
+        let verdict_repository = SqliteVideoCategoryVerdictRepository::new(db.database());
+        let kept = [
+            yes_verdict(&first, &tech),
+            VideoCategoryVerdict::by_user(
+                second.id.clone(),
+                tech.id.clone(),
+                false,
+                fixed_timestamp(),
+            ),
+        ];
+        [
+            yes_verdict(&first, &food),
+            unavailable_verdict(&second, &food),
+        ]
+        .iter()
+        .chain(&kept)
+        .for_each(|verdict| verdict_repository.save(verdict).unwrap());
+        let video_categories_repository = SqliteVideoCategoriesRepository::new(db.database());
+        video_categories_repository
+            .save_many(&[VideoCategories::new(
+                first.id.clone(),
+                vec![food.id.clone(), tech.id.clone()],
+            )])
+            .unwrap();
+        let ids = [first.id.clone(), second.id.clone(), unjudged.id.clone()];
+
+        let response = delete_category_ai_verdicts(
+            State(video_category_editor(db.database())),
+            Path(food.id.as_str().to_string()),
+        )
+        .await;
+
+        assert_eq!(response, Ok(StatusCode::NO_CONTENT));
+        let mut expected_verdicts = kept.to_vec();
+        expected_verdicts.sort_by(|a, b| {
+            (a.video_id.as_str(), a.category_id.as_str())
+                .cmp(&(b.video_id.as_str(), b.category_id.as_str()))
+        });
+        assert_eq!(
+            verdict_repository.find_many(&ids).unwrap(),
+            expected_verdicts
+        );
+        assert_eq!(
+            video_categories_repository.find_many(&ids).unwrap(),
+            vec![
+                VideoCategories::new(first.id.clone(), vec![tech.id.clone()]),
+                VideoCategories::none(second.id.clone()),
+                VideoCategories::none(unjudged.id.clone()),
+            ]
+        );
+        assert_eq!(
+            SqliteEventRepository::new(db.database())
+                .list_eligible()
+                .unwrap(),
+            vec![categories_changed_event(1, &[&first])]
+        );
+        let mut synced = [&first, &second];
+        synced.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+        assert_eq!(
+            SqliteTaskRepository::new(db.database(), Arc::new(FixedClock(fixed_timestamp())))
+                .list_non_completed()
+                .unwrap(),
+            synced
+                .iter()
+                .zip(1..)
+                .map(|(video, id)| sync_video_task(id, video))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_return_not_found_when_rerunning_an_unknown_category() {
+        let db = TestDatabase::new();
+
+        let response = delete_category_ai_verdicts(
+            State(video_category_editor(db.database())),
+            Path("unknown".to_string()),
+        )
+        .await;
+
+        assert_eq!(
+            response,
+            Err(ApiError::new(StatusCode::NOT_FOUND, "category not found"))
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_count_ai_verdicts_per_category() {
+        let db = TestDatabase::new();
+        let repository = Arc::new(SqliteCategoryRepository::new(db.database()));
+        let funny = category(None, "Funny");
+        let sicilian = category(None, "Sicilian");
+        [&funny, &sicilian]
+            .into_iter()
+            .for_each(|category| repository.insert(category).unwrap());
+        let [first, second, third] = ["vid1", "vid2", "vid3"].map(pending_video);
+        let video_repository = SqliteVideoRepository::new(db.database());
+        [&first, &second, &third]
+            .into_iter()
+            .for_each(|video| video_repository.save(video).unwrap());
+        let verdict_repository = Arc::new(SqliteVideoCategoryVerdictRepository::new(db.database()));
+        [
+            yes_verdict(&first, &sicilian),
+            unavailable_verdict(&second, &sicilian),
+            VideoCategoryVerdict::by_user(
+                third.id.clone(),
+                sicilian.id.clone(),
+                true,
+                fixed_timestamp(),
+            ),
+            VideoCategoryVerdict::by_user(
+                first.id.clone(),
+                funny.id.clone(),
+                false,
+                fixed_timestamp(),
+            ),
+        ]
+        .iter()
+        .for_each(|verdict| verdict_repository.save(verdict).unwrap());
+        let category_view_searcher = CategoryViewSearcher::new(
+            repository,
+            Arc::new(SqliteChannelRepository::new(db.database())),
+            Arc::new(SqlitePlaylistRepository::new(db.database())),
+            category_video_collector(&db),
+            verdict_repository,
+        );
+
+        let response = list(category_view_searcher).await;
+
+        assert_eq!(
+            response,
+            Ok(CategoryListResponse {
+                categories: vec![
+                    list_item(&funny, 0, &[], &[]),
+                    CategoryListItemResponse {
+                        ai_verdict_count: 2,
+                        ..list_item(&sicilian, 0, &[], &[])
+                    },
+                ],
+                unwatched_total: 0,
+            })
+        );
+    }
+
     fn any_category_creator() -> CategoryCreator {
         CategoryCreator::new(
             Arc::new(SqliteCategoryRepository::new(unused_connection())),
@@ -2482,6 +3045,9 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(unused_connection())),
             Arc::new(SqlitePlaylistRepository::new(unused_connection())),
             video_category_assigner(unused_connection()),
+            Arc::new(SqliteVideoCategoryVerdictRepository::new(
+                unused_connection(),
+            )),
         )
     }
 
@@ -2550,6 +3116,7 @@ mod tests {
             color: category.color.as_str().to_string(),
             ai_prompt: None,
             unwatched_count,
+            ai_verdict_count: 0,
             channels: channels.iter().map(|c| c.to_string()).collect(),
             playlists: playlists.iter().map(|p| p.to_string()).collect(),
         }
@@ -2774,17 +3341,49 @@ mod tests {
             .map(|(status, Json(category))| (status, category))
     }
 
-    fn video_category_assigner(database: Database) -> VideoCategoryAssigner {
-        VideoCategoryAssigner::new(
-            Arc::new(SqliteVideoCategoriesRepository::new(database.clone())),
-            Arc::new(SqliteCategoryRepository::new(database.clone())),
-            Arc::new(SqliteChannelVideoRepository::new(database.clone())),
-            Arc::new(SqlitePlaylistVideoRepository::new(database.clone())),
-            Arc::new(SqliteEventPublisher::new(
-                database,
-                Arc::new(FixedClock(fixed_timestamp())),
-            )),
-            Arc::new(CategoryLock::default()),
-        )
+    fn yes_verdict(video: &Video, category: &Category) -> VideoCategoryVerdict {
+        VideoCategoryVerdict {
+            video_id: video.id.clone(),
+            category_id: category.id.clone(),
+            verdict: Verdict::Yes,
+            decided_by: VerdictAuthor::Ai,
+            model: Some("qwen3:4b".to_string()),
+            reason: Some("It fits.".to_string()),
+            decided_at: fixed_timestamp(),
+        }
+    }
+
+    fn prompt_request(ai_prompt: &str) -> UpdateCategoryRequest {
+        UpdateCategoryRequest {
+            name: None,
+            color: None,
+            ai_prompt: Some(ai_prompt.to_string()),
+        }
+    }
+
+    fn unavailable_verdict(video: &Video, category: &Category) -> VideoCategoryVerdict {
+        VideoCategoryVerdict {
+            verdict: Verdict::Unavailable,
+            reason: None,
+            ..yes_verdict(video, category)
+        }
+    }
+
+    /// The pending `sync_video` row of `video`, `id`th scheduled.
+    fn sync_video_task(id: i64, video: &Video) -> ScheduledTask {
+        let task = Task::SyncVideo {
+            video_id: video.id.as_str().to_string(),
+        };
+        ScheduledTask {
+            id,
+            task_type: task.task_type().to_string(),
+            payload: task.payload().to_string(),
+            status: TaskStatus::Pending,
+            retries: 0,
+            run_at: fixed_timestamp(),
+            created_at: fixed_timestamp(),
+            updated_at: fixed_timestamp(),
+            last_error: None,
+        }
     }
 }

@@ -6,6 +6,7 @@ use crate::domain::services::{VideoCategoryAssigner, VideoCategoryAssignerApi};
 use crate::infrastructure::repositories::sqlite_category_repository::CategoryRepository;
 use crate::infrastructure::repositories::sqlite_channel_repository::ChannelRepository;
 use crate::infrastructure::repositories::sqlite_playlist_repository::PlaylistRepository;
+use crate::infrastructure::repositories::sqlite_video_category_verdict_repository::VideoCategoryVerdictRepository;
 use std::sync::Arc;
 
 /// The fields of a category to change; absent ones are kept.
@@ -24,6 +25,7 @@ pub struct CategoryUpdater {
     channel_repository: Arc<dyn ChannelRepository>,
     playlist_repository: Arc<dyn PlaylistRepository>,
     video_category_assigner: VideoCategoryAssigner,
+    video_category_verdict_repository: Arc<dyn VideoCategoryVerdictRepository>,
 }
 
 impl CategoryUpdater {
@@ -32,12 +34,14 @@ impl CategoryUpdater {
         channel_repository: Arc<dyn ChannelRepository>,
         playlist_repository: Arc<dyn PlaylistRepository>,
         video_category_assigner: VideoCategoryAssigner,
+        video_category_verdict_repository: Arc<dyn VideoCategoryVerdictRepository>,
     ) -> Self {
         Self {
             repository,
             channel_repository,
             playlist_repository,
             video_category_assigner,
+            video_category_verdict_repository,
         }
     }
 }
@@ -45,7 +49,8 @@ impl CategoryUpdater {
 pub trait CategoryUpdaterApi: Send + Sync {
     /// Applies the present fields of `update` in one save. Another category
     /// with the same name ignoring case → `NameTaken`. A rename is announced
-    /// for every video in the category; a recolor is not.
+    /// for every video in the category; a recolor is not. A changed AI prompt also deletes the
+    /// category's unavailable verdicts, so those videos are asked again.
     fn update(&self, id: &CategoryId, update: CategoryUpdate) -> Result<(), UpdateCategoryError>;
     /// Replaces the members, then recomputes the categories of every video of
     /// a former or new member. Every member must be a tracked
@@ -64,7 +69,11 @@ impl CategoryUpdaterApi for CategoryUpdater {
             self.ensure_name_free(id, name)?;
         }
         let renamed = update.name.is_some();
+        let reprompted = Self::changes_prompt(&category, &update);
         self.save(&Self::applied(category, update))?;
+        if reprompted {
+            self.reset_unavailable_verdicts(id)?;
+        }
         if renamed {
             self.video_category_assigner
                 .announce_renamed(id)
@@ -166,6 +175,25 @@ impl CategoryUpdater {
             .map_err(UpdateCategoryError::Repository)?;
         self.video_category_assigner
             .reassign_category(id, previous_members, &categories)
+            .map_err(UpdateCategoryError::Repository)
+    }
+
+    /// Whether `update` gives `category` a different AI prompt.
+    fn changes_prompt(category: &Category, update: &CategoryUpdate) -> bool {
+        update
+            .ai_prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt != &category.ai_prompt)
+    }
+
+    /// A new prompt may get answers the old one couldn't: the category's
+    /// unavailable verdicts go, so it is pending again for their videos.
+    /// Under the lock, so a running categorization giving up either sees the
+    /// new prompt or has its unavailable verdicts deleted here.
+    fn reset_unavailable_verdicts(&self, id: &CategoryId) -> Result<(), UpdateCategoryError> {
+        let _guard = self.video_category_assigner.lock();
+        self.video_category_verdict_repository
+            .delete_unavailable_for_category(id)
             .map_err(UpdateCategoryError::Repository)
     }
 
