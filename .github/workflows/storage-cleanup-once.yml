@@ -1,0 +1,68 @@
+name: One-time Actions storage cleanup
+on:
+  push:
+    branches: [maintenance/actions-storage-cleanup-20261111]
+    paths: [.github/workflows/storage-cleanup-once.yml]
+permissions:
+  contents: read
+  actions: write
+concurrency:
+  group: actions-storage-cleanup
+  cancel-in-progress: false
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLEANUP_MODE: docker-records
+      APPLY_CLEANUP: "false"
+    steps:
+      - name: Preview or clean obsolete artifacts
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const mode = process.env.CLEANUP_MODE;
+            const apply = process.env.APPLY_CLEANUP === 'true';
+            if (!['packages', 'docker-records'].includes(mode)) throw new Error('Unexpected cleanup mode');
+            const all = await github.paginate(github.rest.actions.listArtifactsForRepo, {owner, repo, per_page: 100});
+            const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {owner, repo, status: 'completed', per_page: 100});
+            const completed = new Set(runs.map(r => r.id));
+            const successful = new Set(runs.filter(r => r.conclusion === 'success').map(r => r.id));
+            const active = all.filter(a => !a.expired);
+            const names = ['windows-package', 'macos-package'];
+            const allowed = a => mode === 'packages' ? names.includes(a.name) : a.name.endsWith('.dockerbuild');
+            const eligible = active.filter(a => allowed(a) && completed.has(a.workflow_run?.id));
+            const keep = new Set();
+            if (mode === 'packages') {
+              for (const name of names) {
+                const newest = eligible.filter(a => a.name === name && successful.has(a.workflow_run?.id))
+                  .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id)[0];
+                if (!newest) throw new Error('No successful package to preserve for ' + name);
+                keep.add(newest.id);
+              }
+            }
+            const candidates = eligible.filter(a => !keep.has(a.id));
+            const bytes = xs => xs.reduce((n, a) => n + a.size_in_bytes, 0);
+            const report = {
+              repository: owner + '/' + repo, apply,
+              current_artifact_count: active.length, current_bytes: bytes(active),
+              delete_count: candidates.length, reclaimable_bytes: bytes(candidates),
+              retained: eligible.filter(a => keep.has(a.id)).map(a => ({id:a.id, name:a.name, size_in_bytes:a.size_in_bytes, created_at:a.created_at, run_id:a.workflow_run.id})),
+            };
+            core.info(JSON.stringify(report));
+            await core.summary.addHeading(apply ? 'Artifact cleanup' : 'Artifact cleanup preview')
+              .addCodeBlock(JSON.stringify(report, null, 2), 'json').write();
+            if (apply) {
+              for (const artifact of candidates) {
+                await github.rest.actions.deleteArtifact({owner, repo, artifact_id: artifact.id});
+              }
+              const after = (await github.paginate(github.rest.actions.listArtifactsForRepo, {owner, repo, per_page: 100})).filter(a => !a.expired);
+              const stillPresent = new Set(after.map(a => a.id));
+              if (candidates.some(a => stillPresent.has(a.id))) throw new Error('Some selected artifacts are still present');
+              if ([...keep].some(id => !stillPresent.has(id))) throw new Error('A preserved package is missing');
+              const result = {deleted_count:candidates.length, reclaimed_bytes:bytes(candidates), remaining_artifact_count:after.length, remaining_bytes:bytes(after)};
+              core.info(JSON.stringify(result));
+              await core.summary.addHeading('Verified result').addCodeBlock(JSON.stringify(result, null, 2), 'json').write();
+            }
+            
