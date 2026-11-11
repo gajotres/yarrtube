@@ -27,6 +27,8 @@ permissions:
   packages: write
 
 env:
+  # Registry images and the one-day digest artifacts remain available.
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 

@@ -14,6 +14,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Keep build summaries, but do not store optional Docker build-record artifacts.
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
 
 jobs:
   openspec-archived:
